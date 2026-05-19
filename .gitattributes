@@ -1,0 +1,24 @@
+# Normalize all text files to LF line endings in the repo.
+# Windows working trees can use whatever (autocrlf=input is fine), but the
+# repo content is always LF. This prevents the "every line is changed"
+# diffs that happen when CRLF and LF working trees disagree.
+
+* text=auto eol=lf
+
+# Explicit overrides for files that genuinely need CRLF on Windows
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary files — never touch line endings
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.tar   binary
+*.whl   binary
+*.parquet binary
