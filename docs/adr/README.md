@@ -82,6 +82,7 @@ both positive and negative consequences honestly.
 | [0014](0014-reference-data-scope.md) | Reference data: scope, bundle structure, and standardization via informational foreign keys | Accepted (revised) |
 | [0015](0015-integrated-table-naming.md) | Integrated catalog table naming (Kimball suffixes for derived analytical content; reference tables unsuffixed) | Accepted |
 | [0016](0016-ci-enforcement-policy.md) | CI enforcement policy (hybrid — controlled-vocabulary membership and dataset_catalog row presence enforced; everything else documented-only) | Accepted |
+| [0017](0017-bootstrap-lessons.md) | Bootstrap lessons: friction we hit getting the platform live | Accepted |
 
 ## Future ADRs (backlog)
 
