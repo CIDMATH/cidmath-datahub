@@ -19,7 +19,8 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write  # for posting lint-style warnings as PR comments
+  pull-requests: write   # for posting lint-style warnings as PR comments
+  id-token: write        # required for OIDC federation to Databricks
 
 jobs:
   lint-and-test:
@@ -56,6 +57,11 @@ jobs:
   bundle-validate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Use the dev environment so `DATABRICKS_CLIENT_ID` (the dev SP's
+    # application_id, scoped to the dev environment) is available. Validate
+    # only resolves bundle config against the dev workspace — it doesn't
+    # modify anything.
+    environment: dev
     strategy:
       matrix:
         bundle: [_platform]
@@ -84,9 +90,13 @@ jobs:
         working-directory: bundles/${{ matrix.bundle }}
         run: databricks bundle validate --target dev
         env:
+          # OIDC auth via GitHub workload identity federation (see ADR 0012).
+          # Same SP and federation policy used for deploys — validate is
+          # read-only and just resolves variable references against the
+          # workspace metadata.
+          DATABRICKS_AUTH_TYPE: github-oidc
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-          # OIDC: no client secrets needed; the action authenticates via the
-          # federated identity claim.
+          DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
 
   convention-checks:
     # The four CI-enforced rules from ADR 0016:
