@@ -12,15 +12,22 @@ name: deploy-platform
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+    tags:
+      - "v*"
+    # Note: GitHub Actions applies `paths` filters to both branch and tag pushes
+    # under a single `push:` event. For a tag push, the tagged commit's changed
+    # files are checked. For our scaffold this is fine: tag pushes are
+    # deliberate releases, and any tagged commit will almost always include
+    # changes to the paths below. If we ever want to tag a release that only
+    # changes unrelated files, remove the paths filter.
     paths:
       - "bundles/_platform/**"
       - "src/cidmath_datahub/**"
       - "databricks-common.yml"
       - "pyproject.toml"
-  push:
-    tags:
-      - "v*"
+      - ".github/workflows/deploy-platform.yml"
 
 permissions:
   id-token: write   # required for OIDC federation to Databricks
