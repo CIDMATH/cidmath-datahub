@@ -1,0 +1,109 @@
+# Deploy the _platform bundle.
+#
+# Triggered by:
+#   - Merge to main: deploys to dev (via ecdh-deploy-dev SP)
+#   - Tag push (v*): deploys to prod, gated by GitHub Environment approval
+#     (via ecdh-deploy-prod SP)
+#
+# Path-filtered: only fires on changes to bundles/_platform/** or to
+# src/cidmath_datahub/** (since the platform consumes the shared wheel).
+
+name: deploy-platform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bundles/_platform/**"
+      - "src/cidmath_datahub/**"
+      - "databricks-common.yml"
+      - "pyproject.toml"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write   # required for OIDC federation to Databricks
+  contents: read
+
+jobs:
+  deploy-dev:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build wheel
+        run: python -m build --wheel --outdir dist
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Deploy _platform to dev
+        working-directory: bundles/_platform
+        run: |
+          databricks bundle deploy --target dev
+          # Run the ops setup job to ensure tables exist
+          databricks bundle run --target dev setup_ops_tables
+        env:
+          # OIDC auth via GitHub workload identity federation.
+          # No client secret needed; the CLI exchanges the GitHub-issued
+          # OIDC token for a Databricks OAuth token using the SP's federation
+          # policy (subject claim: repo:CIDMATH/cidmath-datahub:environment:dev).
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+          # ^ The SP's application_id (UUID). Set as a GitHub Environment
+          #   variable on the `dev` environment so it differs per env.
+
+  deploy-prod:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: prod  # GitHub Environment with required_reviewers set
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build wheel
+        run: python -m build --wheel --outdir dist
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Deploy _platform to prod
+        working-directory: bundles/_platform
+        run: |
+          databricks bundle deploy --target prod
+          databricks bundle run --target prod setup_ops_tables
+        env:
+          # OIDC auth via GitHub workload identity federation.
+          # Subject claim: repo:CIDMATH/cidmath-datahub:environment:prod
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+          # ^ The prod SP's application_id (UUID). Set as a GitHub Environment
+          #   variable on the `prod` environment.

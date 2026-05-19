@@ -1,0 +1,170 @@
+# Operations
+
+This document covers the prerequisites that must be completed once during initial workspace setup (by an account admin), the routine deploy procedures, and emergency procedures.
+
+If you're a contributor looking to make your first commit, see `onboarding.md` instead.
+
+## One-time prerequisites (account admin)
+
+These operations require Databricks account admin or metastore admin privileges and are done **once per environment** before the `_platform` bundle can deploy.
+
+### 1. Catalogs
+
+Create four Unity Catalog catalogs, each with a managed storage location in S3:
+
+| Catalog | Purpose | Storage root example |
+|---|---|---|
+| `ecdh_dev` | Source-aligned dev | `s3://emory-cidmath-databricks/unity-catalog/<metastore-id>/ecdh_dev` |
+| `ecdh_prod` | Source-aligned prod | `s3://emory-cidmath-databricks/unity-catalog/<metastore-id>/ecdh_prod` |
+| `ecdh_model_dev` | Integrated dev | `s3://emory-cidmath-databricks/unity-catalog/<metastore-id>/ecdh_model_dev` |
+| `ecdh_model_prod` | Integrated prod | `s3://emory-cidmath-databricks/unity-catalog/<metastore-id>/ecdh_model_prod` |
+
+Use Databricks UI or `databricks catalogs create`. Tag each catalog with `project=cidmath-datahub`, `env=<env>`.
+
+### 2. Workspace group
+
+Create the workspace group `ecdh-data-engineers` and add Connor and any other engineers to it.
+
+```bash
+databricks groups create --display-name ecdh-data-engineers
+databricks groups add-member <group-id> --user-name <user@emory.edu>
+```
+
+### 3. Service principals
+
+Create two service principals at the account level:
+
+```
+ecdh-deploy-dev
+ecdh-deploy-prod
+```
+
+Grant each its environment-scoped permissions:
+
+| SP | Permissions |
+|---|---|
+| `ecdh-deploy-dev` | `WORKSPACE_ACCESS` to the workspace, `USE_CATALOG` + `CREATE_SCHEMA` + `CREATE_TABLE` on `ecdh_dev` and `ecdh_model_dev`, `MODIFY` on `ecdh_dev._ops.*` and `ecdh_model_dev._ops.*` (once schemas exist). Member of `ecdh-data-engineers` group. |
+| `ecdh-deploy-prod` | Same shape, scoped to `ecdh_prod` and `ecdh_model_prod`. |
+
+### 4. GitHub OIDC federation
+
+Configure the Databricks account to trust GitHub OIDC tokens for these SPs. Use the helper script at `scripts/setup/create_federation_policies.sh` which wraps the Databricks CLI:
+
+```bash
+bash scripts/setup/create_federation_policies.sh dev  <DEV-SP-NUMERIC-ID>
+bash scripts/setup/create_federation_policies.sh prod <PROD-SP-NUMERIC-ID>
+```
+
+The numeric IDs come from the output of `create_service_principals.py` in step 3. The script creates one federation policy per SP with:
+
+- **Issuer:** `https://token.actions.githubusercontent.com`
+- **Audiences:** `[020f2275-adfe-44a9-99fa-e65e9369cea9]` (the Databricks account ID)
+- **Subject:** `repo:CIDMATH/cidmath-datahub:environment:dev` (or `:prod` for the prod SP)
+
+This means: GitHub Actions can only obtain tokens for these SPs when the workflow runs in the matching repository AND the matching environment. The `prod` environment has `required_reviewers` set, which gates prod deploys behind human approval.
+
+Reference: https://docs.databricks.com/aws/en/dev-tools/auth/provider-github
+
+### 5. Secret scopes
+
+Create Databricks-backed secret scopes for the Teams incoming webhook:
+
+```bash
+databricks secrets create-scope ecdh-dev-teams-webhook
+databricks secrets create-scope ecdh-prod-teams-webhook
+
+# Add the Teams webhook URL as the `data_hub` key in each scope
+databricks secrets put-secret ecdh-dev-teams-webhook data_hub
+databricks secrets put-secret ecdh-prod-teams-webhook data_hub
+```
+
+The webhook URL itself comes from the Teams channel's "Workflows" or "Incoming Webhook" connector. See `docs/runbooks/configure-teams-webhook.md` (TBD).
+
+### 6. GitHub repository configuration
+
+In the `CIDMATH/cidmath-datahub` GitHub repository settings:
+
+1. Create environments `dev` and `prod`.
+2. On `prod`, add `required_reviewers` (Connor at minimum; expand as the team grows).
+3. Add repository variable `DATABRICKS_HOST` with the workspace URL.
+4. Configure branch protection on `main`:
+   - Require 1 approving review
+   - Require status checks to pass (the `lint-and-test`, `bundle-validate`, and `convention-checks` jobs)
+   - Require branches to be up to date before merge
+   - Require linear history
+   - Disable force-push and branch deletion
+
+## Routine operations
+
+### Deploying
+
+| Target | Trigger | Approval | SP used |
+|---|---|---|---|
+| Personal dev | `databricks bundle deploy --target dev` from your laptop | None | Your NetID |
+| Shared dev | Merge to `main` | PR review | `ecdh-deploy-dev` |
+| Prod | Push tag matching `v*` | GitHub Environment reviewer | `ecdh-deploy-prod` |
+
+Deploy order matters: `_platform` deploys first; `_reference` next; subject bundles last. CI workflow dependencies enforce this.
+
+### Deploying a domain bundle
+
+```bash
+cd bundles/<subject>
+databricks bundle validate --target dev
+databricks bundle deploy --target dev
+```
+
+In CI, deploys happen automatically via `.github/workflows/deploy-domain.yml` on path-filtered changes to `bundles/<subject>/**` or `src/cidmath_datahub/**`.
+
+### Triggering a pipeline manually
+
+```bash
+cd bundles/<subject>
+databricks bundle run --target dev <pipeline_name>
+```
+
+### Pausing a pipeline
+
+If a pipeline needs to be temporarily silenced (upstream outage, planned maintenance):
+
+```bash
+# Pause schedule
+databricks pipelines update --pipeline-id <id> --paused
+
+# Resume
+databricks pipelines update --pipeline-id <id> --no-paused
+```
+
+Set `freshness_check_paused = true` on the corresponding `_ops.dataset_engineering` row to silence freshness alerts during the pause.
+
+### Reading the alerting dashboards
+
+Three Databricks SQL dashboards under the `_platform` SQL workspace:
+
+- **Pipeline health** — per-bundle run status, last 7 days
+- **Data quality trends** — per-table DQ severity counts, last 30 days
+- **Cost and capacity** — DBU consumption per bundle, last 30 days
+
+## Emergency procedures
+
+### Rolling back a prod deploy
+
+Tag a previous known-good commit with a higher version tag and let the deploy workflow run:
+
+```bash
+git tag v1.2.4-rollback <previous-good-sha>
+git push origin v1.2.4-rollback
+```
+
+The deploy workflow will redeploy the previous code. Data tables themselves are unaffected by this — Delta time travel handles data rollback separately (see `docs/runbooks/rollback-table.md`).
+
+### Halting all deploys
+
+If a systemic issue makes any deploy unsafe (e.g., a broken `databricks-common.yml`), disable both deploy workflows in the GitHub Actions UI. Re-enable after fix is merged.
+
+### Contacts
+
+- **Owner / primary on-call:** Connor Van Meter (connor.vanmeter@emory.edu)
+- **Teams channel:** `Data Hub` in the CIDMATH Team Site
+- **Databricks account admin:** [TBD — fill in]
+- **AWS account admin:** [TBD — fill in]

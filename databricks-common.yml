@@ -1,0 +1,113 @@
+# databricks-common.yml
+#
+# Shared bundle configuration included by every bundle in this repo. Each
+# bundle's `databricks.yml` does:
+#
+#     include:
+#       - ../../databricks-common.yml
+#
+# Anything bundle-specific (resources, bundle-name suffix, additional tags)
+# goes in the bundle's own databricks.yml. Defaults that should apply across
+# every bundle live here.
+#
+# See ADR 0004 (monorepo + bundle-per-domain) for the architectural shape.
+
+bundle:
+  name: cidmath-datahub
+
+workspace:
+  host: https://dbc-926acb48-1c75.cloud.databricks.com
+
+# --- Variables ---
+# Bundle variables that every bundle inherits. Values are set per-target below.
+
+variables:
+  source_catalog:
+    description: Source-aligned catalog name (ecdh_dev / ecdh_prod).
+  model_catalog:
+    description: Integrated/modeled catalog name (ecdh_model_dev / ecdh_model_prod).
+  data_engineers_group:
+    description: Workspace group holding engineer-tier grants (ecdh-data-engineers).
+    default: ecdh-data-engineers
+  service_principal:
+    description: Deploy service principal for the current target.
+  teams_webhook_scope:
+    description: Databricks secret scope holding the Teams incoming webhook URL.
+  teams_webhook_key:
+    description: Key within the secret scope for the Teams webhook URL.
+    default: data_hub
+  email_recipient:
+    description: Primary email recipient for paging-severity alerts and digest.
+    default: connor.vanmeter@emory.edu
+  project_tag:
+    description: Value of the `project` tag applied to all resources.
+    default: cidmath-datahub
+  cost_center_tag:
+    description: Value of the `cost_center` tag (typically the grant code).
+    default: insightnet-cdc-rfa-ft-23-0069
+
+# --- Artifacts ---
+# The shared cidmath_datahub wheel. Every bundle installs this as a library
+# in its job/pipeline definitions via:
+#     libraries:
+#       - whl: ../../dist/cidmath_datahub-*.whl
+# (Or referenced via the artifact key when supported by your DAB version.)
+
+artifacts:
+  cidmath_datahub:
+    type: whl
+    build: python -m build --wheel --outdir dist
+    path: ../..
+
+# --- Targets ---
+# `dev` is the default target. Personal dev work happens via `mode: development`
+# which auto-prefixes resources with `[dev <username>]` so multiple developers
+# coexist without collision.
+#
+# CI deploys to `dev` use the ecdh-deploy-dev service principal via OIDC
+# federation (no GitHub secrets to manage; ADR 0012).
+#
+# Prod deploys are tag-triggered and gated by GitHub Environments
+# `required_reviewers`. Service principal: ecdh-deploy-prod.
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-926acb48-1c75.cloud.databricks.com
+    variables:
+      source_catalog: ecdh_dev
+      model_catalog: ecdh_model_dev
+      service_principal: ecdh-deploy-dev
+      teams_webhook_scope: ecdh-dev-teams-webhook
+    presets:
+      tags:
+        project: ${var.project_tag}
+        env: dev
+        cost_center: ${var.cost_center_tag}
+
+  prod:
+    mode: production
+    workspace:
+      host: https://dbc-926acb48-1c75.cloud.databricks.com
+    run_as:
+      service_principal_name: ${var.service_principal}
+    variables:
+      source_catalog: ecdh_prod
+      model_catalog: ecdh_model_prod
+      service_principal: ecdh-deploy-prod
+      teams_webhook_scope: ecdh-prod-teams-webhook
+    presets:
+      tags:
+        project: ${var.project_tag}
+        env: prod
+        cost_center: ${var.cost_center_tag}
+
+# --- Sync ---
+# Tell DAB to sync the shared package source alongside each bundle's own files.
+# Each bundle's databricks.yml can extend this with its own paths.
+
+sync:
+  paths:
+    - ../../src

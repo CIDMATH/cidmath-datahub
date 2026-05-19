@@ -1,0 +1,55 @@
+# Job that creates the _ops tables via SQL DDL.
+#
+# Tables created:
+#   - dataset_catalog (universal provenance metadata, ADR 0008)
+#   - dataset_engineering (engineering state, ADR 0008)
+#   - dq_results (DQ check outcomes, ADR 0009)
+#   - pipeline_runs (run history)
+#   - taxonomy_domain, taxonomy_pathogen, taxonomy_surveillance_category, etc.
+#     (controlled vocabularies for UC tag namespaces, ADR 0005)
+#   - provider_codes (operational reference, ADR 0006)
+#
+# Run once per environment after schemas exist. Subsequent runs are
+# idempotent (CREATE TABLE IF NOT EXISTS).
+
+resources:
+  jobs:
+    setup_ops_tables:
+      name: "[_platform] setup_ops_tables"
+      description: |
+        Creates _ops tables in the source-aligned and integrated catalogs.
+        Idempotent. See bundles/_platform/src/setup_ops_tables.py.
+
+      tasks:
+        - task_key: setup_source_ops
+          spark_python_task:
+            python_file: ../src/setup_ops_tables.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--scope"
+              - "source"
+          environment_key: setup_env
+
+        - task_key: setup_model_ops
+          depends_on:
+            - task_key: setup_source_ops
+          spark_python_task:
+            python_file: ../src/setup_ops_tables.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--scope"
+              - "model"
+          environment_key: setup_env
+
+      environments:
+        - environment_key: setup_env
+          spec:
+            client: "1"
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

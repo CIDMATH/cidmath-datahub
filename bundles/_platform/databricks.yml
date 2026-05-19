@@ -1,0 +1,39 @@
+# Platform bundle — owns shared infrastructure.
+#
+# Scope:
+#   - The `_ops` schema in both source-aligned and integrated catalogs.
+#   - The `_ops` tables (dataset_catalog, dataset_engineering, dq_results,
+#     pipeline_runs, taxonomy_*, provider_codes). Created by the ops setup job.
+#   - Base grants on the catalogs/schemas for the data engineers group.
+#
+# Out of scope (manual operations performed by an account admin during initial
+# setup; documented in `docs/operations.md`):
+#   - Catalog creation (`ecdh_dev`, `ecdh_prod`, `ecdh_model_dev`, `ecdh_model_prod`)
+#   - Service principal creation and OIDC federation setup
+#   - Secret scope creation (`ecdh-<env>-teams-webhook`, etc.)
+#
+# Deploy order: this bundle deploys first, before `_reference` and any subject
+# bundles. CI enforces ordering via workflow dependencies.
+#
+# See ADR 0004 (monorepo + bundle-per-domain) and ADR 0008 (catalog metadata
+# schema design) for the architectural shape.
+
+include:
+  - ../../databricks-common.yml
+
+bundle:
+  name: cidmath-datahub-platform
+
+# Bundle-specific sync: include this bundle's `src/` (the setup script) on top
+# of the shared `src/` that databricks-common.yml already includes.
+sync:
+  paths:
+    - ../../src
+    - ./src
+
+resources:
+  # See `resources/schemas.yml` for schema declarations.
+  # See `resources/ops_setup_job.yml` for the job that creates _ops tables.
+
+# Bundle resources are split across files in `resources/` for readability.
+# DAB merges all `*.yml` files under `resources/` automatically.

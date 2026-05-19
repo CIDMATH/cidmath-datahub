@@ -1,0 +1,132 @@
+# CI workflow — runs on every PR and push to main.
+#
+# Stages:
+#   1. Lint + format check (ruff)
+#   2. Unit + data tests (pytest)
+#   3. Bundle validate (databricks bundle validate) for every bundle
+#   4. Convention checks (ADR 0016 hybrid policy enforcement)
+#
+# Integration tests against the dev workspace run from deploy-platform.yml /
+# deploy-domain.yml when bundles are deployed, not from this workflow.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write  # for posting lint-style warnings as PR comments
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff format check
+        run: ruff format --check src tests
+
+      - name: Ruff lint
+        run: ruff check src tests
+
+      - name: Unit and data tests
+        run: pytest tests/unit tests/data -v --cov
+
+      - name: Coverage report (informational, not gated)
+        run: |
+          coverage report --skip-empty
+          coverage xml
+
+  bundle-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        bundle: [_platform]
+        # Add bundles to this list as they land: _reference, wastewater, vaccine, etc.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Install package (for wheel build)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build wheel
+        run: python -m build --wheel --outdir dist
+
+      - name: Validate bundle (${{ matrix.bundle }})
+        working-directory: bundles/${{ matrix.bundle }}
+        run: databricks bundle validate --target dev
+        env:
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          # OIDC: no client secrets needed; the action authenticates via the
+          # federated identity claim.
+
+  convention-checks:
+    # The four CI-enforced rules from ADR 0016:
+    #   1. update_semantics values in controlled vocabulary
+    #   2. DQ severity values in controlled vocabulary
+    #   3. UC tag values in their namespace's controlled vocabulary
+    #   4. _ops.dataset_catalog row presence for new analysis-layer tables
+    #
+    # Implementation lives in .github/workflows/ci/*.py — each is a small
+    # script that parses bundle resources and asserts the rule.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: bundle-validate
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      # Placeholder steps — implementations land alongside the first
+      # convention check we actually need to enforce. ADR 0016 lists them.
+
+      - name: Check update_semantics vocabulary
+        run: |
+          echo "TODO: implement .github/workflows/ci/check_update_semantics.py"
+
+      - name: Check DQ severity vocabulary
+        run: |
+          echo "TODO: implement .github/workflows/ci/check_dq_severity.py"
+
+      - name: Check UC tag namespace vocabularies
+        run: |
+          echo "TODO: implement .github/workflows/ci/check_tag_vocab.py"
+
+      - name: Check dataset_catalog row presence for new analysis tables
+        run: |
+          echo "TODO: implement .github/workflows/ci/check_dataset_catalog_presence.py"

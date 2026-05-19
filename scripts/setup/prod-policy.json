@@ -1,0 +1,7 @@
+{
+  "oidc_policy": {
+    "issuer": "https://token.actions.githubusercontent.com",
+    "audiences": ["020f2275-adfe-44a9-99fa-e65e9369cea9"],
+    "subject": "repo:CIDMATH/cidmath-datahub:environment:prod"
+  }
+}
