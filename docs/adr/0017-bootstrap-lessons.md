@@ -76,6 +76,8 @@ Mixing them up produces confusing errors. The `create_service_principals.py` set
 
 **Lesson.** Numeric `id` for managing the SP record (admin APIs). `application_id` UUID for the SP authenticating itself (OAuth, OIDC, GRANT). Different contexts; both needed.
 
+**A third place application_id matters: DAB's `run_as.service_principal_name` field.** Despite the field's name, it accepts the application_id (UUID), not the display name. Using the display name produces `'<name>' cannot be set as run_as service principal, because it doesn't exist.` even when the SP is correctly registered in the workspace. The `databricks-common.yml` `deploy_sp_application_id` variable is the canonical place to set this.
+
 ### 7. GitHub Actions OIDC requires three pieces working together
 
 For a workflow job to authenticate to Databricks via OIDC:

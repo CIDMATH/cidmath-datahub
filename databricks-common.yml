@@ -29,8 +29,12 @@ variables:
   data_engineers_group:
     description: Workspace group holding engineer-tier grants (ecdh-data-engineers).
     default: ecdh-data-engineers
-  service_principal:
-    description: Deploy service principal for the current target.
+  deploy_sp_application_id:
+    description: |
+      Application ID (UUID) of the deploy service principal for the current
+      target. This is the SP's OAuth client identifier and is what DAB's
+      `service_principal_name` field expects (NOT the display name — see
+      ADR 0017 for the gotcha).
   teams_webhook_scope:
     description: Databricks secret scope holding the Teams incoming webhook URL.
   teams_webhook_key:
@@ -90,7 +94,7 @@ targets:
     variables:
       source_catalog: ecdh_dev
       model_catalog: ecdh_model_dev
-      service_principal: ecdh-deploy-dev
+      deploy_sp_application_id: a55b6164-c0eb-42cf-a438-7de33c150f4a
       teams_webhook_scope: ecdh-dev-teams-webhook
     presets:
       tags:
@@ -102,12 +106,20 @@ targets:
     mode: production
     workspace:
       host: https://dbc-926acb48-1c75.cloud.databricks.com
+      # Pin the bundle's prod root path to the deploy SP's home directory so
+      # every deploy lands at the same workspace path regardless of who/what
+      # triggered it. Without this, DAB warns about non-deterministic placement.
+      root_path: /Workspace/Users/${var.deploy_sp_application_id}/.bundle/${bundle.name}/${bundle.target}
     run_as:
-      service_principal_name: ${var.service_principal}
+      # DAB's `service_principal_name` field accepts the application_id (UUID),
+      # NOT the display name. Using the display name here produces
+      # "<name> cannot be set as run_as service principal, because it doesn't
+      # exist." even when the SP is in the workspace.
+      service_principal_name: ${var.deploy_sp_application_id}
     variables:
       source_catalog: ecdh_prod
       model_catalog: ecdh_model_prod
-      service_principal: ecdh-deploy-prod
+      deploy_sp_application_id: caff7ad3-d82f-4692-98cc-678dc6807cbd
       teams_webhook_scope: ecdh-prod-teams-webhook
     presets:
       tags:
