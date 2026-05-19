@@ -17,7 +17,7 @@ def spark():
     Configured for fast test startup (small driver memory, no Hive). Tests
     share this session within a module; teardown happens at session end.
     """
-    pyspark = pytest.importorskip("pyspark")
+    pytest.importorskip("pyspark")
     from pyspark.sql import SparkSession  # noqa: WPS433
 
     session = (

@@ -17,10 +17,10 @@ Pipelines should always use these helpers rather than hardcoding strings:
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class Layer(str, Enum):
+class Layer(StrEnum):
     """Source-aligned data layers (ADR 0001)."""
 
     RAW = "raw"
