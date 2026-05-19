@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS {catalog}._ops.dataset_engineering (
     freshness_check_paused BOOLEAN DEFAULT FALSE
 )
 USING DELTA
+TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')
 COMMENT 'Engineering state per materialized table. ADR 0008.';
 """
 
@@ -111,8 +112,7 @@ CREATE TABLE IF NOT EXISTS {catalog}._ops.dq_results (
     checked_at TIMESTAMP NOT NULL
 )
 USING DELTA
-PARTITIONED BY (DATE(checked_at))
-CLUSTER BY (table_name, check_name)
+CLUSTER BY (table_name, check_name, checked_at)
 COMMENT 'DQ check execution log. ADR 0009.';
 """
 
@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS {catalog}._ops.pipeline_runs (
     error_details STRING
 )
 USING DELTA
-PARTITIONED BY (DATE(started_at))
+CLUSTER BY (pipeline_reference, started_at)
 COMMENT 'Pipeline run history. Populated by pipelines via the cidmath_datahub.common.pipeline_runs helper.';
 """
 
@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS {catalog}._ops.taxonomy_domain (
     added_at DATE NOT NULL DEFAULT CURRENT_DATE()
 )
 USING DELTA
+TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')
 COMMENT 'Controlled vocabulary for the domain:* UC tag namespace. ADR 0005.';
 """
 
@@ -157,6 +158,7 @@ CREATE TABLE IF NOT EXISTS {catalog}._ops.taxonomy_pathogen (
     added_at DATE NOT NULL DEFAULT CURRENT_DATE()
 )
 USING DELTA
+TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')
 COMMENT 'Controlled vocabulary for the pathogen:* UC tag namespace. ADR 0005.';
 """
 
@@ -169,6 +171,7 @@ CREATE TABLE IF NOT EXISTS {catalog}._ops.taxonomy_surveillance_category (
     added_at DATE NOT NULL DEFAULT CURRENT_DATE()
 )
 USING DELTA
+TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')
 COMMENT 'Controlled vocabulary for the surveillance_category:* UC tag namespace. Per Delphi EpiPortal taxonomy. ADR 0005.';
 """
 
@@ -183,6 +186,7 @@ CREATE TABLE IF NOT EXISTS {catalog}._ops.provider_codes (
     added_at DATE NOT NULL DEFAULT CURRENT_DATE()
 )
 USING DELTA
+TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')
 COMMENT 'Provider code registry. Documented-only per ADR 0006 (not CI-enforced).';
 """
 
@@ -221,9 +225,25 @@ VIEWS = [
     ("dataset_catalog_full", DATASET_CATALOG_FULL_VIEW_DDL),
 ]
 
+# --- Grants on _ops schema ---
+# Engineer-tier access to the _ops schema. Applied here rather than via a
+# DAB `grants` resource because some DAB CLI versions don't yet support the
+# grants resource type.
 
-def run(catalog: str, scope: Literal["source", "model"]) -> None:
-    """Create or update _ops tables in the given catalog.
+GRANTS_DDL = [
+    "GRANT USE SCHEMA ON SCHEMA {catalog}._ops TO `{group}`",
+    "GRANT SELECT ON SCHEMA {catalog}._ops TO `{group}`",
+    "GRANT MODIFY ON SCHEMA {catalog}._ops TO `{group}`",
+    "GRANT CREATE TABLE ON SCHEMA {catalog}._ops TO `{group}`",
+]
+
+
+def run(
+    catalog: str,
+    scope: Literal["source", "model"],
+    data_engineers_group: str,
+) -> None:
+    """Create or update _ops tables in the given catalog, then apply grants.
 
     Args:
         catalog: Catalog name (e.g., "ecdh_dev").
@@ -231,10 +251,22 @@ def run(catalog: str, scope: Literal["source", "model"]) -> None:
             tables, but reserved for future scope-specific tables (e.g., the
             model catalog may want an `entity_resolution_log` that the source
             catalog doesn't need).
+        data_engineers_group: Name of the workspace group to grant engineer-
+            tier access on `_ops` (typically `ecdh-data-engineers`).
     """
     spark = SparkSession.builder.getOrCreate()
-    log.info("Creating _ops tables", extra={"catalog": catalog, "scope": scope})
 
+    # Ensure the _ops schema exists. DAB's `schemas` resource type isn't
+    # reliably supported across CLI versions, so we create idempotently here.
+    log.info("Ensuring _ops schema exists", extra={"catalog": catalog})
+    spark.sql(
+        f"CREATE SCHEMA IF NOT EXISTS {catalog}._ops "
+        f"COMMENT 'Operational metadata: dataset catalog, engineering state, "
+        f"DQ results, taxonomy reference tables. Owned by _platform bundle. "
+        f"See docs/adr/0008-catalog-metadata-schema-design.md.'"
+    )
+
+    log.info("Creating _ops tables", extra={"catalog": catalog, "scope": scope})
     for name, ddl in UNIVERSAL_TABLES:
         full = f"{catalog}._ops.{name}"
         log.info("Creating table", extra={"table": full})
@@ -246,8 +278,20 @@ def run(catalog: str, scope: Literal["source", "model"]) -> None:
         spark.sql(ddl.format(catalog=catalog))
 
     log.info(
+        "Applying grants on _ops schema",
+        extra={"catalog": catalog, "group": data_engineers_group},
+    )
+    for stmt in GRANTS_DDL:
+        spark.sql(stmt.format(catalog=catalog, group=data_engineers_group))
+
+    log.info(
         "Completed _ops setup",
-        extra={"catalog": catalog, "scope": scope, "tables": len(UNIVERSAL_TABLES)},
+        extra={
+            "catalog": catalog,
+            "scope": scope,
+            "tables": len(UNIVERSAL_TABLES),
+            "grants": len(GRANTS_DDL),
+        },
     )
 
 
@@ -255,8 +299,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--scope", choices=["source", "model"], required=True)
+    parser.add_argument(
+        "--data-engineers-group",
+        default="ecdh-data-engineers",
+        help="Workspace group to grant engineer-tier access on _ops.",
+    )
     args = parser.parse_args()
-    run(args.catalog, args.scope)
+    run(args.catalog, args.scope, args.data_engineers_group)
 
 
 if __name__ == "__main__":

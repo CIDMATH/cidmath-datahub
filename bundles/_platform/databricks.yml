@@ -20,6 +20,7 @@
 
 include:
   - ../../databricks-common.yml
+  - resources/*.yml
 
 bundle:
   name: cidmath-datahub-platform
@@ -31,9 +32,8 @@ sync:
     - ../../src
     - ./src
 
-resources:
-  # See `resources/schemas.yml` for schema declarations.
-  # See `resources/ops_setup_job.yml` for the job that creates _ops tables.
-
-# Bundle resources are split across files in `resources/` for readability.
-# DAB merges all `*.yml` files under `resources/` automatically.
+# Bundle resources live under `resources/` and are merged in via the include
+# directive above:
+#   - resources/schemas.yml         — `_ops` schema declarations
+#   - resources/ops_setup_job.yml   — job that creates the `_ops` tables
+#   - resources/grants.yml          — base grants on `_ops` schemas

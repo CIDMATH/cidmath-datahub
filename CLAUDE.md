@@ -50,7 +50,7 @@ Initial scaffolding. The repo skeleton, `_platform` bundle, and shared Python pa
 
 ### Language and style
 
-- Python 3.11+ for all transformation logic.
+- Python 3.11+ for all transformation logic. Jobs use Databricks serverless environment v5 (Python 3.12.3); local dev should match within `>=3.11`.
 - PySpark for distributed transforms; pandas only for small in-memory work.
 - SQL via `spark.sql()` for clear set operations; complex logic in PySpark.
 - R only in dedicated R-Shiny notebooks; do not mix R into pipelines.

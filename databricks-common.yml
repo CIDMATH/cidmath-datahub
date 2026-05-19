@@ -45,6 +45,14 @@ variables:
   cost_center_tag:
     description: Value of the `cost_center` tag (typically the grant code).
     default: insightnet-cdc-rfa-ft-23-0069
+  serverless_client_version:
+    description: |
+      Databricks serverless compute environment version used by all jobs and
+      LDP pipelines in this repo. To upgrade (e.g., when v6 ships), change
+      the default here and redeploy — no edits to individual resource files
+      needed. Current default: v5 (Python 3.12.3, supported until Feb 2029).
+      See https://docs.databricks.com/aws/en/release-notes/serverless/environment-version
+    default: "5"
 
 # --- Artifacts ---
 # The shared cidmath_datahub wheel. Every bundle installs this as a library
@@ -57,7 +65,10 @@ artifacts:
   cidmath_datahub:
     type: whl
     build: python -m build --wheel --outdir dist
-    path: ../..
+    # Path is resolved relative to this file's location (databricks-common.yml
+    # at the repo root). `.` means "build the wheel from this directory" —
+    # i.e., the repo root, where pyproject.toml lives.
+    path: .
 
 # --- Targets ---
 # `dev` is the default target. Personal dev work happens via `mode: development`
@@ -105,9 +116,9 @@ targets:
         cost_center: ${var.cost_center_tag}
 
 # --- Sync ---
-# Tell DAB to sync the shared package source alongside each bundle's own files.
-# Each bundle's databricks.yml can extend this with its own paths.
-
-sync:
-  paths:
-    - ../../src
+# Paths in `include`d YAML files are resolved by DAB relative to the included
+# file's location, not the bundle's location. Putting sync.paths here with
+# `../../src` would resolve from THIS file (at the repo root) up two levels,
+# which is outside the repo entirely. So sync.paths is declared per-bundle
+# in each `bundles/<name>/databricks.yml` instead, where the relative path
+# resolves correctly. Don't add sync.paths to this file.

@@ -7,6 +7,10 @@ name = "cidmath-datahub"
 version = "0.1.0"
 description = "Shared Python package for the CIDMATH Data Hub"
 readme = "README.md"
+# Matches Databricks serverless environment version 5 (Python 3.12.3),
+# which our jobs target via `client: "5"` in their environment spec.
+# Range is `>=3.11` rather than `>=3.12` to keep some flexibility if we
+# ever need to step back to v2 (Python 3.11.10).
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
 authors = [{ name = "CIDMATH Data Team" }]

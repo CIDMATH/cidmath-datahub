@@ -29,6 +29,8 @@ resources:
               - "${var.source_catalog}"
               - "--scope"
               - "source"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
           environment_key: setup_env
 
         - task_key: setup_model_ops
@@ -41,12 +43,18 @@ resources:
               - "${var.model_catalog}"
               - "--scope"
               - "model"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
           environment_key: setup_env
 
       environments:
         - environment_key: setup_env
           spec:
-            client: "1"
+            # Serverless environment version — parameterized so all jobs/pipelines
+            # in the repo share a single source of truth. To upgrade, change the
+            # default in databricks-common.yml's `serverless_client_version`
+            # variable (do NOT hardcode a value here).
+            client: ${var.serverless_client_version}
             dependencies:
               - ../../../dist/cidmath_datahub-*.whl
 
