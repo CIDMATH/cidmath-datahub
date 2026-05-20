@@ -85,6 +85,7 @@ both positive and negative consequences honestly.
 | [0017](0017-bootstrap-lessons.md) | Bootstrap lessons: friction we hit getting the platform live | Accepted |
 | [0018](0018-access-groups-and-grant-model.md) | Access groups and the grant model (engineer / reader tiers; which bundle grants what) | Accepted |
 | [0019](0019-analyst-discovery-view.md) | Analyst-facing discovery view (curated `discovery.datasets` over `_ops` via view ownership chain) | Accepted |
+| [0020](0020-geography-reference.md) | Geography reference: IPUMS NHGIS source, vintaged snapshots + crosswalks, lean attributes + companion WKB geometry | Accepted |
 
 ## Future ADRs (backlog)
 
