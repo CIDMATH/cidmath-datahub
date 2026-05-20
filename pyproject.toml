@@ -19,7 +19,9 @@ authors = [{ name = "CIDMATH Data Team" }]
 # Databricks SDK are provided by the Databricks runtime when pipelines run on
 # the cluster. Anything we add here ends up in the wheel that ships to every
 # bundle, so we keep it lean.
-dependencies = []
+dependencies = [
+    "epiweeks>=2.3",  # CDC MMWR epidemiological week calculations (pure Python)
+]
 
 [project.optional-dependencies]
 # Local development extras. Install with `pip install -e .[dev]`.

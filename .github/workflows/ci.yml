@@ -64,8 +64,8 @@ jobs:
     environment: dev
     strategy:
       matrix:
-        bundle: [_platform]
-        # Add bundles to this list as they land: _reference, wastewater, vaccine, etc.
+        bundle: [_platform, _reference]
+        # Add bundles to this list as they land: wastewater, vaccine, etc.
 
     steps:
       - uses: actions/checkout@v4

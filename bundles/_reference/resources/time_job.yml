@@ -1,0 +1,40 @@
+# Job that builds the canonical time reference tables.
+#
+# Generates time.calendar_date and time.epi_week in the integrated catalog
+# (ecdh_model_<env>) via deterministic computation. Idempotent (full_refresh).
+#
+# See ADR 0014 (reference data scope) and bundles/_reference/src/build_time.py.
+
+resources:
+  jobs:
+    build_time_reference:
+      name: "[_reference] build_time_reference"
+      description: |
+        Generates time.calendar_date and time.epi_week in the integrated
+        catalog. Computational reference data; safe to re-run (full_refresh).
+
+      tasks:
+        - task_key: build_time
+          spark_python_task:
+            python_file: ../src/build_time.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--start-year"
+              - "1900"
+              - "--end-year"
+              - "2100"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+          environment_key: reference_env
+
+      environments:
+        - environment_key: reference_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

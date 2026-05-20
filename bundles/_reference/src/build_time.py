@@ -1,0 +1,266 @@
+"""Build the canonical time reference tables in the integrated catalog.
+
+Generates `time.calendar_date` and `time.epi_week` in `ecdh_model_<env>` using
+the deterministic logic in `cidmath_datahub.reference.time`. Time is
+computational reference data (ADR 0014), so update semantics is `full_refresh`
+(ADR 0007) — each run regenerates and overwrites.
+
+After writing, registers metadata rows in `_ops.dataset_catalog` and
+`_ops.dataset_engineering` (ADR 0008) and applies read grants.
+
+Usage:
+    build_time.py --catalog ecdh_model_dev --start-year 2015 --end-year 2035 \\
+        --data-engineers-group ecdh-data-engineers
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import date
+
+from pyspark.sql import SparkSession
+from pyspark.sql import types as T
+
+from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.reference import time as rt
+
+log = get_logger(__name__)
+
+SCHEMA = "time"
+
+CALENDAR_SPARK_SCHEMA = T.StructType(
+    [
+        T.StructField("date", T.DateType(), False),
+        T.StructField("year", T.IntegerType(), False),
+        T.StructField("quarter", T.IntegerType(), False),
+        T.StructField("month", T.IntegerType(), False),
+        T.StructField("month_name", T.StringType(), False),
+        T.StructField("day_of_month", T.IntegerType(), False),
+        T.StructField("day_of_week_iso", T.IntegerType(), False),
+        T.StructField("day_name", T.StringType(), False),
+        T.StructField("day_of_year", T.IntegerType(), False),
+        T.StructField("iso_year", T.IntegerType(), False),
+        T.StructField("iso_week", T.IntegerType(), False),
+        T.StructField("epi_year", T.IntegerType(), False),
+        T.StructField("epi_week", T.IntegerType(), False),
+        T.StructField("epi_week_id", T.StringType(), False),
+        T.StructField("is_weekend", T.BooleanType(), False),
+    ]
+)
+
+EPI_WEEK_SPARK_SCHEMA = T.StructType(
+    [
+        T.StructField("epi_week_id", T.StringType(), False),
+        T.StructField("epi_year", T.IntegerType(), False),
+        T.StructField("epi_week", T.IntegerType(), False),
+        T.StructField("start_date", T.DateType(), False),
+        T.StructField("end_date", T.DateType(), False),
+        T.StructField("label", T.StringType(), False),
+    ]
+)
+
+
+def _register_dataset(
+    spark: SparkSession,
+    *,
+    catalog: str,
+    table: str,
+    description: str,
+    public_health_relevance: str,
+    temporal_coverage_start: date,
+    temporal_coverage_end: date,
+    pipeline_reference: str,
+) -> None:
+    """Upsert metadata rows for a reference table into `_ops` (ADR 0008).
+
+    Idempotent via MERGE on full_table_name. Reference tables are canonical, so
+    layer is recorded as 'reference' and is_hosted is True.
+    """
+    full = f"{catalog}.{SCHEMA}.{table}"
+
+    catalog_src = spark.createDataFrame(
+        [
+            (
+                full,
+                SCHEMA,
+                "reference",
+                description,
+                public_health_relevance,
+                temporal_coverage_start,
+                temporal_coverage_end,
+                "annual",  # temporal_resolution placeholder; calendar is daily, weeks weekly
+                True,  # is_hosted
+                "cidmath-data-team",  # owner
+            )
+        ],
+        T.StructType(
+            [
+                T.StructField("full_table_name", T.StringType()),
+                T.StructField("subject", T.StringType()),
+                T.StructField("layer", T.StringType()),
+                T.StructField("description", T.StringType()),
+                T.StructField("public_health_relevance", T.StringType()),
+                T.StructField("temporal_coverage_start", T.DateType()),
+                T.StructField("temporal_coverage_end", T.DateType()),
+                T.StructField("temporal_resolution", T.StringType()),
+                T.StructField("is_hosted", T.BooleanType()),
+                T.StructField("owner", T.StringType()),
+            ]
+        ),
+    )
+    catalog_src.createOrReplaceTempView("_tmp_catalog_src")
+    spark.sql(
+        f"""
+        MERGE INTO {catalog}._ops.dataset_catalog AS t
+        USING _tmp_catalog_src AS s
+        ON t.full_table_name = s.full_table_name
+        WHEN MATCHED THEN UPDATE SET
+            subject = s.subject, layer = s.layer, description = s.description,
+            public_health_relevance = s.public_health_relevance,
+            temporal_coverage_start = s.temporal_coverage_start,
+            temporal_coverage_end = s.temporal_coverage_end,
+            temporal_resolution = s.temporal_resolution,
+            is_hosted = s.is_hosted, owner = s.owner, last_validated = CURRENT_DATE()
+        WHEN NOT MATCHED THEN INSERT
+            (full_table_name, subject, layer, description, public_health_relevance,
+             temporal_coverage_start, temporal_coverage_end, temporal_resolution,
+             is_hosted, owner, last_validated)
+            VALUES
+            (s.full_table_name, s.subject, s.layer, s.description, s.public_health_relevance,
+             s.temporal_coverage_start, s.temporal_coverage_end, s.temporal_resolution,
+             s.is_hosted, s.owner, CURRENT_DATE())
+        """
+    )
+
+    eng_src = spark.createDataFrame(
+        [(full, "full_refresh", "table", pipeline_reference, 1)],
+        T.StructType(
+            [
+                T.StructField("full_table_name", T.StringType()),
+                T.StructField("update_semantics", T.StringType()),
+                T.StructField("materialization_type", T.StringType()),
+                T.StructField("pipeline_reference", T.StringType()),
+                T.StructField("schema_version", T.IntegerType()),
+            ]
+        ),
+    )
+    eng_src.createOrReplaceTempView("_tmp_eng_src")
+    spark.sql(
+        f"""
+        MERGE INTO {catalog}._ops.dataset_engineering AS t
+        USING _tmp_eng_src AS s
+        ON t.full_table_name = s.full_table_name
+        WHEN MATCHED THEN UPDATE SET
+            update_semantics = s.update_semantics,
+            materialization_type = s.materialization_type,
+            pipeline_reference = s.pipeline_reference,
+            last_refresh_at = CURRENT_TIMESTAMP()
+        WHEN NOT MATCHED THEN INSERT
+            (full_table_name, update_semantics, materialization_type,
+             pipeline_reference, schema_version, last_refresh_at)
+            VALUES
+            (s.full_table_name, s.update_semantics, s.materialization_type,
+             s.pipeline_reference, s.schema_version, CURRENT_TIMESTAMP())
+        """
+    )
+    log.info("Registered dataset metadata", extra={"table": full})
+
+
+def run(
+    catalog: str,
+    start_year: int,
+    end_year: int,
+    data_engineers_group: str,
+) -> None:
+    spark = SparkSession.builder.getOrCreate()
+    pipeline_ref = "bundles/_reference/src/build_time.py"
+
+    log.info(
+        "Building time reference tables",
+        extra={"catalog": catalog, "start_year": start_year, "end_year": end_year},
+    )
+
+    spark.sql(
+        f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
+        f"COMMENT 'Canonical time reference: calendar dates and MMWR epi-weeks. "
+        f"Owned by the _reference bundle. See ADR 0014.'"
+    )
+
+    # --- calendar_date ---
+    cal_rows = rt.generate_calendar(date(start_year, 1, 1), date(end_year, 12, 31))
+    cal_df = spark.createDataFrame(cal_rows, schema=CALENDAR_SPARK_SCHEMA)
+    cal_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        f"{catalog}.{SCHEMA}.calendar_date"
+    )
+    log.info("Wrote calendar_date", extra={"rows": len(cal_rows)})
+
+    # --- epi_week ---
+    wk_rows = rt.generate_epi_weeks(start_year, end_year)
+    wk_df = spark.createDataFrame(wk_rows, schema=EPI_WEEK_SPARK_SCHEMA)
+    wk_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        f"{catalog}.{SCHEMA}.epi_week"
+    )
+    log.info("Wrote epi_week", extra={"rows": len(wk_rows)})
+
+    # --- table comments ---
+    spark.sql(
+        f"COMMENT ON TABLE {catalog}.{SCHEMA}.calendar_date IS "
+        f"'One row per calendar date with ISO and MMWR epi-week attributes. "
+        f"Reference table; full_refresh. ADR 0014.'"
+    )
+    spark.sql(
+        f"COMMENT ON TABLE {catalog}.{SCHEMA}.epi_week IS "
+        f"'One row per MMWR epidemiological week (Sunday-Saturday). "
+        f"Reference table; full_refresh. ADR 0014.'"
+    )
+
+    # --- grants: schema-level read for the engineers group ---
+    for stmt in (
+        f"GRANT USE SCHEMA ON SCHEMA {catalog}.{SCHEMA} TO `{data_engineers_group}`",
+        f"GRANT SELECT ON SCHEMA {catalog}.{SCHEMA} TO `{data_engineers_group}`",
+    ):
+        spark.sql(stmt)
+
+    # --- metadata registration ---
+    _register_dataset(
+        spark,
+        catalog=catalog,
+        table="calendar_date",
+        description="One row per calendar date with ISO week and MMWR epi-week attributes.",
+        public_health_relevance=(
+            "Canonical date dimension for joining and aligning time series across "
+            "all subjects; provides epi-week mapping used throughout surveillance."
+        ),
+        temporal_coverage_start=date(start_year, 1, 1),
+        temporal_coverage_end=date(end_year, 12, 31),
+        pipeline_reference=pipeline_ref,
+    )
+    _register_dataset(
+        spark,
+        catalog=catalog,
+        table="epi_week",
+        description="One row per MMWR epidemiological week with Sunday start and Saturday end.",
+        public_health_relevance=(
+            "Canonical epi-week dimension; the standard temporal grain for U.S. "
+            "infectious disease surveillance reporting."
+        ),
+        temporal_coverage_start=date(start_year, 1, 1),
+        temporal_coverage_end=date(end_year, 12, 31),
+        pipeline_reference=pipeline_ref,
+    )
+
+    log.info("Time reference build complete", extra={"catalog": catalog})
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
+    parser.add_argument("--start-year", type=int, default=1900)
+    parser.add_argument("--end-year", type=int, default=2100)
+    parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
+    args = parser.parse_args()
+    run(args.catalog, args.start_year, args.end_year, args.data_engineers_group)
+
+
+if __name__ == "__main__":
+    main()

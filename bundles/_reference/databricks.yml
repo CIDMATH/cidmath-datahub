@@ -1,0 +1,27 @@
+# Reference bundle — canonical reference data (ADR 0014).
+#
+# Owns the canonical reference tables in the integrated catalog
+# (ecdh_model_<env>): time, geography, code systems, pathogen taxonomy.
+# These are the conformed tables that source-aligned tables join against to
+# standardize their geographic and temporal columns.
+#
+# Deploy order: after _platform (which creates the catalogs and _ops schema),
+# before subject bundles (which reference these tables via FOREIGN KEY).
+#
+# Scope of this bundle so far:
+#   - time.calendar_date, time.epi_week  (computational reference)
+#   - geography.*  (authoritative slow-changing — added next; needs Census ingest)
+#
+# See ADR 0014 (reference data scope) and ADR 0015 (integrated table naming).
+
+include:
+  - ../../databricks-common.yml
+  - resources/*.yml
+
+bundle:
+  name: cidmath-datahub-reference
+
+sync:
+  paths:
+    - ../../src
+    - ./src
