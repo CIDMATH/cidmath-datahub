@@ -23,7 +23,7 @@ resources:
               - "--start-year"
               - "1900"
               - "--end-year"
-              - "2100"
+              - "2099"
               - "--data-engineers-group"
               - "${var.data_engineers_group}"
           environment_key: reference_env

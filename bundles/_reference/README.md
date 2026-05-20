@@ -45,7 +45,7 @@ In CI, `deploy-reference.yml` (added when this bundle is wired into the deploy m
 
 `time.epi_week` and the `epi_*` columns on `time.calendar_date` use CDC MMWR week rules (Sunday-start weeks; week 1 is the week with ≥4 days in the new year), computed with the `epiweeks` package (a runtime dependency in `pyproject.toml`). Behavior is pinned against known CDC values in `tests/unit/reference/test_time.py` (e.g., 2020 has 53 weeks; 2023-01-01 is 2023W01).
 
-The default coverage is **1900–2100** (calendar dates and epi-weeks). That's ~73k calendar rows — trivial for Delta — and wide enough for any historical or forward-looking analysis. The range is a job parameter, adjustable without code changes.
+The default coverage is **1900 through 2099** (calendar dates and epi-weeks) — `calendar_date` runs 1900-01-01 to 2099-12-31. That's ~73k calendar rows, trivial for Delta, and wide enough for any historical or forward-looking analysis. The range is a job parameter, adjustable without code changes. Both tables are written sorted ascending (by `date` / `start_date`).
 
 ## Contact
 

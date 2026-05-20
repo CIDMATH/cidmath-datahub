@@ -187,8 +187,15 @@ def run(
     )
 
     # --- calendar_date ---
+    # Sort ascending and write as a single file so the table is physically
+    # ordered by date. Consumers should still ORDER BY date for a guaranteed
+    # order, but the on-disk layout makes the common case sorted.
     cal_rows = rt.generate_calendar(date(start_year, 1, 1), date(end_year, 12, 31))
-    cal_df = spark.createDataFrame(cal_rows, schema=CALENDAR_SPARK_SCHEMA)
+    cal_df = (
+        spark.createDataFrame(cal_rows, schema=CALENDAR_SPARK_SCHEMA)
+        .repartition(1)
+        .sortWithinPartitions("date")
+    )
     cal_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
         f"{catalog}.{SCHEMA}.calendar_date"
     )
@@ -196,7 +203,11 @@ def run(
 
     # --- epi_week ---
     wk_rows = rt.generate_epi_weeks(start_year, end_year)
-    wk_df = spark.createDataFrame(wk_rows, schema=EPI_WEEK_SPARK_SCHEMA)
+    wk_df = (
+        spark.createDataFrame(wk_rows, schema=EPI_WEEK_SPARK_SCHEMA)
+        .repartition(1)
+        .sortWithinPartitions("start_date")
+    )
     wk_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
         f"{catalog}.{SCHEMA}.epi_week"
     )
@@ -256,7 +267,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
     parser.add_argument("--start-year", type=int, default=1900)
-    parser.add_argument("--end-year", type=int, default=2100)
+    parser.add_argument("--end-year", type=int, default=2099)
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
     args = parser.parse_args()
     run(args.catalog, args.start_year, args.end_year, args.data_engineers_group)
