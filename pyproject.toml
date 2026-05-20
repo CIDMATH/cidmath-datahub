@@ -36,6 +36,7 @@ dev = [
     "hypothesis>=6.0",      # property-based testing (optional)
     "build>=1.0",           # builds the wheel for DAB
     "databricks-sdk>=0.30", # for setup scripts and CI checks
+    "pre-commit>=3.7",      # git hooks (ruff + tests on commit)
 ]
 
 [tool.hatch.build.targets.wheel]
