@@ -99,14 +99,12 @@ jobs:
           DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
 
   convention-checks:
-    # The four CI-enforced rules from ADR 0016:
-    #   1. update_semantics values in controlled vocabulary
-    #   2. DQ severity values in controlled vocabulary
-    #   3. UC tag values in their namespace's controlled vocabulary
-    #   4. _ops.dataset_catalog row presence for new analysis-layer tables
-    #
-    # Implementation lives in .github/workflows/ci/*.py — each is a small
-    # script that parses bundle resources and asserts the rule.
+    # The four CI-enforced rules from ADR 0016 (controlled-vocabulary
+    # membership for update_semantics / DQ severity / UC tags, plus
+    # _ops.dataset_catalog row presence). Implemented in
+    # scripts/ci/check_conventions.py. Today the script enforces the integrity
+    # of the vocabularies module itself; the per-rule pipeline-scanning logic
+    # activates with the first data pipeline (see the script's docstring).
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: bundle-validate
@@ -122,21 +120,5 @@ jobs:
       - name: Install package
         run: pip install -e ".[dev]"
 
-      # Placeholder steps — implementations land alongside the first
-      # convention check we actually need to enforce. ADR 0016 lists them.
-
-      - name: Check update_semantics vocabulary
-        run: |
-          echo "TODO: implement .github/workflows/ci/check_update_semantics.py"
-
-      - name: Check DQ severity vocabulary
-        run: |
-          echo "TODO: implement .github/workflows/ci/check_dq_severity.py"
-
-      - name: Check UC tag namespace vocabularies
-        run: |
-          echo "TODO: implement .github/workflows/ci/check_tag_vocab.py"
-
-      - name: Check dataset_catalog row presence for new analysis tables
-        run: |
-          echo "TODO: implement .github/workflows/ci/check_dataset_catalog_presence.py"
+      - name: Run convention checks (ADR 0016)
+        run: python scripts/ci/check_conventions.py

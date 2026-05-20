@@ -1,0 +1,46 @@
+# Pre-commit hooks for local development.
+#
+# Install once:
+#   pip install pre-commit
+#   pre-commit install
+#
+# After that, these run automatically on `git commit` against staged files.
+# Run manually across the whole repo with: pre-commit run --all-files
+#
+# These mirror the fast feedback in CI (ruff + unit tests) so issues are
+# caught before they reach a PR. See ADR 0011 (testing) and ADR 0016 (CI).
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.13
+    hooks:
+      # Lint, with autofix for the safe fixes.
+      - id: ruff
+        args: [--fix]
+      # Format.
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # DAB YAML uses ${var.x} interpolation and custom tags; don't fail on
+        # unknown constructs. check-yaml still catches genuine syntax errors.
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]   # enforce LF, matching .gitattributes
+
+  # Local hook: run unit tests (fast, no Spark) before commit.
+  - repo: local
+    hooks:
+      - id: pytest-unit
+        name: pytest (unit tests)
+        entry: pytest tests/unit -q
+        language: system
+        pass_filenames: false
+        # Only run when Python files or pyproject change, to keep commits fast.
+        files: '\.(py|toml)$'
