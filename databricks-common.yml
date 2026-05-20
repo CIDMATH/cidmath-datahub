@@ -12,8 +12,16 @@
 #
 # See ADR 0004 (monorepo + bundle-per-domain) for the architectural shape.
 
-bundle:
-  name: cidmath-datahub
+# NOTE: bundle.name is intentionally NOT set in this shared file. Each bundle
+# declares its own UNIQUE name in its bundles/<name>/databricks.yml
+# (cidmath-datahub-platform, cidmath-datahub-reference, ...). A single shared
+# name here would override the per-bundle names (the included value wins), so
+# every bundle would deploy to the SAME workspace root (.bundle/<name>/<target>)
+# and each `bundle deploy` would prune the others' synced files — surfacing as
+# "Cannot read the python file" when two bundle deploys race on one push. The
+# dev root_path (mode: development) and the prod root_path below both derive from
+# ${bundle.name}, so unique names give each bundle its own isolated root. See
+# ADR 0017 lesson #10.
 
 workspace:
   host: https://dbc-926acb48-1c75.cloud.databricks.com
