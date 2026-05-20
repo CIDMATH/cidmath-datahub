@@ -14,8 +14,11 @@ analyst groups receive only the reader tier on them. The owning bundle's
 deploy service principal retains full control as the schema owner. See ADR 0018.
 
 `USE CATALOG` is required to traverse into any schema and is granted at the
-catalog level to whichever groups need to reach content inside (applied once
-per catalog by the `_platform` setup job).
+catalog level to whichever groups need to reach content inside. Catalog-level
+grants are applied by an admin (scripts/setup/grant_catalog_permissions.sql),
+not by the deploy jobs: granting on a catalog requires MANAGE/ownership that the
+deploy service principal does not have. The deploy jobs apply only schema-level
+grants, on schemas the SP owns.
 
 The statement-builder functions are pure (return SQL strings) so they're unit-
 testable without a Spark session. The `grant_*` convenience functions execute

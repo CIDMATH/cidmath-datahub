@@ -233,7 +233,9 @@ def run(
     # The time schema is canonical reference data, owned and written by this
     # bundle's deploy SP. Human groups — both engineers and analysts — consume
     # it read-only; neither hand-edits generated reference data (ADR 0018).
-    # Analysts also need USE CATALOG, granted once by the _platform setup job.
+    # Both groups also need USE CATALOG on the catalog to traverse here; that
+    # is granted by an admin in scripts/setup/grant_catalog_permissions.sql
+    # (the deploy SP can't grant catalog-level privileges). See ADR 0018.
     grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
     grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
 

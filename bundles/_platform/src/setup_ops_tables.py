@@ -288,13 +288,16 @@ LEFT JOIN {catalog}._ops.dataset_engineering e
 # helpers) rather than via a DAB `grants` resource because some DAB CLI
 # versions don't yet support the grants resource type (ADR 0017).
 #
-# Two principals are granted at the catalog/_ops level (ADR 0018):
-#   - Engineers (ecdh-data-engineers): USE CATALOG on the catalog plus
-#     engineer-tier (USE SCHEMA, SELECT, MODIFY, CREATE TABLE) on _ops.
-#   - Analysts (ecdh-analysts): USE CATALOG only — the minimum needed to
-#     traverse into the reference/analysis schemas where they hold reader
-#     grants applied by the _reference and subject bundles. Analysts are
-#     deliberately NOT granted anything on _ops (it is internal/engineer-only).
+# This job applies only SCHEMA-level grants, which the deploy SP can make
+# because it owns the schemas it created (ADR 0018):
+#   - Engineers (ecdh-data-engineers): engineer-tier (USE SCHEMA, SELECT,
+#     MODIFY, CREATE TABLE) on _ops; reader-tier on discovery.
+#   - Analysts (ecdh-analysts): reader-tier on discovery only. Deliberately
+#     NOT granted anything on _ops (it is internal/engineer-only).
+#
+# CATALOG-level USE CATALOG for both groups is granted separately by an admin
+# in scripts/setup/grant_catalog_permissions.sql, because granting on a catalog
+# requires MANAGE/ownership that the deploy SP does not have.
 
 
 def run(
@@ -358,16 +361,20 @@ def run(
     )
 
     log.info(
-        "Applying catalog + _ops + discovery grants",
+        "Applying _ops + discovery schema grants",
         extra={
             "catalog": catalog,
             "engineers_group": data_engineers_group,
             "analysts_group": analysts_group,
         },
     )
-    # Catalog traversal for both tiers (USE CATALOG).
-    grants.grant_catalog_usage(spark, catalog, data_engineers_group)
-    grants.grant_catalog_usage(spark, catalog, analysts_group)
+    # NOTE: catalog-level USE CATALOG grants are deliberately NOT applied here.
+    # Granting a privilege ON a catalog requires MANAGE/ownership on the catalog,
+    # which the deploy SP does not have (it only holds USE CATALOG + CREATE
+    # SCHEMA). So USE CATALOG for the engineer and analyst groups is a one-time
+    # admin step in scripts/setup/grant_catalog_permissions.sql. The SP owns the
+    # schemas it creates, so the schema-level grants below succeed. (ADR 0017/0018.)
+    #
     # Engineer-tier full access on the _ops schema. Analysts get nothing on
     # _ops by design (ADR 0018).
     grants.grant_schema_engineer(spark, catalog, "_ops", data_engineers_group)

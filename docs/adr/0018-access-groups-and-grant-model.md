@@ -23,17 +23,20 @@ A constraint inherited from ADR 0017: Unity Catalog objects above the table leve
 - **Analysts (readers)** read analysis-layer schemas and reference schemas only — **never** raw, processed, or `_ops`. `_ops` holds operational/engineering metadata and is engineer-only by design.
 
 ### Where each grant is applied (placement principle)
-The bundle that owns a securable applies the grants on it. Concretely:
+Whoever owns a securable applies the grants on it. Catalogs are owned by an admin; schemas are owned by the deploy SP that creates them. Concretely:
 
-- **`_platform`** (in `setup_ops_tables.py`, run for both the source and model catalogs): grants `USE CATALOG` to *both* groups on each catalog, and engineer-tier on the `_ops` schema to engineers. Analysts receive nothing on `_ops`.
+- **Catalog-level `USE CATALOG`** for both groups: granted by an admin in `scripts/setup/grant_catalog_permissions.sql`. This is *not* done by the bundles, because granting on a catalog requires `MANAGE`/ownership and the deploy SP has only `USE CATALOG` + `CREATE SCHEMA`. (We learned this the hard way — an early version had `setup_ops_tables.py` try to grant catalog `USE CATALOG` and the job failed with `PERMISSION_DENIED: does not have MANAGE on Catalog`.)
+- **`_platform`** (in `setup_ops_tables.py`, run for both the source and model catalogs): grants engineer-tier on the `_ops` schema to engineers, and reader-tier on the `discovery` schema to both groups. Analysts receive nothing on `_ops`.
 - **`_reference`** (in `build_time.py`, and future reference builders): grants reader-tier on each reference schema (`time`, later `geography`, `pathogen`, `codes`, ...) to *both* the engineers and analysts groups.
 - **Subject bundles** (future): grant engineer-tier on their `<subject>_raw` / `<subject>_processed` schemas to engineers, and reader-tier on their analysis-layer `<subject>` schema to analysts (and any other consumer groups).
+
+The schema-level grants all work because the deploy SP owns the schemas it creates. The split — admin owns catalog grants, SP owns schema grants — mirrors the catalog-vs-schema ownership boundary itself.
 
 ### Reference schemas are read-only for human groups
 Reference schemas are canonical, computationally generated, and pipeline-owned. Both the engineer and analyst groups therefore receive only the **reader** tier on them — even engineers do not get `MODIFY` / `CREATE TABLE` on `time`. The owning bundle's deploy service principal remains the schema owner and retains full control, so reference data changes only by re-running its pipeline, never by hand. This is the one place the engineer group is intentionally narrower than "full access to everything."
 
 ### Mechanism and group lifecycle
-Grants are SQL DDL issued through the `grants` helper inside deploy jobs; they are idempotent, so re-running a deploy re-asserts the intended state. Group names are bundle variables (`data_engineers_group`, `analysts_group`) in `databricks-common.yml`, so the model is environment-agnostic. **Creating the workspace groups and adding members is a manual account/workspace-admin step**, performed out of band (it is not something a bundle deploy should do) and recorded in the operations runbook.
+Schema-level grants are SQL DDL issued through the `grants` helper inside deploy jobs; they are idempotent, so re-running a deploy re-asserts the intended state. Catalog-level `USE CATALOG` is SQL DDL in the admin bootstrap script. Group names are bundle variables (`data_engineers_group`, `analysts_group`) in `databricks-common.yml`, so the model is environment-agnostic. **Creating the workspace groups and adding members is a manual account/workspace-admin step**, performed out of band (it is not something a bundle deploy should do) and recorded in the operations runbook.
 
 ## Alternatives considered
 - **Table-level grants instead of schema-level.** Rejected: too granular to maintain, and the schema is the natural unit of access here (a subject's analysis layer is one schema). Table-level control can be layered in later for specific restricted datasets without changing this model.
@@ -43,7 +46,7 @@ Grants are SQL DDL issued through the `grants` helper inside deploy jobs; they a
 - **Per-user grants.** Rejected: grants go to groups, never individuals, so access is managed by group membership.
 
 ## Consequences
-- **An analyst can explore the `time` data** as soon as the `ecdh-analysts` group exists and the `_platform` and `_reference` jobs have re-run to apply the new grants. The analyst gets `USE CATALOG` on `ecdh_model_<env>` plus reader-tier on `time`, and nothing else.
+- **An analyst can explore the `time` data** once three things are true: the `ecdh-analysts` group exists, an admin has run the `USE CATALOG` grants in `grant_catalog_permissions.sql`, and the `_platform`/`_reference` jobs have applied the schema-level reader grants. The analyst then has `USE CATALOG` on `ecdh_model_<env>` plus reader-tier on `time` and `discovery`, and nothing else.
 - **The grant model is self-verifying at deploy time.** After applying grants, the setup/build jobs read them back (`SHOW GRANTS`) and assert each group holds exactly its intended tier — including the negative assertion that analysts hold nothing on `_ops`. A mismatch raises and fails the deploy, so drift or an accidental over-grant can't ship silently and no manual verification step is required. The assertion logic lives in `cidmath_datahub.common.grants` (`verify_*`) and is unit-tested. Catalog-level `USE CATALOG` is the one grant not read back this way (the deploy SP may not own the catalog); it is self-checking at apply time instead.
 - **Adding a new reader/consumer group is a small, well-trodden change**: add a bundle variable, pass it to the relevant jobs, grant reader-tier where that group should read. The pattern is now explicit.
 - **A manual prerequisite exists**: the `ecdh-analysts` workspace group must be created and populated by an admin before the grants resolve to anything meaningful (granting to a non-existent principal will error, mirroring the SP gotcha in ADR 0017). This is documented as an operations step.

@@ -34,7 +34,12 @@ databricks groups create --display-name ecdh-analysts
 databricks groups add-member <group-id> --user-name <user@emory.edu>
 ```
 
-The actual grants are applied automatically by the bundle deploy jobs (`_platform` grants `USE CATALOG` to both groups and engineer-tier on `_ops`; `_reference` grants reader-tier on reference schemas like `time`). The groups must exist **before** those jobs run, otherwise the GRANT statements error on a non-existent principal (same gotcha as service principals — ADR 0017). If you add the `ecdh-analysts` group after `_platform`/`_reference` have already deployed, just re-run those bundles' setup/build jobs to apply the analyst grants.
+Grants come from two places (ADR 0018):
+
+- **Catalog-level `USE CATALOG`** for both groups is granted by an admin in `scripts/setup/grant_catalog_permissions.sql` (step below). The deploy SP can't grant catalog-level privileges — it lacks `MANAGE`/ownership on the catalog — so this is a one-time admin step, alongside the SP catalog grants.
+- **Schema-level grants** (engineer-tier on `_ops`, reader-tier on `discovery` and reference schemas like `time`) are applied automatically by the bundle deploy jobs, which can do so because the SP owns the schemas it creates.
+
+The groups must exist **before** either runs, otherwise the GRANT statements error on a non-existent principal (same gotcha as service principals — ADR 0017). If you add the `ecdh-analysts` group after the platform has deployed, run the new `USE CATALOG` lines in `grant_catalog_permissions.sql` and re-run the `_platform`/`_reference` jobs to apply the schema-level analyst grants.
 
 Those same jobs also **verify** the grant model immediately after applying it: they read the grants back and assert each group holds exactly the intended tier (and that analysts hold nothing on `_ops`). A mismatch fails the job and the deploy, so a broken access model can't ship silently — you don't need to verify by hand. For an out-of-band audit or a true end-to-end test from an analyst identity, see `scripts/verify/`.
 

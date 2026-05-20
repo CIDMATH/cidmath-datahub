@@ -36,6 +36,18 @@ GRANT CREATE SCHEMA ON CATALOG ecdh_dev TO `a55b6164-c0eb-42cf-a438-7de33c150f4a
 GRANT USE CATALOG ON CATALOG ecdh_model_dev TO `a55b6164-c0eb-42cf-a438-7de33c150f4a`;
 GRANT CREATE SCHEMA ON CATALOG ecdh_model_dev TO `a55b6164-c0eb-42cf-a438-7de33c150f4a`;
 
+-- Access-group catalog traversal (ADR 0018). These must be granted by a
+-- catalog owner / metastore admin (this script), NOT by the bundle deploy
+-- jobs: the deploy SP lacks MANAGE on the catalog, so it cannot grant
+-- catalog-level privileges. Schema-level reader/engineer grants are still
+-- applied automatically by the bundles (the SP owns the schemas it creates).
+-- USE CATALOG alone exposes no data — readers still need per-schema USE
+-- SCHEMA + SELECT, which the bundles grant only where each group should read.
+GRANT USE CATALOG ON CATALOG ecdh_dev TO `ecdh-data-engineers`;
+GRANT USE CATALOG ON CATALOG ecdh_model_dev TO `ecdh-data-engineers`;
+GRANT USE CATALOG ON CATALOG ecdh_dev TO `ecdh-analysts`;
+GRANT USE CATALOG ON CATALOG ecdh_model_dev TO `ecdh-analysts`;
+
 -- Explicit deny on prod catalogs is unnecessary (default is no access),
 -- but worth verifying: the dev SP must NOT have any grant on ecdh_prod
 -- or ecdh_model_prod. Run the verification queries at the bottom of this
@@ -50,6 +62,16 @@ GRANT CREATE SCHEMA ON CATALOG ecdh_prod TO `caff7ad3-d82f-4692-98cc-678dc6807cb
 
 GRANT USE CATALOG ON CATALOG ecdh_model_prod TO `caff7ad3-d82f-4692-98cc-678dc6807cbd`;
 GRANT CREATE SCHEMA ON CATALOG ecdh_model_prod TO `caff7ad3-d82f-4692-98cc-678dc6807cbd`;
+
+-- Engineers operate prod, so they get catalog traversal in prod too.
+GRANT USE CATALOG ON CATALOG ecdh_prod TO `ecdh-data-engineers`;
+GRANT USE CATALOG ON CATALOG ecdh_model_prod TO `ecdh-data-engineers`;
+
+-- Analyst access to PROD is a deliberate policy decision, not a default.
+-- Uncomment when analysts should be able to explore prod (they still only see
+-- schemas where a bundle has granted them reader-tier USE SCHEMA + SELECT):
+-- GRANT USE CATALOG ON CATALOG ecdh_prod TO `ecdh-analysts`;
+-- GRANT USE CATALOG ON CATALOG ecdh_model_prod TO `ecdh-analysts`;
 
 -- ====================================================================
 -- Verification — run these after the GRANTs above and confirm the output
