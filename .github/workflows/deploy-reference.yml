@@ -29,6 +29,12 @@ permissions:
   id-token: write
   contents: read
 
+# Only one deploy of this bundle per ref at a time (see deploy-platform.yml
+# and ADR 0017 for why — concurrent redeploys cancel each other's job runs).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   deploy-dev:
     if: github.ref == 'refs/heads/main'

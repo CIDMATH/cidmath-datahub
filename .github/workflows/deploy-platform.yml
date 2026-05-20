@@ -33,6 +33,13 @@ permissions:
   id-token: write   # required for OIDC federation to Databricks
   contents: read
 
+# Only one deploy of this bundle per ref at a time. A newer push cancels an
+# in-progress run cleanly, preventing two `bundle deploy` calls from racing
+# (a concurrent redeploy cancels the other's job run — see ADR 0017).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   deploy-dev:
     if: github.ref == 'refs/heads/main'

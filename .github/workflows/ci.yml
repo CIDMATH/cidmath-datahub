@@ -22,6 +22,12 @@ permissions:
   pull-requests: write   # for posting lint-style warnings as PR comments
   id-token: write        # required for OIDC federation to Databricks
 
+# Cancel an in-progress CI run when a newer commit arrives on the same ref —
+# no point validating a superseded commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest

@@ -99,6 +99,22 @@ Forgetting any of these produces auth errors that look unrelated to OIDC. The `c
 
 **Lesson.** Where instructions involve shell quoting, JSON-on-CLI, or file paths, default to assuming Windows quirks until proven otherwise. Build setup tooling in Python or with `--json @file` patterns instead of inline shell strings.
 
+### 9. Concurrent deploys cancel each other's job runs
+
+**What we hit.** Several commits pushed to `main` in quick succession each triggered the `deploy-platform` workflow (its path filter includes `pyproject.toml`). With no concurrency control, the runs executed in parallel. When a later run's `databricks bundle deploy` redeployed the bundle, DAB cancelled the in-progress `setup_ops_tables` run that an earlier workflow had started — surfacing as `Run cancelled by user` (the "user" being the service principal performing the redeploy). It looked like a phantom cancellation; nobody pressed cancel.
+
+**What we did.** Added a `concurrency` group to every workflow:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+```
+
+A newer push now cleanly cancels the older in-progress workflow run *before* the two deploys can collide, and the latest commit's deploy runs to completion.
+
+**Lesson.** Any workflow that deploys a bundle (or runs a bundle job) needs a concurrency group. Without one, rapid pushes produce racing deploys that cancel each other's job runs. `cancel-in-progress: true` is right for dev (only the latest commit matters); reconsider for prod if half-finished deploys are a concern (prod is tag-triggered and rarely overlaps, so it's low risk).
+
 ## Alternatives considered
 - **Not writing this ADR.** Tempting because the issues are now in the past. But the choices we made (script-owned schemas, parameterized client version, etc.) look arbitrary without the context. Future-me will second-guess them and reinvent worse versions.
 - **Filing each as a separate ADR.** Rejected. None of these are decisions with serious alternatives; they're observations and consequences. Bundling them as one retrospective keeps the ADR series focused on architectural decisions.
