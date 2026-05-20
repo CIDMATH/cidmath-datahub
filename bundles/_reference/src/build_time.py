@@ -6,11 +6,13 @@ computational reference data (ADR 0014), so update semantics is `full_refresh`
 (ADR 0007) — each run regenerates and overwrites.
 
 After writing, registers metadata rows in `_ops.dataset_catalog` and
-`_ops.dataset_engineering` (ADR 0008) and applies read grants.
+`_ops.dataset_engineering` (ADR 0008) and applies reader-tier read grants to
+both the engineers and analysts groups (ADR 0018). Reference data is canonical
+and pipeline-owned, so human groups consume it read-only.
 
 Usage:
     build_time.py --catalog ecdh_model_dev --start-year 2015 --end-year 2035 \\
-        --data-engineers-group ecdh-data-engineers
+        --data-engineers-group ecdh-data-engineers --analysts-group ecdh-analysts
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from datetime import date
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
+from cidmath_datahub.common import grants
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.reference import time as rt
 
@@ -171,6 +174,7 @@ def run(
     start_year: int,
     end_year: int,
     data_engineers_group: str,
+    analysts_group: str,
 ) -> None:
     spark = SparkSession.builder.getOrCreate()
     pipeline_ref = "bundles/_reference/src/build_time.py"
@@ -225,12 +229,20 @@ def run(
         f"Reference table; full_refresh. ADR 0014.'"
     )
 
-    # --- grants: schema-level read for the engineers group ---
-    for stmt in (
-        f"GRANT USE SCHEMA ON SCHEMA {catalog}.{SCHEMA} TO `{data_engineers_group}`",
-        f"GRANT SELECT ON SCHEMA {catalog}.{SCHEMA} TO `{data_engineers_group}`",
-    ):
-        spark.sql(stmt)
+    # --- grants: reader-tier (USE SCHEMA + SELECT) on the time schema ---
+    # The time schema is canonical reference data, owned and written by this
+    # bundle's deploy SP. Human groups — both engineers and analysts — consume
+    # it read-only; neither hand-edits generated reference data (ADR 0018).
+    # Analysts also need USE CATALOG, granted once by the _platform setup job.
+    grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+    grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
+
+    # Verify the applied grants (deploy-time access gate; ADR 0018). Both groups
+    # must hold exactly reader-tier on the time schema — confirms the reads work
+    # and that neither group was accidentally over-granted write access.
+    grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+    grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
+    log.info("Access model verified", extra={"schema": f"{catalog}.{SCHEMA}"})
 
     # --- metadata registration ---
     _register_dataset(
@@ -269,8 +281,15 @@ def main() -> None:
     parser.add_argument("--start-year", type=int, default=1900)
     parser.add_argument("--end-year", type=int, default=2099)
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
+    parser.add_argument("--analysts-group", default="ecdh-analysts")
     args = parser.parse_args()
-    run(args.catalog, args.start_year, args.end_year, args.data_engineers_group)
+    run(
+        args.catalog,
+        args.start_year,
+        args.end_year,
+        args.data_engineers_group,
+        args.analysts_group,
+    )
 
 
 if __name__ == "__main__":

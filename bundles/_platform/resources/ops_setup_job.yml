@@ -31,6 +31,8 @@ resources:
               - "source"
               - "--data-engineers-group"
               - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
           environment_key: setup_env
 
         - task_key: setup_model_ops
@@ -45,6 +47,8 @@ resources:
               - "model"
               - "--data-engineers-group"
               - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
           environment_key: setup_env
 
       environments:

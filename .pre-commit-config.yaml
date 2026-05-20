@@ -14,11 +14,16 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.13
     hooks:
-      # Lint, with autofix for the safe fixes.
+      # Lint, with autofix for the safe fixes. Scoped to src/ and tests/ to
+      # match CI (`ruff check src tests`). Bundle entrypoints under bundles/*/src
+      # contain long SQL DDL string literals (table/column COMMENTs) that are
+      # intentionally not line-length-linted; CI excludes them too.
       - id: ruff
         args: [--fix]
-      # Format.
+        files: ^(src|tests)/
+      # Format (same scope as the linter and CI).
       - id: ruff-format
+        files: ^(src|tests)/
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

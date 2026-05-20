@@ -83,6 +83,8 @@ both positive and negative consequences honestly.
 | [0015](0015-integrated-table-naming.md) | Integrated catalog table naming (Kimball suffixes for derived analytical content; reference tables unsuffixed) | Accepted |
 | [0016](0016-ci-enforcement-policy.md) | CI enforcement policy (hybrid — controlled-vocabulary membership and dataset_catalog row presence enforced; everything else documented-only) | Accepted |
 | [0017](0017-bootstrap-lessons.md) | Bootstrap lessons: friction we hit getting the platform live | Accepted |
+| [0018](0018-access-groups-and-grant-model.md) | Access groups and the grant model (engineer / reader tiers; which bundle grants what) | Accepted |
+| [0019](0019-analyst-discovery-view.md) | Analyst-facing discovery view (curated `discovery.datasets` over `_ops` via view ownership chain) | Accepted |
 
 ## Future ADRs (backlog)
 

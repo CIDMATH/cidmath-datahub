@@ -19,6 +19,7 @@ Initial scaffolding. The repo skeleton, `_platform` bundle, and shared Python pa
 - **Source-aligned schemas:** `<subject>_raw`, `<subject>_processed`, `<subject>` (the bare subject name is the analysis layer; do not suffix with `_analysis`).
 - **Integrated catalog schemas:** named for concepts — `geography`, `time`, `pathogen`, `codes`, `surveillance`, `healthcare`, `population`, `movement`, `environment`, `one_health`, `response`, `global`.
 - **Operational metadata schema:** `_ops` in each catalog (leading underscore = internal).
+- **Discovery schema:** `discovery` in each catalog — reader-facing curated views over `_ops` (e.g., `discovery.datasets`). No leading underscore; analysts/readers can query it without `_ops` access via UC view ownership chaining. (ADR 0019)
 - Schemas in the source catalog represent **subjects**, not sources. Multiple sources for the same subject live as separate tables inside `<subject>_raw` and `<subject>_processed`. (ADR 0002)
 
 ### Table naming

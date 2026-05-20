@@ -21,14 +21,22 @@ Create four Unity Catalog catalogs, each with a managed storage location in S3:
 
 Use Databricks UI or `databricks catalogs create`. Tag each catalog with `project=cidmath-datahub`, `env=<env>`.
 
-### 2. Workspace group
+### 2. Workspace groups
 
-Create the workspace group `ecdh-data-engineers` and add Connor and any other engineers to it.
+Create the two access groups that back the grant model (ADR 0018) and add members.
+
+- **`ecdh-data-engineers`** — engineer tier: full access to raw/processed/analysis schemas and `_ops`; read-only on reference schemas. For people who build and operate pipelines.
+- **`ecdh-analysts`** — reader tier: read-only (`USE SCHEMA`, `SELECT`) on analysis-layer and reference schemas; never raw/processed/`_ops`. The template for end-user/consumer groups.
 
 ```bash
 databricks groups create --display-name ecdh-data-engineers
+databricks groups create --display-name ecdh-analysts
 databricks groups add-member <group-id> --user-name <user@emory.edu>
 ```
+
+The actual grants are applied automatically by the bundle deploy jobs (`_platform` grants `USE CATALOG` to both groups and engineer-tier on `_ops`; `_reference` grants reader-tier on reference schemas like `time`). The groups must exist **before** those jobs run, otherwise the GRANT statements error on a non-existent principal (same gotcha as service principals — ADR 0017). If you add the `ecdh-analysts` group after `_platform`/`_reference` have already deployed, just re-run those bundles' setup/build jobs to apply the analyst grants.
+
+Those same jobs also **verify** the grant model immediately after applying it: they read the grants back and assert each group holds exactly the intended tier (and that analysts hold nothing on `_ops`). A mismatch fails the job and the deploy, so a broken access model can't ship silently — you don't need to verify by hand. For an out-of-band audit or a true end-to-end test from an analyst identity, see `scripts/verify/`.
 
 ### 3. Service principals
 

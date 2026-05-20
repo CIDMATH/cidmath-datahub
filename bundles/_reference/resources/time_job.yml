@@ -26,6 +26,8 @@ resources:
               - "2099"
               - "--data-engineers-group"
               - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
           environment_key: reference_env
 
       environments:

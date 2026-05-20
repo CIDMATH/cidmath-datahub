@@ -23,6 +23,7 @@ from typing import Literal
 
 from pyspark.sql import SparkSession
 
+from cidmath_datahub.common import grants
 from cidmath_datahub.common.logging import get_logger
 
 log = get_logger(__name__)
@@ -225,23 +226,82 @@ VIEWS = [
     ("dataset_catalog_full", DATASET_CATALOG_FULL_VIEW_DDL),
 ]
 
-# --- Grants on _ops schema ---
-# Engineer-tier access to the _ops schema. Applied here rather than via a
-# DAB `grants` resource because some DAB CLI versions don't yet support the
-# grants resource type.
+# --- Analyst-facing discovery surface (ADR 0019) ---
+# The dataset catalog lives in `_ops`, which is engineer-only. To let analysts
+# (and other reader-tier groups) browse "what data exists" without granting any
+# access to `_ops`, we expose a curated view in a separate, reader-readable
+# `discovery` schema.
+#
+# This works via Unity Catalog's view ownership chain: the deploy SP owns both
+# the `_ops` base tables (it created them) and this view (it creates it here),
+# so a principal querying the view only needs SELECT on the view itself — UC
+# does not require them to hold any privilege on the underlying `_ops` tables.
+#
+# Columns are deliberately curated for a data consumer: what the dataset is,
+# why it matters, its coverage/cadence, how to access it (license, DUA, access
+# tier), and freshness. Internal plumbing (pipeline refs, watermarks, the
+# free-form metadata map, maintainer contact details) is intentionally omitted.
 
-GRANTS_DDL = [
-    "GRANT USE SCHEMA ON SCHEMA {catalog}._ops TO `{group}`",
-    "GRANT SELECT ON SCHEMA {catalog}._ops TO `{group}`",
-    "GRANT MODIFY ON SCHEMA {catalog}._ops TO `{group}`",
-    "GRANT CREATE TABLE ON SCHEMA {catalog}._ops TO `{group}`",
-]
+DISCOVERY_SCHEMA = "discovery"
+
+DISCOVERY_DATASETS_VIEW_DDL = """
+CREATE OR REPLACE VIEW {catalog}.discovery.datasets AS
+SELECT
+    c.full_table_name,
+    c.subject,
+    c.layer,
+    c.description,
+    c.public_health_relevance,
+    c.known_limitations,
+    c.missingness_notes,
+    c.data_suppression_notes,
+    c.temporal_resolution,
+    c.temporal_coverage_start,
+    c.temporal_coverage_end,
+    c.spatial_resolution,
+    c.spatial_coverage,
+    c.demographic_resolution,
+    c.demographic_coverage,
+    c.refresh_cadence,
+    c.reporting_lag,
+    c.revision_cadence,
+    c.source_url,
+    c.source_documentation_url,
+    c.source_data_dictionary_url,
+    c.license,
+    c.dua_required,
+    c.dua_reference,
+    c.access_tier,
+    c.is_hosted,
+    c.owner,
+    c.last_validated,
+    e.update_semantics,
+    e.last_refresh_at,
+    e.dq_status_last
+FROM {catalog}._ops.dataset_catalog c
+LEFT JOIN {catalog}._ops.dataset_engineering e
+    ON c.full_table_name = e.full_table_name;
+"""
+
+# --- Grants ---
+# Grants are applied here (SQL DDL via the cidmath_datahub.common.grants
+# helpers) rather than via a DAB `grants` resource because some DAB CLI
+# versions don't yet support the grants resource type (ADR 0017).
+#
+# Two principals are granted at the catalog/_ops level (ADR 0018):
+#   - Engineers (ecdh-data-engineers): USE CATALOG on the catalog plus
+#     engineer-tier (USE SCHEMA, SELECT, MODIFY, CREATE TABLE) on _ops.
+#   - Analysts (ecdh-analysts): USE CATALOG only — the minimum needed to
+#     traverse into the reference/analysis schemas where they hold reader
+#     grants applied by the _reference and subject bundles. Analysts are
+#     deliberately NOT granted anything on _ops (it is internal/engineer-only).
 
 
 def run(
     catalog: str,
     scope: Literal["source", "model"],
     data_engineers_group: str,
+    analysts_group: str,
 ) -> None:
     """Create or update _ops tables in the given catalog, then apply grants.
 
@@ -253,6 +313,9 @@ def run(
             catalog doesn't need).
         data_engineers_group: Name of the workspace group to grant engineer-
             tier access on `_ops` (typically `ecdh-data-engineers`).
+        analysts_group: Name of the reader-tier workspace group to grant
+            USE CATALOG on the catalog (typically `ecdh-analysts`). Receives
+            no grant on `_ops`. See ADR 0018.
     """
     spark = SparkSession.builder.getOrCreate()
 
@@ -277,12 +340,54 @@ def run(
         log.info("Creating view", extra={"view": full})
         spark.sql(ddl.format(catalog=catalog))
 
-    log.info(
-        "Applying grants on _ops schema",
-        extra={"catalog": catalog, "group": data_engineers_group},
+    # Analyst-facing discovery surface (ADR 0019): a curated view over the
+    # dataset catalog, in a reader-readable schema separate from _ops.
+    log.info("Ensuring discovery schema + view", extra={"catalog": catalog})
+    spark.sql(
+        f"CREATE SCHEMA IF NOT EXISTS {catalog}.{DISCOVERY_SCHEMA} "
+        f"COMMENT 'Analyst-facing data discovery surface. Curated views over "
+        f"operational metadata; readable by reader-tier groups without _ops "
+        f"access. Owned by _platform bundle. See ADR 0019.'"
     )
-    for stmt in GRANTS_DDL:
-        spark.sql(stmt.format(catalog=catalog, group=data_engineers_group))
+    spark.sql(DISCOVERY_DATASETS_VIEW_DDL.format(catalog=catalog))
+    spark.sql(
+        f"COMMENT ON VIEW {catalog}.{DISCOVERY_SCHEMA}.datasets IS "
+        f"'Browse available datasets: what each is, why it matters, its coverage "
+        f"and cadence, how to access it, and freshness. Curated from the dataset "
+        f"catalog. ADR 0019.'"
+    )
+
+    log.info(
+        "Applying catalog + _ops + discovery grants",
+        extra={
+            "catalog": catalog,
+            "engineers_group": data_engineers_group,
+            "analysts_group": analysts_group,
+        },
+    )
+    # Catalog traversal for both tiers (USE CATALOG).
+    grants.grant_catalog_usage(spark, catalog, data_engineers_group)
+    grants.grant_catalog_usage(spark, catalog, analysts_group)
+    # Engineer-tier full access on the _ops schema. Analysts get nothing on
+    # _ops by design (ADR 0018).
+    grants.grant_schema_engineer(spark, catalog, "_ops", data_engineers_group)
+    # Reader-tier on the discovery schema for both groups. Analysts read the
+    # curated catalog here in lieu of _ops; the view's ownership chain exposes
+    # the underlying _ops rows without granting _ops access (ADR 0019).
+    grants.grant_schema_reader(spark, catalog, DISCOVERY_SCHEMA, data_engineers_group)
+    grants.grant_schema_reader(spark, catalog, DISCOVERY_SCHEMA, analysts_group)
+
+    # --- Verify the access model (deploy-time gate; ADR 0018) ---
+    # Read the grants back and assert they match the intended tiers. A mismatch
+    # raises and fails this job, which fails the deploy. The negative assertion
+    # (analysts have NO access to _ops) is the security-critical one — it cannot
+    # be confirmed by the apply step alone, only by reading grants back.
+    log.info("Verifying access model", extra={"catalog": catalog})
+    grants.verify_schema_no_access(spark, catalog, "_ops", analysts_group)
+    grants.verify_schema_engineer(spark, catalog, "_ops", data_engineers_group)
+    grants.verify_schema_reader(spark, catalog, DISCOVERY_SCHEMA, analysts_group)
+    grants.verify_schema_reader(spark, catalog, DISCOVERY_SCHEMA, data_engineers_group)
+    log.info("Access model verified", extra={"catalog": catalog})
 
     log.info(
         "Completed _ops setup",
@@ -290,7 +395,6 @@ def run(
             "catalog": catalog,
             "scope": scope,
             "tables": len(UNIVERSAL_TABLES),
-            "grants": len(GRANTS_DDL),
         },
     )
 
@@ -304,8 +408,13 @@ def main() -> None:
         default="ecdh-data-engineers",
         help="Workspace group to grant engineer-tier access on _ops.",
     )
+    parser.add_argument(
+        "--analysts-group",
+        default="ecdh-analysts",
+        help="Reader-tier workspace group to grant USE CATALOG (no _ops access).",
+    )
     args = parser.parse_args()
-    run(args.catalog, args.scope, args.data_engineers_group)
+    run(args.catalog, args.scope, args.data_engineers_group, args.analysts_group)
 
 
 if __name__ == "__main__":

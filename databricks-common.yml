@@ -29,6 +29,11 @@ variables:
   data_engineers_group:
     description: Workspace group holding engineer-tier grants (ecdh-data-engineers).
     default: ecdh-data-engineers
+  analysts_group:
+    description: |
+      Workspace group holding reader-tier grants (ecdh-analysts). Reads
+      analysis-layer and reference schemas; never raw/processed/_ops. See ADR 0018.
+    default: ecdh-analysts
   deploy_sp_application_id:
     description: |
       Application ID (UUID) of the deploy service principal for the current
