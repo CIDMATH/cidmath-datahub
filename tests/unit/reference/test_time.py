@@ -20,12 +20,12 @@ class TestMMWRWeek:
     @pytest.mark.parametrize(
         "d,expected",
         [
-            (date(2023, 1, 1), (2023, 1)),    # Sunday, week 1 of 2023
-            (date(2023, 1, 7), (2023, 1)),    # Saturday, still week 1
-            (date(2023, 1, 8), (2023, 2)),    # next Sunday, week 2
-            (date(2020, 12, 31), (2020, 53)), # 2020 is a 53-week year
-            (date(2021, 1, 2), (2020, 53)),   # Saturday belongs to 2020W53
-            (date(2021, 1, 3), (2021, 1)),    # Sunday starts 2021W01
+            (date(2023, 1, 1), (2023, 1)),  # Sunday, week 1 of 2023
+            (date(2023, 1, 7), (2023, 1)),  # Saturday, still week 1
+            (date(2023, 1, 8), (2023, 2)),  # next Sunday, week 2
+            (date(2020, 12, 31), (2020, 53)),  # 2020 is a 53-week year
+            (date(2021, 1, 2), (2020, 53)),  # Saturday belongs to 2020W53
+            (date(2021, 1, 3), (2021, 1)),  # Sunday starts 2021W01
         ],
     )
     def test_known_mmwr_values(self, d, expected):
