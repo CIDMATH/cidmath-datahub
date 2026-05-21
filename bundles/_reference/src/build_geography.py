@@ -1,16 +1,22 @@
 """Build the canonical geography reference tables in the integrated catalog.
 
-Slice 1 (ADR 0020): state + county + HHS regions, vintages 2010 and 2020, lean
-attribute tables plus companion generalized geometry in ``geography.boundary``.
-Source: IPUMS NHGIS shapefiles. Update semantics: ``full_refresh`` (ADR 0007).
+Slices 1 + 2a (ADR 0020): state, county, census tract, and ZCTA, plus the static
+HHS regions and companion generalized geometry in ``geography.boundary``.
+Vintages 2010 and 2020. Source: IPUMS NHGIS shapefiles. Update semantics:
+``full_refresh`` (ADR 0007).
 
 Scope notes (decided during wiring, see ADR 0020):
-  - No crosswalk in slice 1. NHGIS publishes no direct county->county crosswalk
-    (its 2010<->2020 crosswalks are sourced from block groups), and counties are
-    near-stable across the decade. Crosswalks land in slice 2 at tract/BG level.
-  - Centroids are population-weighted where the Census Centers of Population
-    point files cover the unit (``centroid_is_pop_weighted = true``), falling
-    back to the polygon interior point otherwise (e.g. units CoP doesn't cover).
+  - No crosswalk yet. NHGIS publishes no direct same-level crosswalk; its
+    2010<->2020 crosswalks are sourced from block groups. Crosswalks land in
+    slice 2b, shipped as published.
+  - Each entity carries two centroid pairs: a geographic interior point
+    (``centroid_geo_lon``/``centroid_geo_lat``, always set) and a
+    population-weighted center (``centroid_pop_lon``/``centroid_pop_lat``, set
+    where a Census Center of Population covers the unit — state/county/tract;
+    ZCTAs have none, so the ZCTA table omits the population pair).
+  - High-volume levels (tract ~74k, ZCTA ~33k per vintage) are written per
+    (level, vintage) chunk rather than accumulated in driver memory: the first
+    write to each table overwrites (full_refresh), later chunks append.
 
 Pure, testable logic (GEOID/GISJOIN parsing, HHS mapping, row assembly) lives in
 ``cidmath_datahub.reference.geography`` (ADR 0011); this entrypoint is the thin
@@ -44,6 +50,10 @@ log = get_logger(__name__)
 
 SCHEMA = "geography"
 
+# Levels built from NHGIS polygon shapefiles, in dependency order (parents first
+# so tract FK checks can run against already-loaded state/county).
+LEVELS = ("state", "county", "tract", "zcta")
+
 # IPUMS NHGIS boundary shapefile API codes, keyed by (level, vintage). Pattern is
 # us_<level>_<year>_tl<tiger_basis>. Verify/extend against the live catalog with
 # IpumsApiClient.get_metadata_catalog(metadata_type="shapefiles").
@@ -52,16 +62,22 @@ SHAPEFILE_NAMES: dict[tuple[str, int], str] = {
     ("state", 2020): "us_state_2020_tl2020",
     ("county", 2010): "us_county_2010_tl2010",
     ("county", 2020): "us_county_2020_tl2020",
+    ("tract", 2010): "us_tract_2010_tl2010",
+    ("tract", 2020): "us_tract_2020_tl2020",
+    ("zcta", 2010): "us_zcta_2010_tl2010",
+    ("zcta", 2020): "us_zcta_2020_tl2020",
 }
 
 # Census Centers of Population point shapefiles (population-weighted centroids),
 # keyed by (level, vintage). Optional: a missing entry or file falls back to the
-# polygon interior point. Pattern: us_<level>_cenpop_<year>_cenpop<year>.
+# polygon interior point. CoP exists for state/county/tract, not ZCTA.
 CENPOP_SHAPEFILE_NAMES: dict[tuple[str, int], str] = {
     ("state", 2010): "us_state_cenpop_2010_cenpop2010",
     ("state", 2020): "us_state_cenpop_2020_cenpop2020",
     ("county", 2010): "us_county_cenpop_2010_cenpop2010",
     ("county", 2020): "us_county_cenpop_2020_cenpop2020",
+    ("tract", 2010): "us_tract_cenpop_2010_cenpop2010",
+    ("tract", 2020): "us_tract_cenpop_2020_cenpop2020",
 }
 
 NHGIS_SOURCE_URL = "https://www.nhgis.org/"
@@ -114,6 +130,34 @@ COUNTY_SPARK_SCHEMA = T.StructType(
     ]
 )
 
+TRACT_SPARK_SCHEMA = T.StructType(
+    [
+        T.StructField("geoid", T.StringType(), False),
+        T.StructField("vintage", T.IntegerType(), False),
+        T.StructField("state_geoid", T.StringType(), False),
+        T.StructField("county_geoid", T.StringType(), False),
+        T.StructField("gisjoin", T.StringType(), False),
+        T.StructField("centroid_geo_lon", T.DoubleType(), False),
+        T.StructField("centroid_geo_lat", T.DoubleType(), False),
+        T.StructField("centroid_pop_lon", T.DoubleType(), True),
+        T.StructField("centroid_pop_lat", T.DoubleType(), True),
+        T.StructField("area_land_sqm", T.DoubleType(), True),
+        T.StructField("area_water_sqm", T.DoubleType(), True),
+    ]
+)
+
+ZCTA_SPARK_SCHEMA = T.StructType(
+    [
+        T.StructField("geoid", T.StringType(), False),
+        T.StructField("vintage", T.IntegerType(), False),
+        T.StructField("gisjoin", T.StringType(), False),
+        T.StructField("centroid_geo_lon", T.DoubleType(), False),
+        T.StructField("centroid_geo_lat", T.DoubleType(), False),
+        T.StructField("area_land_sqm", T.DoubleType(), True),
+        T.StructField("area_water_sqm", T.DoubleType(), True),
+    ]
+)
+
 BOUNDARY_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("geo_level", T.StringType(), False),
@@ -124,6 +168,13 @@ BOUNDARY_SPARK_SCHEMA = T.StructType(
         T.StructField("geometry_wkb", T.BinaryType(), False),
     ]
 )
+
+ENTITY_SCHEMAS: dict[str, T.StructType] = {
+    "state": STATE_SPARK_SCHEMA,
+    "county": COUNTY_SPARK_SCHEMA,
+    "tract": TRACT_SPARK_SCHEMA,
+    "zcta": ZCTA_SPARK_SCHEMA,
+}
 
 
 def _get_secret(scope: str, key: str) -> str:
@@ -158,7 +209,7 @@ def _download_shapefiles(api_key: str, shapefile_names: list[str], workdir: Path
     ipums = IpumsApiClient(api_key)
     extract = AggregateDataExtract(
         collection="nhgis",
-        description="CIDMATH geography reference (state + county boundaries + cenpop)",
+        description="CIDMATH geography reference (state/county/tract/zcta + cenpop)",
         shapefiles=list(shapefile_names),
     )
     log.info("Submitting NHGIS extract", extra={"shapefiles": shapefile_names})
@@ -186,14 +237,16 @@ def _find_shapefile(root: Path, level: str, vintage: int, *, cenpop: bool = Fals
     """Locate the .shp for a level/vintage.
 
     Centers-of-Population files carry 'cenpop' in their path; boundary files do
-    not. Returns None for a missing cenpop file (optional; caller falls back to
-    geographic centroids); raises for a missing boundary file.
+    not. The leading ``us_<level>_`` token disambiguates levels whose names are
+    substrings of others (e.g. county vs cty_sub). Returns None for a missing
+    cenpop file (optional); raises for a missing boundary file.
     """
-    lvl, year = level.lower(), str(vintage)
+    token = f"us_{level.lower()}_"
+    year = str(vintage)
     matches = [
         p
         for p in root.rglob("*.shp")
-        if lvl in str(p).lower()
+        if token in str(p).lower()
         and year in str(p).lower()
         and ("cenpop" in str(p).lower()) == cenpop
     ]
@@ -267,6 +320,19 @@ def _geom_to_wkb(geom: Any, tolerance: float) -> bytes:
     return geom.wkb
 
 
+def _boundary_row(
+    level: str, row: dict[str, Any], vintage: int, resolution: str, geom: Any, tolerance: float
+) -> dict[str, Any]:
+    return {
+        "geo_level": level,
+        "geoid": row["geoid"],
+        "vintage": vintage,
+        "resolution": resolution,
+        "gisjoin": row["gisjoin"],
+        "geometry_wkb": _geom_to_wkb(geom, tolerance),
+    }
+
+
 def _build_state_frames(
     gdf: Any,
     vintage: int,
@@ -299,16 +365,7 @@ def _build_state_frames(
             area_water_sqm=_num(rec[awater]) if awater else None,
         )
         rows.append(row)
-        boundary.append(
-            {
-                "geo_level": "state",
-                "geoid": row["geoid"],
-                "vintage": vintage,
-                "resolution": resolution,
-                "gisjoin": row["gisjoin"],
-                "geometry_wkb": _geom_to_wkb(geom, tolerance),
-            }
-        )
+        boundary.append(_boundary_row("state", row, vintage, resolution, geom, tolerance))
     return rows, boundary
 
 
@@ -347,47 +404,109 @@ def _build_county_frames(
             area_water_sqm=_num(rec[awater]) if awater else None,
         )
         rows.append(row)
-        boundary.append(
-            {
-                "geo_level": "county",
-                "geoid": row["geoid"],
-                "vintage": vintage,
-                "resolution": resolution,
-                "gisjoin": row["gisjoin"],
-                "geometry_wkb": _geom_to_wkb(geom, tolerance),
-            }
-        )
+        boundary.append(_boundary_row("county", row, vintage, resolution, geom, tolerance))
     return rows, boundary
 
 
-def _dq_checks(state_rows: list[dict[str, Any]], county_rows: list[dict[str, Any]]) -> None:
-    def _dups(rows: list[dict[str, Any]]) -> set[tuple[str, int]]:
-        seen: set[tuple[str, int]] = set()
-        dups: set[tuple[str, int]] = set()
-        for r in rows:
-            key = (r["geoid"], r["vintage"])
-            if key in seen:
-                dups.add(key)
-            seen.add(key)
-        return dups
+def _build_tract_frames(
+    gdf: Any,
+    vintage: int,
+    tolerance: float,
+    resolution: str,
+    cenpop: dict[str, tuple[float, float]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    cols = list(gdf.columns)
+    gj = _first_col(cols, ["GISJOIN", "gisjoin"])
+    if gj is None:
+        raise ValueError(f"tract shapefile has no GISJOIN column; columns={cols}")
+    aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
+    awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
 
-    state_dups, county_dups = _dups(state_rows), _dups(county_rows)
-    if state_dups:
-        raise ValueError(f"duplicate (geoid, vintage) in state: {sorted(state_dups)}")
-    if county_dups:
-        raise ValueError(f"duplicate (geoid, vintage) in county: {sorted(county_dups)}")
+    rows: list[dict[str, Any]] = []
+    boundary: list[dict[str, Any]] = []
+    for _, rec in gdf.iterrows():
+        geom = rec.geometry
+        if geom is None or geom.is_empty:
+            continue
+        geo_lon, geo_lat, pop_lon, pop_lat = _centroid_for(rec[gj], geom, cenpop)
+        row = geo.build_tract_row(
+            rec[gj],
+            vintage,
+            centroid_geo_lon=geo_lon,
+            centroid_geo_lat=geo_lat,
+            centroid_pop_lon=pop_lon,
+            centroid_pop_lat=pop_lat,
+            area_land_sqm=_num(rec[aland]) if aland else None,
+            area_water_sqm=_num(rec[awater]) if awater else None,
+        )
+        rows.append(row)
+        boundary.append(_boundary_row("tract", row, vintage, resolution, geom, tolerance))
+    return rows, boundary
 
-    state_keys = {(r["geoid"], r["vintage"]) for r in state_rows}
-    orphans = sorted(
-        {
-            (r["geoid"], r["state_geoid"], r["vintage"])
-            for r in county_rows
-            if (r["state_geoid"], r["vintage"]) not in state_keys
-        }
-    )
-    if orphans:
-        raise ValueError(f"county rows with no matching state: {orphans}")
-    log.info("DQ checks passed", extra={"states": len(state_rows), "counties": len(county_rows)})
+
+def _build_zcta_frames(
+    gdf: Any,
+    vintage: int,
+    tolerance: float,
+    resolution: str,
+    cenpop: dict[str, tuple[float, float]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    cols = list(gdf.columns)
+    gj = _first_col(cols, ["GISJOIN", "gisjoin"])
+    if gj is None:
+        raise ValueError(f"zcta shapefile has no GISJOIN column; columns={cols}")
+    aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
+    awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
+
+    rows: list[dict[str, Any]] = []
+    boundary: list[dict[str, Any]] = []
+    for _, rec in gdf.iterrows():
+        geom = rec.geometry
+        if geom is None or geom.is_empty:
+            continue
+        geo_lon, geo_lat, _pop_lon, _pop_lat = _centroid_for(rec[gj], geom, cenpop)
+        row = geo.build_zcta_row(
+            rec[gj],
+            vintage,
+            centroid_geo_lon=geo_lon,
+            centroid_geo_lat=geo_lat,
+            area_land_sqm=_num(rec[aland]) if aland else None,
+            area_water_sqm=_num(rec[awater]) if awater else None,
+        )
+        rows.append(row)
+        boundary.append(_boundary_row("zcta", row, vintage, resolution, geom, tolerance))
+    return rows, boundary
+
+
+BUILDERS = {
+    "state": _build_state_frames,
+    "county": _build_county_frames,
+    "tract": _build_tract_frames,
+    "zcta": _build_zcta_frames,
+}
+
+
+def _check_unique(level: str, vintage: int, rows: list[dict[str, Any]]) -> None:
+    """Raise if any geoid repeats within this (level, vintage) chunk (ADR 0009)."""
+    seen: set[str] = set()
+    dups: set[str] = set()
+    for r in rows:
+        if r["geoid"] in seen:
+            dups.add(r["geoid"])
+        seen.add(r["geoid"])
+    if dups:
+        raise ValueError(f"duplicate geoid in {level} (vintage {vintage}): {sorted(dups)[:10]}")
+
+
+def _check_fk(
+    level: str, rows: list[dict[str, Any]], fk_col: str, parent_geoids: set[str], vintage: int
+) -> None:
+    """Raise if any row's foreign key is absent from the parent set (ADR 0009)."""
+    missing = sorted({r[fk_col] for r in rows if r[fk_col] not in parent_geoids})
+    if missing:
+        raise ValueError(
+            f"{level} rows referencing missing {fk_col} (vintage {vintage}): {missing[:10]}"
+        )
 
 
 def _build_hhs_region(spark: SparkSession, catalog: str) -> None:
@@ -404,19 +523,42 @@ def _build_hhs_region(spark: SparkSession, catalog: str) -> None:
     log.info("Wrote hhs_region", extra={"rows": len(rows)})
 
 
-def _write_table(
+def _write_chunk(
     spark: SparkSession,
     catalog: str,
     table: str,
     rows: list[dict[str, Any]],
     schema: T.StructType,
-    sort_cols: list[str],
+    written: set[str],
 ) -> None:
-    df = spark.createDataFrame(rows, schema=schema).repartition(1).sortWithinPartitions(*sort_cols)
-    df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        f"{catalog}.{SCHEMA}.{table}"
-    )
-    log.info("Wrote table", extra={"table": f"{catalog}.{SCHEMA}.{table}", "rows": len(rows)})
+    """Write one (level, vintage) chunk. The first write to a table overwrites
+    (full_refresh); later chunks append. Bounds driver memory at tract/ZCTA
+    volume and avoids a single-file write for large tables.
+    """
+    if not rows:
+        return
+    df = spark.createDataFrame(rows, schema=schema)
+    mode = "overwrite" if table not in written else "append"
+    writer = df.write.mode(mode)
+    if mode == "overwrite":
+        writer = writer.option("overwriteSchema", "true")
+    writer.saveAsTable(f"{catalog}.{SCHEMA}.{table}")
+    written.add(table)
+    log.info("Wrote chunk", extra={"table": table, "rows": len(rows), "mode": mode})
+
+
+def _set_clustering(spark: SparkSession, catalog: str) -> None:
+    """Best-effort Liquid Clustering on the high-volume tables (ADR 0020).
+
+    Applied after the data lands; non-fatal if the runtime doesn't support
+    ALTER ... CLUSTER BY, since clustering is a read-pruning optimization.
+    """
+    targets = (("boundary", "geo_level, vintage"), ("tract", "vintage"), ("zcta", "vintage"))
+    for table, cols in targets:
+        try:
+            spark.sql(f"ALTER TABLE {catalog}.{SCHEMA}.{table} CLUSTER BY ({cols})")
+        except Exception as exc:  # pragma: no cover - runtime-dependent
+            log.warning("Could not set clustering", extra={"table": table, "error": str(exc)})
 
 
 def _register_dataset(
@@ -536,6 +678,18 @@ def _register_dataset(
     log.info("Registered dataset metadata", extra={"table": full})
 
 
+def _comment_tables(spark: SparkSession, catalog: str) -> None:
+    comments = {
+        "state": "US states + DC and territories, vintaged. Source IPUMS NHGIS. ADR 0020.",
+        "county": "US counties (geoid, vintage); state_geoid FK. Source IPUMS NHGIS. ADR 0020.",
+        "tract": "US tracts (geoid, vintage); county + state FKs. Source IPUMS NHGIS. ADR 0020.",
+        "zcta": "US ZCTAs (geoid, vintage); non-nesting. Source IPUMS NHGIS. ADR 0020.",
+        "boundary": "Boundary polygons (WKB) by geo_level/vintage/resolution. ADR 0020.",
+    }
+    for table, text in comments.items():
+        spark.sql(f"COMMENT ON TABLE {catalog}.{SCHEMA}.{table} IS '{text}'")
+
+
 def run(
     catalog: str,
     vintages: list[int],
@@ -556,9 +710,9 @@ def run(
 
     spark.sql(
         f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
-        f"COMMENT 'Canonical US geography reference: states, counties, HHS "
-        f"regions, and companion boundaries. Owned by the _reference bundle. "
-        f"Source: IPUMS NHGIS. See ADR 0020.'"
+        f"COMMENT 'Canonical US geography reference: states, counties, tracts, "
+        f"ZCTAs, HHS regions, and companion boundaries. Owned by the _reference "
+        f"bundle. Source: IPUMS NHGIS. See ADR 0020.'"
     )
 
     _build_hhs_region(spark, catalog)
@@ -567,16 +721,14 @@ def run(
         raise ValueError("--ipums-secret-scope is required to pull NHGIS shapefiles")
     api_key = _get_secret(ipums_secret_scope, ipums_secret_key or "nhgis_api_key")
 
-    missing = [
-        (lvl, v) for v in vintages for lvl in ("state", "county") if (lvl, v) not in SHAPEFILE_NAMES
-    ]
+    missing = [(lvl, v) for v in vintages for lvl in LEVELS if (lvl, v) not in SHAPEFILE_NAMES]
     if missing:
         raise ValueError(f"no known NHGIS shapefile code for {missing}; extend SHAPEFILE_NAMES")
-    boundary_names = [SHAPEFILE_NAMES[(lvl, v)] for v in vintages for lvl in ("state", "county")]
+    boundary_names = [SHAPEFILE_NAMES[(lvl, v)] for v in vintages for lvl in LEVELS]
     cenpop_names = [
         CENPOP_SHAPEFILE_NAMES[(lvl, v)]
         for v in vintages
-        for lvl in ("state", "county")
+        for lvl in LEVELS
         if (lvl, v) in CENPOP_SHAPEFILE_NAMES
     ]
     shapefile_names = boundary_names + cenpop_names
@@ -588,58 +740,43 @@ def run(
     _download_shapefiles(api_key, shapefile_names, workdir)
     _extract_all_zips(workdir)
 
-    state_rows: list[dict[str, Any]] = []
-    county_rows: list[dict[str, Any]] = []
-    boundary_rows: list[dict[str, Any]] = []
-    for v in vintages:
-        state_gdf = _read_gdf(_find_shapefile(workdir, "state", v))
-        county_gdf = _read_gdf(_find_shapefile(workdir, "county", v))
-        state_cenpop = _read_cenpop_lookup(workdir, "state", v)
-        county_cenpop = _read_cenpop_lookup(workdir, "county", v)
-        sr, sb = _build_state_frames(state_gdf, v, tolerance, resolution, state_cenpop)
-        cr, cb = _build_county_frames(county_gdf, v, tolerance, resolution, county_cenpop)
-        state_rows += sr
-        county_rows += cr
-        boundary_rows += sb + cb
-        log.info(
-            "Processed vintage",
-            extra={
-                "vintage": v,
-                "states": len(sr),
-                "counties": len(cr),
-                "state_cenpop": len(state_cenpop),
-                "county_cenpop": len(county_cenpop),
-            },
-        )
+    # Process and write per (level, vintage) chunk to bound driver memory. Levels
+    # run parents-first so tract FK checks see already-loaded state/county geoids.
+    written: set[str] = set()
+    state_geoids: dict[int, set[str]] = {}
+    county_geoids: dict[int, set[str]] = {}
 
-    _dq_checks(state_rows, county_rows)
+    for lvl in LEVELS:
+        for v in vintages:
+            gdf = _read_gdf(_find_shapefile(workdir, lvl, v))
+            cenpop = (
+                _read_cenpop_lookup(workdir, lvl, v)
+                if (lvl, v) in CENPOP_SHAPEFILE_NAMES
+                else {}
+            )
+            rows, boundary = BUILDERS[lvl](gdf, v, tolerance, resolution, cenpop)
 
-    _write_table(spark, catalog, "state", state_rows, STATE_SPARK_SCHEMA, ["vintage", "geoid"])
-    _write_table(spark, catalog, "county", county_rows, COUNTY_SPARK_SCHEMA, ["vintage", "geoid"])
-    _write_table(
-        spark,
-        catalog,
-        "boundary",
-        boundary_rows,
-        BOUNDARY_SPARK_SCHEMA,
-        ["geo_level", "vintage", "geoid"],
-    )
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.state IS "
-        f"'US states + DC (and territories), vintaged. Reference; full_refresh. "
-        f"Source IPUMS NHGIS. ADR 0020.'"
-    )
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.county IS "
-        f"'US counties keyed (geoid, vintage); state_geoid FK to state. Reference; "
-        f"full_refresh. Source IPUMS NHGIS. ADR 0020.'"
-    )
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.boundary IS "
-        f"'Companion boundary polygons (WKB) for state/county by vintage and "
-        f"resolution. Source IPUMS NHGIS. ADR 0020.'"
-    )
+            _check_unique(lvl, v, rows)
+            if lvl == "state":
+                state_geoids[v] = {r["geoid"] for r in rows}
+            elif lvl == "county":
+                county_geoids[v] = {r["geoid"] for r in rows}
+                _check_fk("county", rows, "state_geoid", state_geoids.get(v, set()), v)
+            elif lvl == "tract":
+                _check_fk("tract", rows, "state_geoid", state_geoids.get(v, set()), v)
+                _check_fk("tract", rows, "county_geoid", county_geoids.get(v, set()), v)
 
+            _write_chunk(spark, catalog, lvl, rows, ENTITY_SCHEMAS[lvl], written)
+            _write_chunk(spark, catalog, "boundary", boundary, BOUNDARY_SPARK_SCHEMA, written)
+            log.info(
+                "Processed",
+                extra={"level": lvl, "vintage": v, "rows": len(rows), "cenpop": len(cenpop)},
+            )
+
+    _comment_tables(spark, catalog)
+    _set_clustering(spark, catalog)
+
+    # Grants: reader-tier for both groups, same posture as time (ADR 0018/0020).
     grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
     grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
     grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
@@ -675,6 +812,32 @@ def run(
     _register_dataset(
         spark,
         catalog=catalog,
+        table="tract",
+        description="US census tracts, one row per tract per vintage, with county + state FKs.",
+        public_health_relevance=(
+            "Fine-grained spatial unit for neighborhood-level surveillance and "
+            "modeling; redrawn each decade, so vintage matters."
+        ),
+        spatial_resolution="tract",
+        cluster_columns=["vintage"],
+        pipeline_reference=pipeline_ref,
+    )
+    _register_dataset(
+        spark,
+        catalog=catalog,
+        table="zcta",
+        description="US ZIP Code Tabulation Areas, one row per ZCTA per vintage (non-nesting).",
+        public_health_relevance=(
+            "Approximate ZIP-code geography for joining address- or ZIP-coded health "
+            "data; non-nesting, so used directly rather than via county/state."
+        ),
+        spatial_resolution="zcta",
+        cluster_columns=["vintage"],
+        pipeline_reference=pipeline_ref,
+    )
+    _register_dataset(
+        spark,
+        catalog=catalog,
         table="hhs_region",
         description="The ten HHS regions (static federal grouping of states).",
         public_health_relevance=(
@@ -688,7 +851,7 @@ def run(
         spark,
         catalog=catalog,
         table="boundary",
-        description="Companion boundary polygons (WKB) for state and county by vintage.",
+        description="Companion boundary polygons (WKB) for all levels by vintage.",
         public_health_relevance=(
             "Geometry for choropleth mapping and spatial-adjacency models; kept off "
             "the lean attribute tables so attribute joins stay cheap."

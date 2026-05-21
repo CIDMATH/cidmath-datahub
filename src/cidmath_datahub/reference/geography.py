@@ -25,6 +25,8 @@ from typing import Any
 # zero-padded (ADR 0020).
 STATE_GEOID_WIDTH = 2
 COUNTY_GEOID_WIDTH = 5
+TRACT_GEOID_WIDTH = 11
+ZCTA_GEOID_WIDTH = 5
 
 
 def normalize_geoid(value: str | int, width: int) -> str:
@@ -68,6 +70,16 @@ def validate_county_geoid(value: str | int) -> str:
     return normalize_geoid(value, COUNTY_GEOID_WIDTH)
 
 
+def validate_tract_geoid(value: str | int) -> str:
+    """Return a normalized 11-digit census tract GEOID (see :func:`normalize_geoid`)."""
+    return normalize_geoid(value, TRACT_GEOID_WIDTH)
+
+
+def validate_zcta_geoid(value: str | int) -> str:
+    """Return a normalized 5-digit ZCTA GEOID (see :func:`normalize_geoid`)."""
+    return normalize_geoid(value, ZCTA_GEOID_WIDTH)
+
+
 def state_geoid_of_county(county_geoid: str | int) -> str:
     """Return the 2-digit state GEOID that a 5-digit county GEOID belongs to.
 
@@ -82,6 +94,16 @@ def state_geoid_of_county(county_geoid: str | int) -> str:
     return validate_county_geoid(county_geoid)[:STATE_GEOID_WIDTH]
 
 
+def state_geoid_of_tract(tract_geoid: str | int) -> str:
+    """Return the 2-digit state GEOID for an 11-digit tract GEOID (its first 2 digits)."""
+    return validate_tract_geoid(tract_geoid)[:STATE_GEOID_WIDTH]
+
+
+def county_geoid_of_tract(tract_geoid: str | int) -> str:
+    """Return the 5-digit county GEOID for an 11-digit tract GEOID (its first 5 digits)."""
+    return validate_tract_geoid(tract_geoid)[:COUNTY_GEOID_WIDTH]
+
+
 def gisjoin_to_geoid(gisjoin: str, level: str) -> str:
     """Convert an NHGIS GISJOIN key to the standard Census GEOID for a level.
 
@@ -90,23 +112,27 @@ def gisjoin_to_geoid(gisjoin: str, level: str) -> str:
     the separators are ``"0"`` (the trailing digit differentiates historical
     areas)::
 
-        state   "G" + SS  + "0"             Colorado   "G080"     -> "08"
-        county  "G" + SS + "0" + CCC + "0"  Adams Co.  "G0800010" -> "08001"
+        state   G + SS + 0                        -> 2-digit GEOID
+        county  G + SS + 0 + CCC + 0              -> 5-digit GEOID
+        tract   G + SS + 0 + CCC + 0 + TTTTTT     -> 11-digit GEOID
+        zcta    G + ZZZZZ                         -> 5-digit GEOID (non-nested)
 
     The GEOID is recovered by position (separators dropped), so this is correct
-    even when the differentiator digit is non-zero. Verified against the IPUMS
-    NHGIS GISJOIN documentation.
+    even when the differentiator digit is non-zero. State/county/tract are
+    verified against IPUMS NHGIS GISJOIN documentation; the ZCTA form is
+    confirmed on the first extract by the length/digit check.
 
     Args:
         gisjoin: The NHGIS GISJOIN key (must start with ``"G"``).
-        level: ``"state"`` or ``"county"``.
+        level: ``"state"``, ``"county"``, ``"tract"``, or ``"zcta"``.
 
     Returns:
-        The zero-padded Census GEOID (2-digit state, 5-digit county).
+        The zero-padded Census GEOID (2-digit state, 5-digit county, 11-digit
+        tract, 5-digit ZCTA).
 
     Raises:
         ValueError: If the GISJOIN is malformed for the level, or the level is
-            not ``"state"`` or ``"county"``.
+            not a supported level.
     """
     g = gisjoin.strip().upper()
     if not g.startswith("G"):
@@ -120,7 +146,17 @@ def gisjoin_to_geoid(gisjoin: str, level: str) -> str:
         if len(body) != 7 or not body.isdigit():
             raise ValueError(f"county GISJOIN {gisjoin!r} is malformed")
         return body[0:2] + body[3:6]  # SS [sep] CCC [sep]
-    raise ValueError(f"unsupported level {level!r} (expected 'state' or 'county')")
+    if level == "tract":
+        if len(body) != 13 or not body.isdigit():
+            raise ValueError(f"tract GISJOIN {gisjoin!r} is malformed")
+        return body[0:2] + body[3:6] + body[7:13]  # SS [sep] CCC [sep] TTTTTT
+    if level == "zcta":
+        if len(body) != 5 or not body.isdigit():
+            raise ValueError(f"zcta GISJOIN {gisjoin!r} is malformed")
+        return body  # G + 5-digit ZCTA (non-nested); confirmed on first extract
+    raise ValueError(
+        f"unsupported level {level!r} (expected 'state', 'county', 'tract', or 'zcta')"
+    )
 
 
 # --- HHS regions -----------------------------------------------------------
@@ -363,6 +399,64 @@ def build_county_row(
         "centroid_geo_lat": centroid_geo_lat,
         "centroid_pop_lon": centroid_pop_lon,
         "centroid_pop_lat": centroid_pop_lat,
+        "area_land_sqm": area_land_sqm,
+        "area_water_sqm": area_water_sqm,
+    }
+
+
+def build_tract_row(
+    gisjoin: str,
+    vintage: int,
+    *,
+    centroid_geo_lon: float | None = None,
+    centroid_geo_lat: float | None = None,
+    centroid_pop_lon: float | None = None,
+    centroid_pop_lat: float | None = None,
+    area_land_sqm: float | None = None,
+    area_water_sqm: float | None = None,
+) -> dict[str, Any]:
+    """Assemble a ``geography.tract`` row.
+
+    ``geoid`` (11-digit) and the parent ``county_geoid`` (5) + ``state_geoid`` (2)
+    FKs are derived from the GISJOIN. Tracts get both a geographic interior point
+    and a population-weighted center (Centers of Population cover tracts).
+    """
+    geoid = gisjoin_to_geoid(gisjoin, "tract")
+    return {
+        "geoid": geoid,
+        "vintage": int(vintage),
+        "state_geoid": geoid[:STATE_GEOID_WIDTH],
+        "county_geoid": geoid[:COUNTY_GEOID_WIDTH],
+        "gisjoin": gisjoin.strip().upper(),
+        "centroid_geo_lon": centroid_geo_lon,
+        "centroid_geo_lat": centroid_geo_lat,
+        "centroid_pop_lon": centroid_pop_lon,
+        "centroid_pop_lat": centroid_pop_lat,
+        "area_land_sqm": area_land_sqm,
+        "area_water_sqm": area_water_sqm,
+    }
+
+
+def build_zcta_row(
+    gisjoin: str,
+    vintage: int,
+    *,
+    centroid_geo_lon: float | None = None,
+    centroid_geo_lat: float | None = None,
+    area_land_sqm: float | None = None,
+    area_water_sqm: float | None = None,
+) -> dict[str, Any]:
+    """Assemble a ``geography.zcta`` row.
+
+    ZCTAs are non-nesting (no parent FK) and have no Center of Population, so only
+    the geographic interior point is stored.
+    """
+    return {
+        "geoid": gisjoin_to_geoid(gisjoin, "zcta"),
+        "vintage": int(vintage),
+        "gisjoin": gisjoin.strip().upper(),
+        "centroid_geo_lon": centroid_geo_lon,
+        "centroid_geo_lat": centroid_geo_lat,
         "area_land_sqm": area_land_sqm,
         "area_water_sqm": area_water_sqm,
     }

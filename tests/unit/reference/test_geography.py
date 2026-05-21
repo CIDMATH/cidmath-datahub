@@ -81,6 +81,10 @@ class TestGisjoinToGeoid:
             ("G0800010", "county", "08001"),  # Adams County, CO
             ("G3600610", "county", "36061"),  # New York County, NY
             ("G1301210", "county", "13121"),  # Fulton County, GA
+            ("G1800910040900", "tract", "18091040900"),  # tract 040900, Indiana
+            ("G0100010020100", "tract", "01001020100"),  # tract 020100, Autauga Co AL
+            ("G30307", "zcta", "30307"),  # Atlanta ZCTA
+            ("g01001", "zcta", "01001"),  # leading-zero ZCTA, lowercase
         ],
     )
     def test_parses_known_gisjoins(self, gisjoin, level, expected):
@@ -95,10 +99,29 @@ class TestGisjoinToGeoid:
             geo.gisjoin_to_geoid("G080", "county")
         with pytest.raises(ValueError):
             geo.gisjoin_to_geoid("G0800010", "state")
+        with pytest.raises(ValueError):
+            geo.gisjoin_to_geoid("G080", "tract")
+        with pytest.raises(ValueError):
+            geo.gisjoin_to_geoid("G080", "zcta")
 
     def test_rejects_unknown_level(self):
         with pytest.raises(ValueError):
-            geo.gisjoin_to_geoid("G080", "tract")
+            geo.gisjoin_to_geoid("G080", "block")
+
+
+@pytest.mark.unit
+class TestTractParents:
+    def test_parent_derivations(self):
+        assert geo.state_geoid_of_tract("18091040900") == "18"
+        assert geo.county_geoid_of_tract("18091040900") == "18091"
+
+    def test_validate_widths(self):
+        assert geo.validate_tract_geoid("18091040900") == "18091040900"
+        assert geo.validate_zcta_geoid(1001) == "01001"
+
+    def test_rejects_overlong_tract(self):
+        with pytest.raises(ValueError):
+            geo.validate_tract_geoid("180910409001")
 
 
 @pytest.mark.unit
@@ -203,6 +226,26 @@ class TestRowBuilders:
         assert s["centroid_geo_lon"] == -83.6
         assert s["centroid_pop_lon"] == -84.2
         assert s["centroid_pop_lat"] == 33.7
+
+    def test_build_tract_row(self):
+        row = geo.build_tract_row(
+            "G1800910040900",
+            2020,
+            centroid_geo_lon=-86.5,
+            centroid_geo_lat=39.1,
+            centroid_pop_lon=-86.4,
+            centroid_pop_lat=39.2,
+        )
+        assert row["geoid"] == "18091040900"
+        assert row["state_geoid"] == "18"
+        assert row["county_geoid"] == "18091"
+        assert row["centroid_pop_lon"] == -86.4
+
+    def test_build_zcta_row(self):
+        row = geo.build_zcta_row("G30307", 2020, centroid_geo_lon=-84.3, centroid_geo_lat=33.8)
+        assert row["geoid"] == "30307"
+        assert row["centroid_geo_lon"] == -84.3
+        assert "centroid_pop_lon" not in row
 
 
 @pytest.mark.unit
