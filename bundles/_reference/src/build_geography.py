@@ -418,6 +418,7 @@ def _register_dataset(
             "restricted",
             NHGIS_MAINTAINER,
             True,
+            "cidmath-data-team",
         )
     ]
     spark.createDataFrame(cat_row, cat_schema).createOrReplaceTempView("_tmp_geo_cat")
