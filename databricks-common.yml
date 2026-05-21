@@ -53,6 +53,13 @@ variables:
   teams_webhook_key:
     description: Key within the secret scope for the Teams webhook URL.
     default: data_hub
+  ipums_secret_scope:
+    description: |
+      Databricks secret scope holding the IPUMS NHGIS API key, used by the
+      geography reference build (ADR 0020). Set per-target.
+  ipums_secret_key:
+    description: Key within the IPUMS secret scope for the NHGIS API key.
+    default: nhgis_api_key
   email_recipient:
     description: Primary email recipient for paging-severity alerts and digest.
     default: connor.vanmeter@emory.edu
@@ -109,6 +116,7 @@ targets:
       model_catalog: ecdh_model_dev
       deploy_sp_application_id: a55b6164-c0eb-42cf-a438-7de33c150f4a
       teams_webhook_scope: ecdh-dev-teams-webhook
+      ipums_secret_scope: ecdh-dev-ipums
     presets:
       tags:
         project: ${var.project_tag}
@@ -134,6 +142,7 @@ targets:
       model_catalog: ecdh_model_prod
       deploy_sp_application_id: caff7ad3-d82f-4692-98cc-678dc6807cbd
       teams_webhook_scope: ecdh-prod-teams-webhook
+      ipums_secret_scope: ecdh-prod-ipums
     presets:
       tags:
         project: ${var.project_tag}

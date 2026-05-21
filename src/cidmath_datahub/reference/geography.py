@@ -1,0 +1,413 @@
+"""Geography reference logic (ADR 0020, class: authoritative slow-changing).
+
+Pure, unit-testable helpers for the ``geography`` schema: GEOID normalization
+and parent derivation, the static HHS-region grouping of states, and crosswalk
+weight validation. There is no Spark, IO, or geospatial dependency here -- the
+bundle entrypoint (``bundles/_reference/src/build_geography.py``) pulls
+boundaries and crosswalks from IPUMS NHGIS and writes Delta tables; this module
+owns the deterministic parts that can be tested without a workspace or API key.
+
+GEOIDs are always strings. Leading zeros are significant (Alabama is ``"01"``,
+not ``1``), so these helpers never let a GEOID become an integer (ADR 0020
+storage guardrails).
+
+HHS regions are the ten fixed U.S. Department of Health and Human Services
+regions -- a static federal grouping of states, not a census geography -- so we
+build them in code rather than ingest them (ADR 0020).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
+# GEOID widths by level (number of digits). Census GEOIDs are fixed-width and
+# zero-padded (ADR 0020).
+STATE_GEOID_WIDTH = 2
+COUNTY_GEOID_WIDTH = 5
+
+
+def normalize_geoid(value: str | int, width: int) -> str:
+    """Return a zero-padded, validated GEOID string of exactly ``width`` digits.
+
+    Sources sometimes deliver FIPS codes as integers, dropping significant
+    leading zeros (state ``1`` instead of ``"01"``). This restores them and
+    enforces that the result is purely numeric and no longer than ``width``.
+
+    Args:
+        value: The raw code, as a string or integer.
+        width: Required number of digits (2 for state, 5 for county).
+
+    Returns:
+        The zero-padded GEOID as a string.
+
+    Raises:
+        ValueError: If ``value`` is non-numeric or longer than ``width`` digits.
+
+    Examples:
+        >>> normalize_geoid(1, 2)
+        '01'
+        >>> normalize_geoid("01001", 5)
+        '01001'
+    """
+    s = str(value).strip()
+    if not s.isdigit():
+        raise ValueError(f"GEOID {value!r} is not purely numeric")
+    if len(s) > width:
+        raise ValueError(f"GEOID {value!r} has more than {width} digits")
+    return s.zfill(width)
+
+
+def validate_state_geoid(value: str | int) -> str:
+    """Return a normalized 2-digit state GEOID (see :func:`normalize_geoid`)."""
+    return normalize_geoid(value, STATE_GEOID_WIDTH)
+
+
+def validate_county_geoid(value: str | int) -> str:
+    """Return a normalized 5-digit county GEOID (see :func:`normalize_geoid`)."""
+    return normalize_geoid(value, COUNTY_GEOID_WIDTH)
+
+
+def state_geoid_of_county(county_geoid: str | int) -> str:
+    """Return the 2-digit state GEOID that a 5-digit county GEOID belongs to.
+
+    A county GEOID is its state GEOID followed by the 3-digit county code, so the
+    parent state is the first two digits. This is how the derived
+    ``county.state_geoid`` foreign key is produced (ADR 0020).
+
+    Examples:
+        >>> state_geoid_of_county("13121")  # Fulton County, GA
+        '13'
+    """
+    return validate_county_geoid(county_geoid)[:STATE_GEOID_WIDTH]
+
+
+def gisjoin_to_geoid(gisjoin: str, level: str) -> str:
+    """Convert an NHGIS GISJOIN key to the standard Census GEOID for a level.
+
+    NHGIS GISJOIN adds a ``"G"`` prefix and a separator digit after each FIPS
+    component so identifiers stay text and sort correctly. For current vintages
+    the separators are ``"0"`` (the trailing digit differentiates historical
+    areas)::
+
+        state   "G" + SS  + "0"             Colorado   "G080"     -> "08"
+        county  "G" + SS + "0" + CCC + "0"  Adams Co.  "G0800010" -> "08001"
+
+    The GEOID is recovered by position (separators dropped), so this is correct
+    even when the differentiator digit is non-zero. Verified against the IPUMS
+    NHGIS GISJOIN documentation.
+
+    Args:
+        gisjoin: The NHGIS GISJOIN key (must start with ``"G"``).
+        level: ``"state"`` or ``"county"``.
+
+    Returns:
+        The zero-padded Census GEOID (2-digit state, 5-digit county).
+
+    Raises:
+        ValueError: If the GISJOIN is malformed for the level, or the level is
+            not ``"state"`` or ``"county"``.
+    """
+    g = gisjoin.strip().upper()
+    if not g.startswith("G"):
+        raise ValueError(f"GISJOIN {gisjoin!r} does not start with 'G'")
+    body = g[1:]
+    if level == "state":
+        if len(body) != 3 or not body.isdigit():
+            raise ValueError(f"state GISJOIN {gisjoin!r} is malformed")
+        return body[0:2]
+    if level == "county":
+        if len(body) != 7 or not body.isdigit():
+            raise ValueError(f"county GISJOIN {gisjoin!r} is malformed")
+        return body[0:2] + body[3:6]  # SS [sep] CCC [sep]
+    raise ValueError(f"unsupported level {level!r} (expected 'state' or 'county')")
+
+
+# --- HHS regions -----------------------------------------------------------
+
+# Region number -> conventional name (the HHS regional-office HQ city). HHS
+# regions have no official names beyond "Region N"; the HQ city is the common
+# shorthand and is more informative in a lookup table.
+HHS_REGION_HQ: dict[int, str] = {
+    1: "Boston",
+    2: "New York",
+    3: "Philadelphia",
+    4: "Atlanta",
+    5: "Chicago",
+    6: "Dallas",
+    7: "Kansas City",
+    8: "Denver",
+    9: "San Francisco",
+    10: "Seattle",
+}
+
+# Region number -> member state/territory USPS codes. The fixed federal grouping
+# (HHS regional offices). Territories that exist in U.S. census geography (AS,
+# GU, MP) are included for completeness; slice 1 covers the 50 states + DC. The
+# freely associated states (FM, MH, PW) are HHS Region 9 administratively but are
+# not U.S. census geography, so they are intentionally omitted here.
+_HHS_REGION_STATES: dict[int, tuple[str, ...]] = {
+    1: ("CT", "ME", "MA", "NH", "RI", "VT"),
+    2: ("NJ", "NY", "PR", "VI"),
+    3: ("DC", "DE", "MD", "PA", "VA", "WV"),
+    4: ("AL", "FL", "GA", "KY", "MS", "NC", "SC", "TN"),
+    5: ("IL", "IN", "MI", "MN", "OH", "WI"),
+    6: ("AR", "LA", "NM", "OK", "TX"),
+    7: ("IA", "KS", "MO", "NE"),
+    8: ("CO", "MT", "ND", "SD", "UT", "WY"),
+    9: ("AS", "AZ", "CA", "GU", "HI", "MP", "NV"),
+    10: ("AK", "ID", "OR", "WA"),
+}
+
+# Inverted lookup: USPS code -> region number.
+_STATE_TO_HHS_REGION: dict[str, int] = {
+    usps: region for region, members in _HHS_REGION_STATES.items() for usps in members
+}
+
+
+def hhs_region_for_state(stusps: str) -> int:
+    """Return the HHS region number (1-10) for a USPS state/territory code.
+
+    Args:
+        stusps: Two-letter USPS code, e.g. ``"GA"`` (case-insensitive).
+
+    Raises:
+        ValueError: If the code is not assigned to an HHS region.
+    """
+    key = stusps.strip().upper()
+    try:
+        return _STATE_TO_HHS_REGION[key]
+    except KeyError:
+        raise ValueError(f"No HHS region for state {stusps!r}") from None
+
+
+def hhs_region_name(region: int) -> str:
+    """Return the conventional (HQ-city) name for an HHS region number.
+
+    Raises:
+        ValueError: If ``region`` is not in 1-10.
+    """
+    try:
+        return HHS_REGION_HQ[region]
+    except KeyError:
+        raise ValueError(f"{region!r} is not a valid HHS region (expected 1-10)") from None
+
+
+def generate_hhs_regions() -> list[dict[str, Any]]:
+    """Return the ten rows for ``geography.hhs_region``, ordered by region number.
+
+    Each row carries the region number, its HQ-city name, and the sorted member
+    USPS codes. The authoritative state->region membership is materialized as the
+    ``hhs_region`` column on ``geography.state``; ``member_states`` here is a
+    convenience for QA and a standalone lookup.
+    """
+    return [
+        {
+            "hhs_region": region,
+            "name": HHS_REGION_HQ[region],
+            "member_states": sorted(_HHS_REGION_STATES[region]),
+        }
+        for region in sorted(HHS_REGION_HQ)
+    ]
+
+
+# --- State FIPS reference --------------------------------------------------
+
+# Canonical state/territory identity keyed by 2-digit GEOID (FIPS). Lets us
+# derive USPS code and name from a GISJOIN alone, independent of which attributes
+# a given NHGIS shapefile happens to carry. 50 states + DC + the five territories
+# that appear in U.S. census geography.
+STATE_FIPS: dict[str, tuple[str, str]] = {
+    "01": ("AL", "Alabama"),
+    "02": ("AK", "Alaska"),
+    "04": ("AZ", "Arizona"),
+    "05": ("AR", "Arkansas"),
+    "06": ("CA", "California"),
+    "08": ("CO", "Colorado"),
+    "09": ("CT", "Connecticut"),
+    "10": ("DE", "Delaware"),
+    "11": ("DC", "District of Columbia"),
+    "12": ("FL", "Florida"),
+    "13": ("GA", "Georgia"),
+    "15": ("HI", "Hawaii"),
+    "16": ("ID", "Idaho"),
+    "17": ("IL", "Illinois"),
+    "18": ("IN", "Indiana"),
+    "19": ("IA", "Iowa"),
+    "20": ("KS", "Kansas"),
+    "21": ("KY", "Kentucky"),
+    "22": ("LA", "Louisiana"),
+    "23": ("ME", "Maine"),
+    "24": ("MD", "Maryland"),
+    "25": ("MA", "Massachusetts"),
+    "26": ("MI", "Michigan"),
+    "27": ("MN", "Minnesota"),
+    "28": ("MS", "Mississippi"),
+    "29": ("MO", "Missouri"),
+    "30": ("MT", "Montana"),
+    "31": ("NE", "Nebraska"),
+    "32": ("NV", "Nevada"),
+    "33": ("NH", "New Hampshire"),
+    "34": ("NJ", "New Jersey"),
+    "35": ("NM", "New Mexico"),
+    "36": ("NY", "New York"),
+    "37": ("NC", "North Carolina"),
+    "38": ("ND", "North Dakota"),
+    "39": ("OH", "Ohio"),
+    "40": ("OK", "Oklahoma"),
+    "41": ("OR", "Oregon"),
+    "42": ("PA", "Pennsylvania"),
+    "44": ("RI", "Rhode Island"),
+    "45": ("SC", "South Carolina"),
+    "46": ("SD", "South Dakota"),
+    "47": ("TN", "Tennessee"),
+    "48": ("TX", "Texas"),
+    "49": ("UT", "Utah"),
+    "50": ("VT", "Vermont"),
+    "51": ("VA", "Virginia"),
+    "53": ("WA", "Washington"),
+    "54": ("WV", "West Virginia"),
+    "55": ("WI", "Wisconsin"),
+    "56": ("WY", "Wyoming"),
+    "60": ("AS", "American Samoa"),
+    "66": ("GU", "Guam"),
+    "69": ("MP", "Northern Mariana Islands"),
+    "72": ("PR", "Puerto Rico"),
+    "78": ("VI", "U.S. Virgin Islands"),
+}
+
+
+def state_usps(state_geoid: str | int) -> str:
+    """Return the USPS code for a 2-digit state GEOID (e.g. ``"13"`` -> ``"GA"``)."""
+    geoid = validate_state_geoid(state_geoid)
+    try:
+        return STATE_FIPS[geoid][0]
+    except KeyError:
+        raise ValueError(f"unknown state GEOID {state_geoid!r}") from None
+
+
+def state_name(state_geoid: str | int) -> str:
+    """Return the name for a 2-digit state GEOID (e.g. ``"13"`` -> ``"Georgia"``)."""
+    geoid = validate_state_geoid(state_geoid)
+    try:
+        return STATE_FIPS[geoid][1]
+    except KeyError:
+        raise ValueError(f"unknown state GEOID {state_geoid!r}") from None
+
+
+# --- Row builders (shapefile attributes -> table rows) ---------------------
+
+
+def build_state_row(
+    gisjoin: str,
+    vintage: int,
+    *,
+    centroid_lon: float | None = None,
+    centroid_lat: float | None = None,
+    area_land_sqm: float | None = None,
+    area_water_sqm: float | None = None,
+) -> dict[str, Any]:
+    """Assemble a ``geography.state`` row from a state GISJOIN plus geometry values.
+
+    Identity (geoid, USPS, name, HHS region) is derived in code so it does not
+    depend on which attributes a shapefile carries (ADR 0020). Centroids are
+    geographic in slice 1 (``centroid_is_pop_weighted=False``).
+    """
+    geoid = gisjoin_to_geoid(gisjoin, "state")
+    usps = state_usps(geoid)
+    return {
+        "geoid": geoid,
+        "vintage": int(vintage),
+        "gisjoin": gisjoin.strip().upper(),
+        "name": state_name(geoid),
+        "stusps": usps,
+        "hhs_region": hhs_region_for_state(usps),
+        "centroid_lon": centroid_lon,
+        "centroid_lat": centroid_lat,
+        "centroid_is_pop_weighted": False,
+        "area_land_sqm": area_land_sqm,
+        "area_water_sqm": area_water_sqm,
+    }
+
+
+def build_county_row(
+    gisjoin: str,
+    vintage: int,
+    name: str,
+    *,
+    centroid_lon: float | None = None,
+    centroid_lat: float | None = None,
+    area_land_sqm: float | None = None,
+    area_water_sqm: float | None = None,
+) -> dict[str, Any]:
+    """Assemble a ``geography.county`` row.
+
+    ``geoid`` and the parent ``state_geoid`` FK are derived from the GISJOIN; the
+    county name comes from the shapefile. Geographic centroid in slice 1.
+    """
+    geoid = gisjoin_to_geoid(gisjoin, "county")
+    return {
+        "geoid": geoid,
+        "vintage": int(vintage),
+        "state_geoid": state_geoid_of_county(geoid),
+        "gisjoin": gisjoin.strip().upper(),
+        "name": name,
+        "centroid_lon": centroid_lon,
+        "centroid_lat": centroid_lat,
+        "centroid_is_pop_weighted": False,
+        "area_land_sqm": area_land_sqm,
+        "area_water_sqm": area_water_sqm,
+    }
+
+
+# --- Crosswalk weight validation -------------------------------------------
+
+
+def summarize_crosswalk_weights(
+    rows: Iterable[dict[str, Any]],
+    *,
+    source_key: str = "source_geoid",
+    weight_key: str = "weight",
+) -> dict[str, float]:
+    """Sum interpolation weights per source unit in a vintage crosswalk.
+
+    NHGIS crosswalks distribute each source geography across one or more target
+    geographies with population-interpolation weights that should sum to ~1.0
+    per source unit (ADR 0020).
+
+    Args:
+        rows: Crosswalk records, each with a source GEOID and a weight.
+        source_key: Key holding the source GEOID in each row.
+        weight_key: Key holding the weight in each row.
+
+    Returns:
+        Mapping of source GEOID -> total weight.
+    """
+    totals: dict[str, float] = {}
+    for row in rows:
+        src = row[source_key]
+        totals[src] = totals.get(src, 0.0) + float(row[weight_key])
+    return totals
+
+
+def validate_crosswalk_weights(
+    rows: Iterable[dict[str, Any]],
+    *,
+    source_key: str = "source_geoid",
+    weight_key: str = "weight",
+    tolerance: float = 1e-3,
+) -> list[tuple[str, float]]:
+    """Return source units whose interpolation weights don't sum to ~1.0.
+
+    Args:
+        rows: Crosswalk records (see :func:`summarize_crosswalk_weights`).
+        source_key: Key holding the source GEOID in each row.
+        weight_key: Key holding the weight in each row.
+        tolerance: Allowed absolute deviation from 1.0.
+
+    Returns:
+        A sorted list of ``(source_geoid, total_weight)`` for offending units.
+        An empty list means every source unit's weights sum to ~1.0.
+    """
+    totals = summarize_crosswalk_weights(rows, source_key=source_key, weight_key=weight_key)
+    return [(src, total) for src, total in sorted(totals.items()) if abs(total - 1.0) > tolerance]

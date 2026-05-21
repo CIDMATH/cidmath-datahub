@@ -48,6 +48,8 @@ Pure logic (GEOID parsing/validation, HHS mapping, crosswalk normalization, weig
 2. **ZCTA + tract** — the high-volume levels; add the 2000 vintage where useful.
 3. **CBSA**, the remaining crosswalks across all levels, and selective full-resolution geometry.
 
+**Implementation refinement (2026-05-21).** During slice 1 wiring two scope adjustments were made. First, the **county crosswalk is deferred to slice 2**: NHGIS publishes no direct county→county crosswalk (its 2010↔2020 crosswalks are sourced *from block groups*, and deriving a true county→county weight set requires population denominators that live in the `population` schema), and counties are near-stable across the decade, so the crosswalk pattern is better introduced at the redrawn tract/block-group/ZCTA levels. Second, slice 1 ships **geographic** centroids (polygon interior point, `centroid_is_pop_weighted = false`); population-weighted Centers of Population are a fast follow. State identity (USPS, name, HHS region) is derived in code from a small canonical FIPS table rather than from shapefile attributes, so the build is robust to NHGIS attribute-naming variation.
+
 ## Alternatives considered
 - **Census public-domain (TIGER/Gazetteer) instead of IPUMS.** Simpler licensing (freely shareable) and no API key, but you assemble historical consistency yourself and lack NHGIS's curated crosswalks. Rejected in favor of NHGIS's historical depth; the licensing cost is accepted and managed via the permission request + metadata.
 - **SCD2 validity ranges instead of snapshots.** Elegant for as-of-date joins, but requires inferring change effective-dates the snapshot sources don't supply — fragile and hard to defend. Deferred to an optional derived view.
