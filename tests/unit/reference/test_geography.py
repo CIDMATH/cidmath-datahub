@@ -190,6 +190,14 @@ class TestRowBuilders:
         assert row["name"] == "Fulton"
         assert row["centroid_is_pop_weighted"] is False
 
+    def test_pop_weighted_flag_flows_through(self):
+        s = geo.build_state_row(
+            "G130", 2020, centroid_lon=-83.6, centroid_lat=33.0, centroid_is_pop_weighted=True
+        )
+        c = geo.build_county_row("G1301210", 2020, "Fulton", centroid_is_pop_weighted=True)
+        assert s["centroid_is_pop_weighted"] is True
+        assert c["centroid_is_pop_weighted"] is True
+
 
 @pytest.mark.unit
 class TestCrosswalkWeights:

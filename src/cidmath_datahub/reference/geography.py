@@ -304,14 +304,16 @@ def build_state_row(
     *,
     centroid_lon: float | None = None,
     centroid_lat: float | None = None,
+    centroid_is_pop_weighted: bool = False,
     area_land_sqm: float | None = None,
     area_water_sqm: float | None = None,
 ) -> dict[str, Any]:
     """Assemble a ``geography.state`` row from a state GISJOIN plus geometry values.
 
     Identity (geoid, USPS, name, HHS region) is derived in code so it does not
-    depend on which attributes a shapefile carries (ADR 0020). Centroids are
-    geographic in slice 1 (``centroid_is_pop_weighted=False``).
+    depend on which attributes a shapefile carries (ADR 0020). The caller sets
+    ``centroid_is_pop_weighted`` (geographic interior point unless a Center of
+    Population is supplied).
     """
     geoid = gisjoin_to_geoid(gisjoin, "state")
     usps = state_usps(geoid)
@@ -324,7 +326,7 @@ def build_state_row(
         "hhs_region": hhs_region_for_state(usps),
         "centroid_lon": centroid_lon,
         "centroid_lat": centroid_lat,
-        "centroid_is_pop_weighted": False,
+        "centroid_is_pop_weighted": centroid_is_pop_weighted,
         "area_land_sqm": area_land_sqm,
         "area_water_sqm": area_water_sqm,
     }
@@ -337,6 +339,7 @@ def build_county_row(
     *,
     centroid_lon: float | None = None,
     centroid_lat: float | None = None,
+    centroid_is_pop_weighted: bool = False,
     area_land_sqm: float | None = None,
     area_water_sqm: float | None = None,
 ) -> dict[str, Any]:
@@ -354,7 +357,7 @@ def build_county_row(
         "name": name,
         "centroid_lon": centroid_lon,
         "centroid_lat": centroid_lat,
-        "centroid_is_pop_weighted": False,
+        "centroid_is_pop_weighted": centroid_is_pop_weighted,
         "area_land_sqm": area_land_sqm,
         "area_water_sqm": area_water_sqm,
     }
