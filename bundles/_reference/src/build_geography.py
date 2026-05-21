@@ -89,9 +89,10 @@ STATE_SPARK_SCHEMA = T.StructType(
         T.StructField("name", T.StringType(), False),
         T.StructField("stusps", T.StringType(), False),
         T.StructField("hhs_region", T.IntegerType(), False),
-        T.StructField("centroid_lon", T.DoubleType(), True),
-        T.StructField("centroid_lat", T.DoubleType(), True),
-        T.StructField("centroid_is_pop_weighted", T.BooleanType(), False),
+        T.StructField("centroid_geo_lon", T.DoubleType(), False),
+        T.StructField("centroid_geo_lat", T.DoubleType(), False),
+        T.StructField("centroid_pop_lon", T.DoubleType(), True),
+        T.StructField("centroid_pop_lat", T.DoubleType(), True),
         T.StructField("area_land_sqm", T.DoubleType(), True),
         T.StructField("area_water_sqm", T.DoubleType(), True),
     ]
@@ -104,9 +105,10 @@ COUNTY_SPARK_SCHEMA = T.StructType(
         T.StructField("state_geoid", T.StringType(), False),
         T.StructField("gisjoin", T.StringType(), False),
         T.StructField("name", T.StringType(), False),
-        T.StructField("centroid_lon", T.DoubleType(), True),
-        T.StructField("centroid_lat", T.DoubleType(), True),
-        T.StructField("centroid_is_pop_weighted", T.BooleanType(), False),
+        T.StructField("centroid_geo_lon", T.DoubleType(), False),
+        T.StructField("centroid_geo_lat", T.DoubleType(), False),
+        T.StructField("centroid_pop_lon", T.DoubleType(), True),
+        T.StructField("centroid_pop_lat", T.DoubleType(), True),
         T.StructField("area_land_sqm", T.DoubleType(), True),
         T.StructField("area_water_sqm", T.DoubleType(), True),
     ]
@@ -244,15 +246,19 @@ def _read_cenpop_lookup(root: Path, level: str, vintage: int) -> dict[str, tuple
 
 def _centroid_for(
     gisjoin: Any, geom: Any, cenpop: dict[str, tuple[float, float]]
-) -> tuple[float, float, bool]:
-    """Population-weighted centroid if available for this GISJOIN, else the
-    polygon interior point. Returns ``(lon, lat, is_pop_weighted)``."""
+) -> tuple[float, float, float | None, float | None]:
+    """Return ``(geo_lon, geo_lat, pop_lon, pop_lat)``.
+
+    The geographic interior point is always present; the population-weighted pair
+    is None unless a Center of Population covers this GISJOIN.
+    """
+    pt = geom.representative_point()
+    geo_lon, geo_lat = float(pt.x), float(pt.y)
     key = str(gisjoin).strip().upper()
     if cenpop and key in cenpop:
-        lon, lat = cenpop[key]
-        return lon, lat, True
-    pt = geom.representative_point()
-    return float(pt.x), float(pt.y), False
+        pop_lon, pop_lat = cenpop[key]
+        return geo_lon, geo_lat, pop_lon, pop_lat
+    return geo_lon, geo_lat, None, None
 
 
 def _geom_to_wkb(geom: Any, tolerance: float) -> bytes:
@@ -281,13 +287,14 @@ def _build_state_frames(
         geom = rec.geometry
         if geom is None or geom.is_empty:
             continue
-        lon, lat, pop_weighted = _centroid_for(rec[gj], geom, cenpop)
+        geo_lon, geo_lat, pop_lon, pop_lat = _centroid_for(rec[gj], geom, cenpop)
         row = geo.build_state_row(
             rec[gj],
             vintage,
-            centroid_lon=lon,
-            centroid_lat=lat,
-            centroid_is_pop_weighted=pop_weighted,
+            centroid_geo_lon=geo_lon,
+            centroid_geo_lat=geo_lat,
+            centroid_pop_lon=pop_lon,
+            centroid_pop_lat=pop_lat,
             area_land_sqm=_num(rec[aland]) if aland else None,
             area_water_sqm=_num(rec[awater]) if awater else None,
         )
@@ -326,15 +333,16 @@ def _build_county_frames(
         geom = rec.geometry
         if geom is None or geom.is_empty:
             continue
-        lon, lat, pop_weighted = _centroid_for(rec[gj], geom, cenpop)
+        geo_lon, geo_lat, pop_lon, pop_lat = _centroid_for(rec[gj], geom, cenpop)
         name = str(rec[name_col]) if name_col else ""
         row = geo.build_county_row(
             rec[gj],
             vintage,
             name,
-            centroid_lon=lon,
-            centroid_lat=lat,
-            centroid_is_pop_weighted=pop_weighted,
+            centroid_geo_lon=geo_lon,
+            centroid_geo_lat=geo_lat,
+            centroid_pop_lon=pop_lon,
+            centroid_pop_lat=pop_lat,
             area_land_sqm=_num(rec[aland]) if aland else None,
             area_water_sqm=_num(rec[awater]) if awater else None,
         )

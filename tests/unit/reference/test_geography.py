@@ -175,28 +175,34 @@ class TestStateFips:
 @pytest.mark.unit
 class TestRowBuilders:
     def test_build_state_row(self):
-        row = geo.build_state_row("G130", 2020, centroid_lon=-83.6, centroid_lat=32.6)
+        row = geo.build_state_row("G130", 2020, centroid_geo_lon=-83.6, centroid_geo_lat=32.6)
         assert row["geoid"] == "13"
         assert row["stusps"] == "GA"
         assert row["name"] == "Georgia"
         assert row["hhs_region"] == 4
         assert row["vintage"] == 2020
-        assert row["centroid_is_pop_weighted"] is False
+        assert row["centroid_geo_lon"] == -83.6
+        assert row["centroid_pop_lon"] is None
 
     def test_build_county_row(self):
         row = geo.build_county_row("G1301210", 2020, "Fulton")
         assert row["geoid"] == "13121"
         assert row["state_geoid"] == "13"
         assert row["name"] == "Fulton"
-        assert row["centroid_is_pop_weighted"] is False
+        assert row["centroid_pop_lat"] is None
 
-    def test_pop_weighted_flag_flows_through(self):
+    def test_pop_centroid_flows_through(self):
         s = geo.build_state_row(
-            "G130", 2020, centroid_lon=-83.6, centroid_lat=33.0, centroid_is_pop_weighted=True
+            "G130",
+            2020,
+            centroid_geo_lon=-83.6,
+            centroid_geo_lat=33.0,
+            centroid_pop_lon=-84.2,
+            centroid_pop_lat=33.7,
         )
-        c = geo.build_county_row("G1301210", 2020, "Fulton", centroid_is_pop_weighted=True)
-        assert s["centroid_is_pop_weighted"] is True
-        assert c["centroid_is_pop_weighted"] is True
+        assert s["centroid_geo_lon"] == -83.6
+        assert s["centroid_pop_lon"] == -84.2
+        assert s["centroid_pop_lat"] == 33.7
 
 
 @pytest.mark.unit
