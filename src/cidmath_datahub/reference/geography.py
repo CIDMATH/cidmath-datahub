@@ -27,6 +27,7 @@ STATE_GEOID_WIDTH = 2
 COUNTY_GEOID_WIDTH = 5
 TRACT_GEOID_WIDTH = 11
 ZCTA_GEOID_WIDTH = 5
+BG_GEOID_WIDTH = 12
 
 
 def normalize_geoid(value: str | int, width: int) -> str:
@@ -80,6 +81,11 @@ def validate_zcta_geoid(value: str | int) -> str:
     return normalize_geoid(value, ZCTA_GEOID_WIDTH)
 
 
+def validate_bg_geoid(value: str | int) -> str:
+    """Return a normalized 12-digit block group GEOID (see :func:`normalize_geoid`)."""
+    return normalize_geoid(value, BG_GEOID_WIDTH)
+
+
 def state_geoid_of_county(county_geoid: str | int) -> str:
     """Return the 2-digit state GEOID that a 5-digit county GEOID belongs to.
 
@@ -112,23 +118,24 @@ def gisjoin_to_geoid(gisjoin: str, level: str) -> str:
     the separators are ``"0"`` (the trailing digit differentiates historical
     areas)::
 
-        state   G + SS + 0                        -> 2-digit GEOID
-        county  G + SS + 0 + CCC + 0              -> 5-digit GEOID
-        tract   G + SS + 0 + CCC + 0 + TTTTTT     -> 11-digit GEOID
-        zcta    G + ZZZZZ                         -> 5-digit GEOID (non-nested)
+        state   G + SS + 0                          -> 2-digit GEOID
+        county  G + SS + 0 + CCC + 0                -> 5-digit GEOID
+        tract   G + SS + 0 + CCC + 0 + TTTTTT       -> 11-digit GEOID
+        zcta    G + ZZZZZ                           -> 5-digit GEOID (non-nested)
+        bg      G + SS + 0 + CCC + 0 + TTTTTT + B   -> 12-digit GEOID
 
     The GEOID is recovered by position (separators dropped), so this is correct
     even when the differentiator digit is non-zero. State/county/tract are
-    verified against IPUMS NHGIS GISJOIN documentation; the ZCTA form is
-    confirmed on the first extract by the length/digit check.
+    verified against IPUMS NHGIS GISJOIN documentation; ZCTA and bg are
+    confirmed on first download by the length/digit check.
 
     Args:
         gisjoin: The NHGIS GISJOIN key (must start with ``"G"``).
-        level: ``"state"``, ``"county"``, ``"tract"``, or ``"zcta"``.
+        level: ``"state"``, ``"county"``, ``"tract"``, ``"zcta"``, or ``"bg"``.
 
     Returns:
         The zero-padded Census GEOID (2-digit state, 5-digit county, 11-digit
-        tract, 5-digit ZCTA).
+        tract, 5-digit ZCTA, 12-digit bg).
 
     Raises:
         ValueError: If the GISJOIN is malformed for the level, or the level is
@@ -154,8 +161,12 @@ def gisjoin_to_geoid(gisjoin: str, level: str) -> str:
         if len(body) != 5 or not body.isdigit():
             raise ValueError(f"zcta GISJOIN {gisjoin!r} is malformed")
         return body  # G + 5-digit ZCTA (non-nested); confirmed on first extract
+    if level == "bg":
+        if len(body) != 14 or not body.isdigit():
+            raise ValueError(f"bg GISJOIN {gisjoin!r} is malformed")
+        return body[0:2] + body[3:6] + body[7:13] + body[13:14]  # SS [sep] CCC [sep] TTTTTT B
     raise ValueError(
-        f"unsupported level {level!r} (expected 'state', 'county', 'tract', or 'zcta')"
+        f"unsupported level {level!r} (expected 'state', 'county', 'tract', 'zcta', or 'bg')"
     )
 
 
@@ -513,3 +524,67 @@ def validate_crosswalk_weights(
     """
     totals = summarize_crosswalk_weights(rows, source_key=source_key, weight_key=weight_key)
     return [(src, total) for src, total in sorted(totals.items()) if abs(total - 1.0) > tolerance]
+
+
+# --- Crosswalk normalization (long-form output for geography.crosswalk; ADR 0021)
+# Maps the raw NHGIS weight column names to our controlled weight_kind vocabulary.
+NHGIS_WEIGHT_COLUMNS: dict[str, str] = {
+    "wt_pop": "pop",
+    "wt_hh": "hh",
+    "wt_fam": "fam",
+    "wt_adult": "adult",
+    "parea": "area",
+}
+
+CROSSWALK_WEIGHT_KINDS: tuple[str, ...] = ("pop", "hh", "fam", "adult", "area")
+
+
+def normalize_crosswalk_rows(
+    raw_rows: Iterable[dict[str, Any]],
+    *,
+    source_level: str,
+    source_vintage: int,
+    target_level: str,
+    target_vintage: int,
+    source_gj_col: str,
+    target_gj_col: str,
+    weight_columns: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Expand raw NHGIS crosswalk records into long-form rows for ``geography.crosswalk``.
+
+    NHGIS publishes one row per source-target pair with multiple weight columns
+    (``parea``, ``wt_pop``, ``wt_hh``, etc.). We pivot to one row per source ×
+    target × weight_kind, deriving GEOIDs from the GISJOIN keys (ADR 0021).
+    NaN and non-numeric weights are skipped silently (NHGIS leaves some weight
+    cells empty when a denominator is zero).
+    """
+    rows: list[dict[str, Any]] = []
+    for raw in raw_rows:
+        src_gj = str(raw[source_gj_col]).strip().upper()
+        tgt_gj = str(raw[target_gj_col]).strip().upper()
+        src_geoid = gisjoin_to_geoid(src_gj, source_level)
+        tgt_geoid = gisjoin_to_geoid(tgt_gj, target_level)
+        for raw_col, kind in weight_columns.items():
+            if raw_col not in raw:
+                continue
+            try:
+                w = float(raw[raw_col])
+            except (TypeError, ValueError):
+                continue
+            if w != w:  # NaN
+                continue
+            rows.append(
+                {
+                    "source_level": source_level,
+                    "source_vintage": int(source_vintage),
+                    "source_geoid": src_geoid,
+                    "source_gisjoin": src_gj,
+                    "target_level": target_level,
+                    "target_vintage": int(target_vintage),
+                    "target_geoid": tgt_geoid,
+                    "target_gisjoin": tgt_gj,
+                    "weight_kind": kind,
+                    "weight": w,
+                }
+            )
+    return rows

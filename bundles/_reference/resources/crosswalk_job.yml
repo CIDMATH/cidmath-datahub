@@ -1,0 +1,51 @@
+# Job that builds the canonical geography.crosswalk table (ADR 0021).
+#
+# Downloads NHGIS's bg-sourced 2010<->2020 crosswalks from the supplemental-data
+# endpoint, normalizes them into the long-form geography.crosswalk table
+# (one row per source x target x weight_kind), runs the weight-sum DQ, and
+# applies Liquid Clustering. Update semantics: full_refresh (ADR 0007).
+#
+# Separate from build_geography_reference so the crosswalk refresh cadence is
+# decoupled from the boundary refresh and so this job runs with a lighter
+# environment (no geospatial libraries -- just ipumspy + pandas). Reuses the
+# ipums_secret_scope / ipums_secret_key bundle variables.
+#
+# See bundles/_reference/src/build_crosswalk.py and ADR 0021.
+
+resources:
+  jobs:
+    build_crosswalk_reference:
+      name: "[_reference] build_crosswalk_reference"
+      description: |
+        Builds geography.crosswalk from the six bg-sourced NHGIS 2010<->2020
+        crosswalk file sets, shipped as published (ADR 0021). Long-running:
+        ~hundreds of MB downloaded per file, streamed through pandas in chunks
+        and written to Delta per (level, vintage). full_refresh.
+
+      tasks:
+        - task_key: build_crosswalk
+          spark_python_task:
+            python_file: ../src/build_crosswalk.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--ipums-secret-scope"
+              - "${var.ipums_secret_scope}"
+              - "--ipums-secret-key"
+              - "${var.ipums_secret_key}"
+          environment_key: crosswalk_env
+
+      environments:
+        - environment_key: crosswalk_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+              - ipumspy>=0.5
+              - pandas>=2.0
+
+      timeout_seconds: 3600
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

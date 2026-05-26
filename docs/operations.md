@@ -80,7 +80,9 @@ Reference: https://docs.databricks.com/aws/en/dev-tools/auth/provider-github
 
 ### 5. Secret scopes
 
-Create Databricks-backed secret scopes for the Teams incoming webhook:
+Create Databricks-backed secret scopes and **grant the deploy service principals READ on each scope they read at runtime.** This last part is easy to miss: a CI-deployed job (and every prod job) runs as the deploy SP, not as you, so a scope you can read yourself is *not* automatically readable by the job. Creating a scope makes you (the creator) its `MANAGE` owner; the SP starts with no ACL and must be granted `READ` separately.
+
+**Teams incoming webhook** (alerting):
 
 ```bash
 databricks secrets create-scope ecdh-dev-teams-webhook
@@ -92,6 +94,33 @@ databricks secrets put-secret ecdh-prod-teams-webhook data_hub
 ```
 
 The webhook URL itself comes from the Teams channel's "Workflows" or "Incoming Webhook" connector. See `docs/runbooks/configure-teams-webhook.md` (TBD).
+
+**IPUMS NHGIS API key** (geography reference build, ADR 0020):
+
+```bash
+databricks secrets create-scope ecdh-dev-ipums
+databricks secrets create-scope ecdh-prod-ipums
+
+# Add the NHGIS API key as the `nhgis_api_key` key in each scope
+databricks secrets put-secret ecdh-dev-ipums nhgis_api_key
+databricks secrets put-secret ecdh-prod-ipums nhgis_api_key
+```
+
+The key comes from your IPUMS account: https://account.ipums.org/api_keys
+
+**Grant the deploy SPs READ on the IPUMS scopes.** `build_geography.py` calls `dbutils.secrets.get` as the run identity, so the deploy SP must hold `READ` (the `secret-scopes.secrets/get` permission). Use the SP's **application ID (UUID)**, not its display name (same gotcha as `run_as` — ADR 0017):
+
+```bash
+# dev SP (ecdh-deploy-dev) on the dev IPUMS scope
+databricks secrets put-acl ecdh-dev-ipums  a55b6164-c0eb-42cf-a438-7de33c150f4a READ
+# prod SP (ecdh-deploy-prod) on the prod IPUMS scope
+databricks secrets put-acl ecdh-prod-ipums caff7ad3-d82f-4692-98cc-678dc6807cbd READ
+
+# verify
+databricks secrets list-acls ecdh-dev-ipums
+```
+
+Without this, the geography job fails at the key fetch with `PERMISSION_DENIED: User <sp-uuid> does not have secret-scopes.secrets/get permission on scope ecdh-<env>-ipums`. The same pattern applies to any future job that reads a secret at runtime via `dbutils.secrets.get`: grant the deploy SP `READ` on that scope.
 
 ### 6. GitHub repository configuration
 

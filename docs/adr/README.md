@@ -86,6 +86,7 @@ both positive and negative consequences honestly.
 | [0018](0018-access-groups-and-grant-model.md) | Access groups and the grant model (engineer / reader tiers; which bundle grants what) | Accepted |
 | [0019](0019-analyst-discovery-view.md) | Analyst-facing discovery view (curated `discovery.datasets` over `_ops` via view ownership chain) | Accepted |
 | [0020](0020-geography-reference.md) | Geography reference: IPUMS NHGIS source, vintaged snapshots + crosswalks, lean attributes + companion WKB geometry | Accepted |
+| [0021](0021-geography-crosswalks.md) | Geography crosswalks: ship NHGIS bg-sourced 2010↔2020 files as published, normalized into one long-form table | Accepted |
 
 ## Future ADRs (backlog)
 

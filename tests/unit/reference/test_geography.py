@@ -85,6 +85,7 @@ class TestGisjoinToGeoid:
             ("G0100010020100", "tract", "01001020100"),  # tract 020100, Autauga Co AL
             ("G30307", "zcta", "30307"),  # Atlanta ZCTA
             ("g01001", "zcta", "01001"),  # leading-zero ZCTA, lowercase
+            ("G18009100409001", "bg", "180910409001"),  # bg 1 in an Indiana tract (state 18)
         ],
     )
     def test_parses_known_gisjoins(self, gisjoin, level, expected):
@@ -103,6 +104,8 @@ class TestGisjoinToGeoid:
             geo.gisjoin_to_geoid("G080", "tract")
         with pytest.raises(ValueError):
             geo.gisjoin_to_geoid("G080", "zcta")
+        with pytest.raises(ValueError):
+            geo.gisjoin_to_geoid("G080", "bg")
 
     def test_rejects_unknown_level(self):
         with pytest.raises(ValueError):
@@ -284,3 +287,68 @@ class TestCrosswalkWeights:
     def test_custom_keys(self):
         rows = [{"src": "1", "wt": 1.0}]
         assert geo.validate_crosswalk_weights(rows, source_key="src", weight_key="wt") == []
+
+
+@pytest.mark.unit
+class TestNormalizeCrosswalkRows:
+    def test_long_form_expansion(self):
+        raw = [
+            {
+                "bg2010gj": "G18009100409001",
+                "co2020gj": "G1800910",
+                "parea": 0.5,
+                "wt_pop": 0.6,
+                "wt_hh": 0.4,
+            },
+            {
+                "bg2010gj": "G18009100409001",
+                "co2020gj": "G1800930",
+                "parea": 0.5,
+                "wt_pop": 0.4,
+                "wt_hh": 0.6,
+            },
+        ]
+        rows = geo.normalize_crosswalk_rows(
+            raw,
+            source_level="bg",
+            source_vintage=2010,
+            target_level="county",
+            target_vintage=2020,
+            source_gj_col="bg2010gj",
+            target_gj_col="co2020gj",
+            weight_columns=geo.NHGIS_WEIGHT_COLUMNS,
+        )
+        # 2 raw rows x 3 weight kinds present (parea, wt_pop, wt_hh) = 6 long-form rows
+        assert len(rows) == 6
+        assert {r["weight_kind"] for r in rows} == {"area", "pop", "hh"}
+        first = next(
+            r for r in rows if r["target_gisjoin"] == "G1800910" and r["weight_kind"] == "pop"
+        )
+        assert first["source_level"] == "bg"
+        assert first["source_geoid"] == "180910409001"
+        assert first["target_geoid"] == "18091"
+        assert first["weight"] == 0.6
+
+    def test_skips_nan_and_nonnumeric(self):
+        raw = [
+            {
+                "bg2010gj": "G18009100409001",
+                "tr2020gj": "G1800910040900",
+                "wt_pop": float("nan"),
+                "wt_hh": "x",
+            },
+        ]
+        rows = geo.normalize_crosswalk_rows(
+            raw,
+            source_level="bg",
+            source_vintage=2010,
+            target_level="tract",
+            target_vintage=2020,
+            source_gj_col="bg2010gj",
+            target_gj_col="tr2020gj",
+            weight_columns={"wt_pop": "pop", "wt_hh": "hh"},
+        )
+        assert rows == []
+
+    def test_weight_kinds_vocabulary(self):
+        assert set(geo.NHGIS_WEIGHT_COLUMNS.values()) <= set(geo.CROSSWALK_WEIGHT_KINDS)

@@ -750,9 +750,7 @@ def run(
         for v in vintages:
             gdf = _read_gdf(_find_shapefile(workdir, lvl, v))
             cenpop = (
-                _read_cenpop_lookup(workdir, lvl, v)
-                if (lvl, v) in CENPOP_SHAPEFILE_NAMES
-                else {}
+                _read_cenpop_lookup(workdir, lvl, v) if (lvl, v) in CENPOP_SHAPEFILE_NAMES else {}
             )
             rows, boundary = BUILDERS[lvl](gdf, v, tolerance, resolution, cenpop)
 
