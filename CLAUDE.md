@@ -25,7 +25,7 @@ Initial scaffolding. The repo skeleton, `_platform` bundle, and shared Python pa
 ### Table naming
 
 - **Source-aligned tables:** singular, snake_case. Raw and processed table names = source identifier (`cdc_nwss`, `ga_dph_sample`). Analysis-layer table names = entity or concept (`sample_concentration`, `daily_aggregate`). Never repeat the subject in the table name. (ADR 0006)
-- **Integrated reference tables (from `_reference`):** no suffix. `geography.county`, `time.epi_week`, `codes.loinc`. (ADR 0014, ADR 0015)
+- **Integrated reference tables (from `_reference`):** no Kimball suffix. Country-specific reference tables carry a `<country>_` prefix using ISO 3166-1 alpha-2 lower-cased (`geography.us_county`, `geography.us_state`); global tables stay unprefixed (`geography.country`, `geography.country_subdivision`, `time.epi_week`, `codes.loinc`). (ADR 0006, ADR 0014, ADR 0015, ADR 0022)
 - **Integrated analytical content (from non-`_reference` bundles):** Kimball suffixes — `_fact`, `_dim`, `_bridge`. `surveillance.case_report_fact`, `population.cohort_dim`, `surveillance.case_to_lab_bridge`. (ADR 0015)
 - **Source-specific facts:** `<provider>_<concept>_fact` (e.g., `surveillance.epic_cosmos_vaccine_coverage_fact`). Conformed facts drop the prefix: `surveillance.vaccine_coverage_fact`. (ADR 0015)
 - **No version suffixes** in table names. Schema evolution via Delta; rename only on incompatible methodology break with an ADR.

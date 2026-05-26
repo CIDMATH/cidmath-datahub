@@ -54,6 +54,8 @@ The subject is already in the schema name. Never repeat it in the table name (`w
 
 **Reserved leading underscore for internal tables.** Tables that shouldn't appear in normal user discovery (intermediate staging, internal lookups, deprecated-but-retained) get a leading underscore. Consistent with the `_ops` schema convention.
 
+**Country-prefix for country-specific reference tables.** Within the integrated catalog's reference schemas, tables that hold data for one specific country (rather than the global cross-country entity) get a `<country>_` prefix using the ISO 3166-1 alpha-2 code lower-cased: `geography.us_state`, `geography.us_county`, `geography.us_tract`, `geography.us_zcta`, `geography.us_hhs_region`, `geography.us_crosswalk`. The unprefixed names (`geography.country`, `geography.country_subdivision`, `geography.subnational`) are reserved for the global, cross-country tables that ISO 3166 and GADM key on (ADR 0022). This avoids the ambiguity that comes from a name like `geography.state` reading as "states" without saying *whose* states. Polymorphic companion tables that span both (e.g., `geography.boundary`) keep the bare name and discriminate by a `geo_level` column whose values themselves carry the country prefix (`us_state`, `country`, `subnational_adm2`, …).
+
 **Length.** Aim for one to three words; soft cap at 30 characters. Hard cap at 50.
 
 ### Column names

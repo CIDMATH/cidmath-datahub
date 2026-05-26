@@ -17,9 +17,10 @@ Planned (not yet built):
 
 | Schema.table | Class | Source |
 |---|---|---|
-| `geography.state` | authoritative slow-changing | US Census |
-| `geography.county` | authoritative slow-changing (SCD2) | US Census |
-| `geography.zcta`, `census_tract`, crosswalks | authoritative slow-changing | US Census TIGER/Gazetteer |
+| `geography.us_state`, `geography.us_county`, `geography.us_tract`, `geography.us_zcta`, `geography.us_hhs_region` | authoritative slow-changing | IPUMS NHGIS (ADR 0020) |
+| `geography.us_crosswalk` | authoritative slow-changing | IPUMS NHGIS bg-sourced 2010↔2020 (ADR 0021) |
+| `geography.country`, `geography.country_subdivision`, `geography.subnational` | authoritative slow-changing | ISO 3166-1/2 + GADM (ADR 0022) |
+| `geography.boundary` | companion polygons (WKB), all levels | NHGIS + GADM |
 | `codes.loinc`, `codes.cvx`, ... | authoritative slow-changing | code-system authorities |
 | `pathogen.taxonomy` | static structural | curated/ICTV |
 

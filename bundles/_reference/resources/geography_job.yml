@@ -17,7 +17,7 @@ resources:
     build_geography_reference:
       name: "[_reference] build_geography_reference"
       description: |
-        Builds geography.state, geography.county, geography.hhs_region, and
+        Builds geography.us_state, geography.us_county, geography.us_hhs_region, and
         companion geography.boundary (generalized) from IPUMS NHGIS shapefiles.
         Long-running: IPUMS extracts are asynchronous (submit -> poll -> download).
         full_refresh.

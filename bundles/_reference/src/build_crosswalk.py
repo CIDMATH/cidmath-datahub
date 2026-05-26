@@ -1,8 +1,8 @@
-"""Build geography.crosswalk: NHGIS bg-sourced 2010<->2020 crosswalks as published.
+"""Build geography.us_crosswalk: NHGIS bg-sourced 2010<->2020 crosswalks as published.
 
 Slice 2b (ADR 0021). Downloads the six bg-sourced crosswalk file sets from
 NHGIS's supplemental-data endpoint (no extract submission), normalizes them
-into the long-form ``geography.crosswalk`` table (one row per source × target ×
+into the long-form ``geography.us_crosswalk`` table (one row per source × target ×
 weight_kind), applies the standard weight-sum DQ per (file, weight_kind),
 registers metadata, and applies Liquid Clustering.
 
@@ -40,7 +40,7 @@ from cidmath_datahub.reference import geography as geo
 log = get_logger(__name__)
 
 SCHEMA = "geography"
-TABLE = "crosswalk"
+TABLE = "us_crosswalk"
 
 # The six bg-sourced 2010<->2020 NHGIS crosswalk file sets to ship (ADR 0021).
 # NHGIS national crosswalk files live directly under ``/crosswalks/{filename}``

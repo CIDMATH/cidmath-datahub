@@ -21,7 +21,7 @@ Usage::
     with DQRecorder(spark, catalog, new_run_id(), "build_geography") as recorder:
         passed = len(duplicates) == 0
         recorder.record(
-            table_name="geography.state",
+            table_name="geography.us_state",
             check_name="state_geoid_uniqueness_2020",
             category=DQCategory.UNIQUENESS,
             severity=DQSeverity.FAIL,
@@ -156,7 +156,7 @@ class DQRecorder:
 
         Args:
             table_name: Schema-qualified table the check ran against
-                (e.g., ``"geography.state"``).
+                (e.g., ``"geography.us_state"``).
             check_name: Stable identifier for the check itself.
             category: Member of :class:`DQCategory` (or its string value).
             severity: Member of :class:`DQSeverity` (or its string value).

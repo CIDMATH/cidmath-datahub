@@ -49,7 +49,7 @@ class TestDQRecorderBuffering:
     def test_record_appends_to_buffer(self):
         rec = _recorder()
         rec.record(
-            table_name="geography.state",
+            table_name="geography.us_state",
             check_name="state_geoid_unique",
             category=DQCategory.UNIQUENESS,
             severity=DQSeverity.FAIL,
@@ -59,7 +59,7 @@ class TestDQRecorderBuffering:
         )
         assert rec.buffered == 1
         row = rec._buffer[0]
-        assert row["table_name"] == "geography.state"
+        assert row["table_name"] == "geography.us_state"
         assert row["check_name"] == "state_geoid_unique"
         assert row["category"] == "uniqueness"
         assert row["severity"] == "fail"

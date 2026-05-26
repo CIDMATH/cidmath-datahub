@@ -54,32 +54,32 @@ SCHEMA = "geography"
 
 # Levels built from NHGIS polygon shapefiles, in dependency order (parents first
 # so tract FK checks can run against already-loaded state/county).
-LEVELS = ("state", "county", "tract", "zcta")
+LEVELS = ("us_state", "us_county", "us_tract", "us_zcta")
 
 # IPUMS NHGIS boundary shapefile API codes, keyed by (level, vintage). Pattern is
 # us_<level>_<year>_tl<tiger_basis>. Verify/extend against the live catalog with
 # IpumsApiClient.get_metadata_catalog(metadata_type="shapefiles").
 SHAPEFILE_NAMES: dict[tuple[str, int], str] = {
-    ("state", 2010): "us_state_2010_tl2010",
-    ("state", 2020): "us_state_2020_tl2020",
-    ("county", 2010): "us_county_2010_tl2010",
-    ("county", 2020): "us_county_2020_tl2020",
-    ("tract", 2010): "us_tract_2010_tl2010",
-    ("tract", 2020): "us_tract_2020_tl2020",
-    ("zcta", 2010): "us_zcta_2010_tl2010",
-    ("zcta", 2020): "us_zcta_2020_tl2020",
+    ("us_state", 2010): "us_state_2010_tl2010",
+    ("us_state", 2020): "us_state_2020_tl2020",
+    ("us_county", 2010): "us_county_2010_tl2010",
+    ("us_county", 2020): "us_county_2020_tl2020",
+    ("us_tract", 2010): "us_tract_2010_tl2010",
+    ("us_tract", 2020): "us_tract_2020_tl2020",
+    ("us_zcta", 2010): "us_zcta_2010_tl2010",
+    ("us_zcta", 2020): "us_zcta_2020_tl2020",
 }
 
 # Census Centers of Population point shapefiles (population-weighted centroids),
 # keyed by (level, vintage). Optional: a missing entry or file falls back to the
 # polygon interior point. CoP exists for state/county/tract, not ZCTA.
 CENPOP_SHAPEFILE_NAMES: dict[tuple[str, int], str] = {
-    ("state", 2010): "us_state_cenpop_2010_cenpop2010",
-    ("state", 2020): "us_state_cenpop_2020_cenpop2020",
-    ("county", 2010): "us_county_cenpop_2010_cenpop2010",
-    ("county", 2020): "us_county_cenpop_2020_cenpop2020",
-    ("tract", 2010): "us_tract_cenpop_2010_cenpop2010",
-    ("tract", 2020): "us_tract_cenpop_2020_cenpop2020",
+    ("us_state", 2010): "us_state_cenpop_2010_cenpop2010",
+    ("us_state", 2020): "us_state_cenpop_2020_cenpop2020",
+    ("us_county", 2010): "us_county_cenpop_2010_cenpop2010",
+    ("us_county", 2020): "us_county_cenpop_2020_cenpop2020",
+    ("us_tract", 2010): "us_tract_cenpop_2010_cenpop2010",
+    ("us_tract", 2020): "us_tract_cenpop_2020_cenpop2020",
 }
 
 NHGIS_SOURCE_URL = "https://www.nhgis.org/"
@@ -172,10 +172,10 @@ BOUNDARY_SPARK_SCHEMA = T.StructType(
 )
 
 ENTITY_SCHEMAS: dict[str, T.StructType] = {
-    "state": STATE_SPARK_SCHEMA,
-    "county": COUNTY_SPARK_SCHEMA,
-    "tract": TRACT_SPARK_SCHEMA,
-    "zcta": ZCTA_SPARK_SCHEMA,
+    "us_state": STATE_SPARK_SCHEMA,
+    "us_county": COUNTY_SPARK_SCHEMA,
+    "us_tract": TRACT_SPARK_SCHEMA,
+    "us_zcta": ZCTA_SPARK_SCHEMA,
 }
 
 
@@ -367,7 +367,7 @@ def _build_state_frames(
             area_water_sqm=_num(rec[awater]) if awater else None,
         )
         rows.append(row)
-        boundary.append(_boundary_row("state", row, vintage, resolution, geom, tolerance))
+        boundary.append(_boundary_row("us_state", row, vintage, resolution, geom, tolerance))
     return rows, boundary
 
 
@@ -406,7 +406,7 @@ def _build_county_frames(
             area_water_sqm=_num(rec[awater]) if awater else None,
         )
         rows.append(row)
-        boundary.append(_boundary_row("county", row, vintage, resolution, geom, tolerance))
+        boundary.append(_boundary_row("us_county", row, vintage, resolution, geom, tolerance))
     return rows, boundary
 
 
@@ -442,7 +442,7 @@ def _build_tract_frames(
             area_water_sqm=_num(rec[awater]) if awater else None,
         )
         rows.append(row)
-        boundary.append(_boundary_row("tract", row, vintage, resolution, geom, tolerance))
+        boundary.append(_boundary_row("us_tract", row, vintage, resolution, geom, tolerance))
     return rows, boundary
 
 
@@ -476,15 +476,15 @@ def _build_zcta_frames(
             area_water_sqm=_num(rec[awater]) if awater else None,
         )
         rows.append(row)
-        boundary.append(_boundary_row("zcta", row, vintage, resolution, geom, tolerance))
+        boundary.append(_boundary_row("us_zcta", row, vintage, resolution, geom, tolerance))
     return rows, boundary
 
 
 BUILDERS = {
-    "state": _build_state_frames,
-    "county": _build_county_frames,
-    "tract": _build_tract_frames,
-    "zcta": _build_zcta_frames,
+    "us_state": _build_state_frames,
+    "us_county": _build_county_frames,
+    "us_tract": _build_tract_frames,
+    "us_zcta": _build_zcta_frames,
 }
 
 
@@ -560,14 +560,14 @@ def _build_hhs_region(spark: SparkSession, catalog: str) -> None:
     rows = geo.generate_hhs_regions()
     df = spark.createDataFrame(rows, schema=HHS_REGION_SPARK_SCHEMA).sort("hhs_region")
     df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        f"{catalog}.{SCHEMA}.hhs_region"
+        f"{catalog}.{SCHEMA}.us_hhs_region"
     )
     spark.sql(
         f"COMMENT ON TABLE {catalog}.{SCHEMA}.hhs_region IS "
         f"'The ten HHS regions (static federal grouping of states). Reference "
         f"table; full_refresh. ADR 0020.'"
     )
-    log.info("Wrote hhs_region", extra={"rows": len(rows)})
+    log.info("Wrote us_hhs_region", extra={"rows": len(rows)})
 
 
 def _write_chunk(
@@ -600,7 +600,7 @@ def _set_clustering(spark: SparkSession, catalog: str) -> None:
     Applied after the data lands; non-fatal if the runtime doesn't support
     ALTER ... CLUSTER BY, since clustering is a read-pruning optimization.
     """
-    targets = (("boundary", "geo_level, vintage"), ("tract", "vintage"), ("zcta", "vintage"))
+    targets = (("boundary", "geo_level, vintage"), ("us_tract", "vintage"), ("us_zcta", "vintage"))
     for table, cols in targets:
         try:
             spark.sql(f"ALTER TABLE {catalog}.{SCHEMA}.{table} CLUSTER BY ({cols})")
@@ -727,10 +727,10 @@ def _register_dataset(
 
 def _comment_tables(spark: SparkSession, catalog: str) -> None:
     comments = {
-        "state": "US states + DC and territories, vintaged. Source IPUMS NHGIS. ADR 0020.",
-        "county": "US counties (geoid, vintage); state_geoid FK. Source IPUMS NHGIS. ADR 0020.",
-        "tract": "US tracts (geoid, vintage); county + state FKs. Source IPUMS NHGIS. ADR 0020.",
-        "zcta": "US ZCTAs (geoid, vintage); non-nesting. Source IPUMS NHGIS. ADR 0020.",
+        "us_state": "US states + DC and territories, vintaged. Source IPUMS NHGIS. ADR 0020.",
+        "us_county": "US counties (geoid, vintage); state_geoid FK. Source IPUMS NHGIS. ADR 0020.",
+        "us_tract": "US tracts (geoid, vintage); county + state FKs. Source IPUMS NHGIS. ADR 0020.",
+        "us_zcta": "US ZCTAs (geoid, vintage); non-nesting. Source IPUMS NHGIS. ADR 0020.",
         "boundary": "Boundary polygons (WKB) by geo_level/vintage/resolution. ADR 0020.",
     }
     for table, text in comments.items():
@@ -810,12 +810,12 @@ def run(
 
                 table_name = f"{SCHEMA}.{lvl}"
                 _check_unique(lvl, v, rows, recorder=recorder, table_name=table_name)
-                if lvl == "state":
+                if lvl == "us_state":
                     state_geoids[v] = {r["geoid"] for r in rows}
-                elif lvl == "county":
+                elif lvl == "us_county":
                     county_geoids[v] = {r["geoid"] for r in rows}
                     _check_fk(
-                        "county",
+                        "us_county",
                         rows,
                         "state_geoid",
                         state_geoids.get(v, set()),
@@ -823,9 +823,9 @@ def run(
                         recorder=recorder,
                         table_name=table_name,
                     )
-                elif lvl == "tract":
+                elif lvl == "us_tract":
                     _check_fk(
-                        "tract",
+                        "us_tract",
                         rows,
                         "state_geoid",
                         state_geoids.get(v, set()),
@@ -834,7 +834,7 @@ def run(
                         table_name=table_name,
                     )
                     _check_fk(
-                        "tract",
+                        "us_tract",
                         rows,
                         "county_geoid",
                         county_geoids.get(v, set()),
@@ -863,59 +863,59 @@ def run(
     _register_dataset(
         spark,
         catalog=catalog,
-        table="state",
+        table="us_state",
         description="US states and DC (plus territories), one row per state per vintage.",
         public_health_relevance=(
             "Canonical state spatial unit that surveillance and modeling data conform "
             "to; carries HHS region for federal regional rollups."
         ),
-        spatial_resolution="state",
+        spatial_resolution="us_state",
         cluster_columns=None,
         pipeline_reference=pipeline_ref,
     )
     _register_dataset(
         spark,
         catalog=catalog,
-        table="county",
+        table="us_county",
         description="US counties, one row per county per vintage, with state FK.",
         public_health_relevance=(
             "Canonical county spatial unit; the standard grain for U.S. infectious "
             "disease surveillance and the spatial backbone other subjects join to."
         ),
-        spatial_resolution="county",
+        spatial_resolution="us_county",
         cluster_columns=None,
         pipeline_reference=pipeline_ref,
     )
     _register_dataset(
         spark,
         catalog=catalog,
-        table="tract",
+        table="us_tract",
         description="US census tracts, one row per tract per vintage, with county + state FKs.",
         public_health_relevance=(
             "Fine-grained spatial unit for neighborhood-level surveillance and "
             "modeling; redrawn each decade, so vintage matters."
         ),
-        spatial_resolution="tract",
+        spatial_resolution="us_tract",
         cluster_columns=["vintage"],
         pipeline_reference=pipeline_ref,
     )
     _register_dataset(
         spark,
         catalog=catalog,
-        table="zcta",
+        table="us_zcta",
         description="US ZIP Code Tabulation Areas, one row per ZCTA per vintage (non-nesting).",
         public_health_relevance=(
             "Approximate ZIP-code geography for joining address- or ZIP-coded health "
             "data; non-nesting, so used directly rather than via county/state."
         ),
-        spatial_resolution="zcta",
+        spatial_resolution="us_zcta",
         cluster_columns=["vintage"],
         pipeline_reference=pipeline_ref,
     )
     _register_dataset(
         spark,
         catalog=catalog,
-        table="hhs_region",
+        table="us_hhs_region",
         description="The ten HHS regions (static federal grouping of states).",
         public_health_relevance=(
             "Federal regional grouping used for HHS/CDC regional reporting and rollups."

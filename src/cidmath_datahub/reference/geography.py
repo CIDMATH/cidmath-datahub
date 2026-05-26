@@ -241,11 +241,11 @@ def hhs_region_name(region: int) -> str:
 
 
 def generate_hhs_regions() -> list[dict[str, Any]]:
-    """Return the ten rows for ``geography.hhs_region``, ordered by region number.
+    """Return the ten rows for ``geography.us_hhs_region``, ordered by region number.
 
     Each row carries the region number, its HQ-city name, and the sorted member
     USPS codes. The authoritative state->region membership is materialized as the
-    ``hhs_region`` column on ``geography.state``; ``member_states`` here is a
+    ``hhs_region`` column on ``geography.us_state``; ``member_states`` here is a
     convenience for QA and a standalone lookup.
     """
     return [
@@ -356,7 +356,7 @@ def build_state_row(
     area_land_sqm: float | None = None,
     area_water_sqm: float | None = None,
 ) -> dict[str, Any]:
-    """Assemble a ``geography.state`` row from a state GISJOIN plus geometry values.
+    """Assemble a ``geography.us_state`` row from a state GISJOIN plus geometry values.
 
     Identity (geoid, USPS, name, HHS region) is derived in code so it does not
     depend on which attributes a shapefile carries (ADR 0020). The geographic
@@ -393,7 +393,7 @@ def build_county_row(
     area_land_sqm: float | None = None,
     area_water_sqm: float | None = None,
 ) -> dict[str, Any]:
-    """Assemble a ``geography.county`` row.
+    """Assemble a ``geography.us_county`` row.
 
     ``geoid`` and the parent ``state_geoid`` FK are derived from the GISJOIN; the
     county name comes from the shapefile. Geographic interior point always;
@@ -426,7 +426,7 @@ def build_tract_row(
     area_land_sqm: float | None = None,
     area_water_sqm: float | None = None,
 ) -> dict[str, Any]:
-    """Assemble a ``geography.tract`` row.
+    """Assemble a ``geography.us_tract`` row.
 
     ``geoid`` (11-digit) and the parent ``county_geoid`` (5) + ``state_geoid`` (2)
     FKs are derived from the GISJOIN. Tracts get both a geographic interior point
@@ -457,7 +457,7 @@ def build_zcta_row(
     area_land_sqm: float | None = None,
     area_water_sqm: float | None = None,
 ) -> dict[str, Any]:
-    """Assemble a ``geography.zcta`` row.
+    """Assemble a ``geography.us_zcta`` row.
 
     ZCTAs are non-nesting (no parent FK) and have no Center of Population, so only
     the geographic interior point is stored.
@@ -526,7 +526,7 @@ def validate_crosswalk_weights(
     return [(src, total) for src, total in sorted(totals.items()) if abs(total - 1.0) > tolerance]
 
 
-# --- Crosswalk normalization (long-form output for geography.crosswalk; ADR 0021)
+# --- Crosswalk normalization (long-form output for geography.us_crosswalk; ADR 0021)
 # Maps the raw NHGIS weight column names to our controlled weight_kind vocabulary.
 NHGIS_WEIGHT_COLUMNS: dict[str, str] = {
     "wt_pop": "pop",
@@ -550,7 +550,7 @@ def normalize_crosswalk_rows(
     target_gj_col: str,
     weight_columns: dict[str, str],
 ) -> list[dict[str, Any]]:
-    """Expand raw NHGIS crosswalk records into long-form rows for ``geography.crosswalk``.
+    """Expand raw NHGIS crosswalk records into long-form rows for ``geography.us_crosswalk``.
 
     NHGIS publishes one row per source-target pair with multiple weight columns
     (``parea``, ``wt_pop``, ``wt_hh``, etc.). We pivot to one row per source ×
