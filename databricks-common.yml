@@ -53,6 +53,13 @@ variables:
   teams_webhook_key:
     description: Key within the secret scope for the Teams webhook URL.
     default: data_hub
+  teams_destination_id:
+    description: |
+      Databricks notification-destination ID (UUID) for the Teams incoming
+      webhook. Created once per workspace via Settings -> Workspace Admin ->
+      Notifications; referenced from job ``webhook_notifications`` blocks.
+      Distinct from ``teams_webhook_scope``/``_key``, which hold the raw URL
+      for code that wants to post directly (ADR 0010). Set per-target.
   ipums_secret_scope:
     description: |
       Databricks secret scope holding the IPUMS NHGIS API key, used by the
@@ -116,6 +123,7 @@ targets:
       model_catalog: ecdh_model_dev
       deploy_sp_application_id: a55b6164-c0eb-42cf-a438-7de33c150f4a
       teams_webhook_scope: ecdh-dev-teams-webhook
+      teams_destination_id: c33c2883-2b42-4621-9578-b864fd33547f
       ipums_secret_scope: ecdh-dev-ipums
     presets:
       tags:
@@ -142,6 +150,7 @@ targets:
       model_catalog: ecdh_model_prod
       deploy_sp_application_id: caff7ad3-d82f-4692-98cc-678dc6807cbd
       teams_webhook_scope: ecdh-prod-teams-webhook
+      teams_destination_id: 691bab0f-9854-4f89-ab12-3138be3ec998
       ipums_secret_scope: ecdh-prod-ipums
     presets:
       tags:

@@ -46,6 +46,13 @@ resources:
 
       timeout_seconds: 3600
 
+      # Alerting (ADR 0010): Teams primary via notification destination,
+      # email as redundant secondary. Destination IDs are created once per
+      # workspace (Settings -> Notifications) and referenced by UUID.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
       email_notifications:
         on_failure:
           - ${var.email_recipient}
