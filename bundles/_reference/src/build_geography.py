@@ -243,7 +243,11 @@ def _find_shapefile(root: Path, level: str, vintage: int, *, cenpop: bool = Fals
     substrings of others (e.g. county vs cty_sub). Returns None for a missing
     cenpop file (optional); raises for a missing boundary file.
     """
-    token = f"us_{level.lower()}_"
+    # The level identifier carries a us_ prefix (ADR 0006 refinement) but NHGIS
+    # shapefile filenames only have one us_ — strip ours before composing the
+    # match token.
+    bare_level = level.lower().removeprefix("us_")
+    token = f"us_{bare_level}_"
     year = str(vintage)
     matches = [
         p
