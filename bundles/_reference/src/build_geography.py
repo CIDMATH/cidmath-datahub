@@ -43,7 +43,9 @@ from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
 from cidmath_datahub.common import grants
+from cidmath_datahub.common.dq import DQRecorder, new_run_id
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import geography as geo
 
 log = get_logger(__name__)
@@ -486,23 +488,68 @@ BUILDERS = {
 }
 
 
-def _check_unique(level: str, vintage: int, rows: list[dict[str, Any]]) -> None:
-    """Raise if any geoid repeats within this (level, vintage) chunk (ADR 0009)."""
+def _check_unique(
+    level: str,
+    vintage: int,
+    rows: list[dict[str, Any]],
+    *,
+    recorder: DQRecorder,
+    table_name: str,
+) -> None:
+    """Record uniqueness check on ``geoid`` for this (level, vintage) chunk; raise on fail.
+
+    Records to ``_ops.dq_results`` for both pass and fail outcomes so the
+    audit trail captures green runs as well as red ones (ADR 0009).
+    """
     seen: set[str] = set()
     dups: set[str] = set()
     for r in rows:
         if r["geoid"] in seen:
             dups.add(r["geoid"])
         seen.add(r["geoid"])
+    passed = not dups
+    sample = sorted(dups)[:10]
+    recorder.record(
+        table_name=table_name,
+        check_name=f"{level}_geoid_uniqueness_{vintage}",
+        category=DQCategory.UNIQUENESS,
+        severity=DQSeverity.FAIL,
+        passed=passed,
+        failing_row_count=len(dups),
+        total_row_count=len(rows),
+        details={"sample_duplicates": sample, "vintage": vintage} if dups else None,
+    )
     if dups:
-        raise ValueError(f"duplicate geoid in {level} (vintage {vintage}): {sorted(dups)[:10]}")
+        raise ValueError(f"duplicate geoid in {level} (vintage {vintage}): {sample}")
 
 
 def _check_fk(
-    level: str, rows: list[dict[str, Any]], fk_col: str, parent_geoids: set[str], vintage: int
+    level: str,
+    rows: list[dict[str, Any]],
+    fk_col: str,
+    parent_geoids: set[str],
+    vintage: int,
+    *,
+    recorder: DQRecorder,
+    table_name: str,
 ) -> None:
-    """Raise if any row's foreign key is absent from the parent set (ADR 0009)."""
+    """Record FK integrity check; raise on fail. Records both pass and fail (ADR 0009)."""
     missing = sorted({r[fk_col] for r in rows if r[fk_col] not in parent_geoids})
+    passed = not missing
+    recorder.record(
+        table_name=table_name,
+        check_name=f"{level}_fk_{fk_col}_{vintage}",
+        category=DQCategory.REFERENTIAL,
+        severity=DQSeverity.FAIL,
+        passed=passed,
+        failing_row_count=len(missing),
+        total_row_count=len(rows),
+        details=(
+            {"sample_missing": missing[:10], "fk_column": fk_col, "vintage": vintage}
+            if missing
+            else None
+        ),
+    )
     if missing:
         raise ValueError(
             f"{level} rows referencing missing {fk_col} (vintage {vintage}): {missing[:10]}"
@@ -742,34 +789,66 @@ def run(
 
     # Process and write per (level, vintage) chunk to bound driver memory. Levels
     # run parents-first so tract FK checks see already-loaded state/county geoids.
+    # DQ outcomes (uniqueness + FK) are persisted to _ops.dq_results via the
+    # recorder; flushed at context-manager exit even if a write raises (ADR 0009).
     written: set[str] = set()
     state_geoids: dict[int, set[str]] = {}
     county_geoids: dict[int, set[str]] = {}
+    run_id = new_run_id()
+    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
 
-    for lvl in LEVELS:
-        for v in vintages:
-            gdf = _read_gdf(_find_shapefile(workdir, lvl, v))
-            cenpop = (
-                _read_cenpop_lookup(workdir, lvl, v) if (lvl, v) in CENPOP_SHAPEFILE_NAMES else {}
-            )
-            rows, boundary = BUILDERS[lvl](gdf, v, tolerance, resolution, cenpop)
+    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
+        for lvl in LEVELS:
+            for v in vintages:
+                gdf = _read_gdf(_find_shapefile(workdir, lvl, v))
+                cenpop = (
+                    _read_cenpop_lookup(workdir, lvl, v)
+                    if (lvl, v) in CENPOP_SHAPEFILE_NAMES
+                    else {}
+                )
+                rows, boundary = BUILDERS[lvl](gdf, v, tolerance, resolution, cenpop)
 
-            _check_unique(lvl, v, rows)
-            if lvl == "state":
-                state_geoids[v] = {r["geoid"] for r in rows}
-            elif lvl == "county":
-                county_geoids[v] = {r["geoid"] for r in rows}
-                _check_fk("county", rows, "state_geoid", state_geoids.get(v, set()), v)
-            elif lvl == "tract":
-                _check_fk("tract", rows, "state_geoid", state_geoids.get(v, set()), v)
-                _check_fk("tract", rows, "county_geoid", county_geoids.get(v, set()), v)
+                table_name = f"{SCHEMA}.{lvl}"
+                _check_unique(lvl, v, rows, recorder=recorder, table_name=table_name)
+                if lvl == "state":
+                    state_geoids[v] = {r["geoid"] for r in rows}
+                elif lvl == "county":
+                    county_geoids[v] = {r["geoid"] for r in rows}
+                    _check_fk(
+                        "county",
+                        rows,
+                        "state_geoid",
+                        state_geoids.get(v, set()),
+                        v,
+                        recorder=recorder,
+                        table_name=table_name,
+                    )
+                elif lvl == "tract":
+                    _check_fk(
+                        "tract",
+                        rows,
+                        "state_geoid",
+                        state_geoids.get(v, set()),
+                        v,
+                        recorder=recorder,
+                        table_name=table_name,
+                    )
+                    _check_fk(
+                        "tract",
+                        rows,
+                        "county_geoid",
+                        county_geoids.get(v, set()),
+                        v,
+                        recorder=recorder,
+                        table_name=table_name,
+                    )
 
-            _write_chunk(spark, catalog, lvl, rows, ENTITY_SCHEMAS[lvl], written)
-            _write_chunk(spark, catalog, "boundary", boundary, BOUNDARY_SPARK_SCHEMA, written)
-            log.info(
-                "Processed",
-                extra={"level": lvl, "vintage": v, "rows": len(rows), "cenpop": len(cenpop)},
-            )
+                _write_chunk(spark, catalog, lvl, rows, ENTITY_SCHEMAS[lvl], written)
+                _write_chunk(spark, catalog, "boundary", boundary, BOUNDARY_SPARK_SCHEMA, written)
+                log.info(
+                    "Processed",
+                    extra={"level": lvl, "vintage": v, "rows": len(rows), "cenpop": len(cenpop)},
+                )
 
     _comment_tables(spark, catalog)
     _set_clustering(spark, catalog)

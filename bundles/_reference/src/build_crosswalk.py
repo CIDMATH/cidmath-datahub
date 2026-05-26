@@ -32,7 +32,9 @@ from typing import Any
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
+from cidmath_datahub.common.dq import DQRecorder, new_run_id
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import geography as geo
 
 log = get_logger(__name__)
@@ -249,14 +251,67 @@ def _update_running_sums(
         running[key] = running.get(key, 0.0) + r["weight"]
 
 
-def _check_running_sums(desc: str, running: dict[tuple[str, str], float], tolerance: float) -> None:
-    """Per-(source_gisjoin, weight_kind) weight sums should be ~1.0 (ADR 0009)."""
-    offenders = [
-        (src, kind, total) for (src, kind), total in running.items() if abs(total - 1.0) > tolerance
-    ]
-    if offenders:
+def _check_running_sums(
+    desc: str,
+    running: dict[tuple[str, str], float],
+    tolerance: float,
+    *,
+    recorder: DQRecorder,
+    table_name: str,
+    spec: dict[str, Any],
+) -> None:
+    """Per-(source_gisjoin, weight_kind) weight sums should be ~1.0 (ADR 0009).
+
+    Records one row per (file, weight_kind) in ``_ops.dq_results`` so the
+    audit trail is granular enough to spot weight-specific drift, then
+    raises (with all offenders summarized) if any kind failed tolerance.
+    """
+    # Partition the offender list by weight_kind so we record one row per kind.
+    per_kind_offenders: dict[str, list[tuple[str, float]]] = {}
+    per_kind_totals: dict[str, int] = {}
+    for (src, kind), total in running.items():
+        per_kind_totals[kind] = per_kind_totals.get(kind, 0) + 1
+        if abs(total - 1.0) > tolerance:
+            per_kind_offenders.setdefault(kind, []).append((src, total))
+
+    any_failed = False
+    for kind in sorted(per_kind_totals):
+        offenders = per_kind_offenders.get(kind, [])
+        passed = not offenders
         sample = sorted(offenders)[:5]
-        raise ValueError(f"weight sums != 1.0 in {desc}; first offenders: {sample}")
+        recorder.record(
+            table_name=table_name,
+            check_name=(
+                f"crosswalk_weight_sum_"
+                f"{spec['source_level']}{spec['source_vintage']}_to_"
+                f"{spec['target_level']}{spec['target_vintage']}_{kind}"
+            ),
+            category=DQCategory.BUSINESS_RULE,
+            severity=DQSeverity.FAIL,
+            passed=passed,
+            failing_row_count=len(offenders),
+            total_row_count=per_kind_totals[kind],
+            details=(
+                {
+                    "crosswalk": desc,
+                    "weight_kind": kind,
+                    "tolerance": tolerance,
+                    "sample_offenders": [[src, total] for src, total in sample],
+                }
+                if offenders
+                else None
+            ),
+        )
+        if offenders:
+            any_failed = True
+
+    if any_failed:
+        # Report a flat summary across all weight kinds in the exception, matching
+        # the prior behaviour so anything reading job logs sees the same shape.
+        all_offenders = sorted(
+            (src, kind, total) for kind, lst in per_kind_offenders.items() for src, total in lst
+        )[:5]
+        raise ValueError(f"weight sums != 1.0 in {desc}; first offenders: {all_offenders}")
     log.info("DQ weight sums OK", extra={"crosswalk": desc, "source_units": len(running)})
 
 
@@ -409,6 +464,7 @@ def _process_one(
     base_url: str,
     workdir: Path,
     written: set[str],
+    recorder: DQRecorder,
 ) -> None:
     """Download, normalize, write, and DQ-check one crosswalk file set."""
     desc = (
@@ -466,7 +522,14 @@ def _process_one(
             raw_batch = []
     total_written += _flush(raw_batch)
 
-    _check_running_sums(desc, running, DQ_TOLERANCE)
+    _check_running_sums(
+        desc,
+        running,
+        DQ_TOLERANCE,
+        recorder=recorder,
+        table_name=f"{SCHEMA}.{TABLE}",
+        spec=spec,
+    )
     log.info(
         "Completed crosswalk",
         extra={"crosswalk": desc, "rows": total_written, "source_units": len(running)},
@@ -488,8 +551,12 @@ def run(catalog: str, ipums_secret_scope: str | None, ipums_secret_key: str | No
     log.info("Crosswalk build starting", extra={"catalog": catalog, "files": len(CROSSWALK_FILES)})
 
     written: set[str] = set()
-    for spec in CROSSWALK_FILES:
-        _process_one(spark, catalog, spec, ipums, base_url, workdir, written)
+    run_id = new_run_id()
+    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
+
+    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
+        for spec in CROSSWALK_FILES:
+            _process_one(spark, catalog, spec, ipums, base_url, workdir, written, recorder)
 
     _comment_table(spark, catalog)
     _set_clustering(spark, catalog)
