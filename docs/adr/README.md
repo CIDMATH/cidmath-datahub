@@ -87,6 +87,7 @@ both positive and negative consequences honestly.
 | [0019](0019-analyst-discovery-view.md) | Analyst-facing discovery view (curated `discovery.datasets` over `_ops` via view ownership chain) | Accepted |
 | [0020](0020-geography-reference.md) | Geography reference: IPUMS NHGIS source, vintaged snapshots + crosswalks, lean attributes + companion WKB geometry | Accepted |
 | [0021](0021-geography-crosswalks.md) | Geography crosswalks: ship NHGIS bg-sourced 2010↔2020 files as published, normalized into one long-form table | Accepted |
+| [0022](0022-geography-international-scope.md) | Geography reference: international scope (ISO 3166-1/2 codes + GADM boundaries; new country, country_subdivision, subnational tables) | Accepted |
 
 ## Future ADRs (backlog)
 
