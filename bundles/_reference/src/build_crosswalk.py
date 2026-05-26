@@ -41,16 +41,16 @@ SCHEMA = "geography"
 TABLE = "crosswalk"
 
 # The six bg-sourced 2010<->2020 NHGIS crosswalk file sets to ship (ADR 0021).
-# ``directory`` and ``filename`` follow NHGIS's supplemental-data convention;
-# the loader builds the URL via ipums.base_url and downloads via ipums.get().
-# If NHGIS revises a path, the first-run download will 404 loud with the URL.
+# NHGIS national crosswalk files live directly under ``/crosswalks/{filename}``
+# on the supplemental-data endpoint (verified pattern from blk1990_blk2010,
+# blk2010_blk2020, etc.). The loader builds the URL via ipums.base_url and
+# downloads via ipums.get(); a 404 fails loud with the attempted URL.
 CROSSWALK_FILES: list[dict[str, Any]] = [
     {
         "source_level": "bg",
         "source_vintage": 2010,
         "target_level": "bg",
         "target_vintage": 2020,
-        "directory": "nhgis_bg2010_bg2020",
         "filename": "nhgis_bg2010_bg2020.zip",
         "csv_stem": "nhgis_bg2010_bg2020",
     },
@@ -59,7 +59,6 @@ CROSSWALK_FILES: list[dict[str, Any]] = [
         "source_vintage": 2010,
         "target_level": "tract",
         "target_vintage": 2020,
-        "directory": "nhgis_bg2010_tr2020",
         "filename": "nhgis_bg2010_tr2020.zip",
         "csv_stem": "nhgis_bg2010_tr2020",
     },
@@ -68,7 +67,6 @@ CROSSWALK_FILES: list[dict[str, Any]] = [
         "source_vintage": 2010,
         "target_level": "county",
         "target_vintage": 2020,
-        "directory": "nhgis_bg2010_co2020",
         "filename": "nhgis_bg2010_co2020.zip",
         "csv_stem": "nhgis_bg2010_co2020",
     },
@@ -77,7 +75,6 @@ CROSSWALK_FILES: list[dict[str, Any]] = [
         "source_vintage": 2020,
         "target_level": "bg",
         "target_vintage": 2010,
-        "directory": "nhgis_bg2020_bg2010",
         "filename": "nhgis_bg2020_bg2010.zip",
         "csv_stem": "nhgis_bg2020_bg2010",
     },
@@ -86,7 +83,6 @@ CROSSWALK_FILES: list[dict[str, Any]] = [
         "source_vintage": 2020,
         "target_level": "tract",
         "target_vintage": 2010,
-        "directory": "nhgis_bg2020_tr2010",
         "filename": "nhgis_bg2020_tr2010.zip",
         "csv_stem": "nhgis_bg2020_tr2010",
     },
@@ -95,7 +91,6 @@ CROSSWALK_FILES: list[dict[str, Any]] = [
         "source_vintage": 2020,
         "target_level": "county",
         "target_vintage": 2010,
-        "directory": "nhgis_bg2020_co2010",
         "filename": "nhgis_bg2020_co2010.zip",
         "csv_stem": "nhgis_bg2020_co2010",
     },
@@ -153,9 +148,9 @@ def _ipums_base_url(api_key: str) -> tuple[str, Any]:
     return ipums.base_url, ipums
 
 
-def _download_zip(ipums: Any, base_url: str, directory: str, filename: str, dest: Path) -> Path:
+def _download_zip(ipums: Any, base_url: str, filename: str, dest: Path) -> Path:
     """Download a supplemental-data crosswalk zip via the IPUMS API client."""
-    url = f"{base_url}/supplemental-data/nhgis/crosswalks/{directory}/{filename}"
+    url = f"{base_url}/supplemental-data/nhgis/crosswalks/{filename}"
     target = dest / filename
     log.info("Downloading crosswalk", extra={"url": url, "dest": str(target)})
     with ipums.get(url, stream=True) as response:
@@ -422,7 +417,7 @@ def _process_one(
     )
     log.info("Processing crosswalk", extra={"crosswalk": desc})
 
-    zip_path = _download_zip(ipums, base_url, spec["directory"], spec["filename"], workdir)
+    zip_path = _download_zip(ipums, base_url, spec["filename"], workdir)
     unz = _extract_zip(zip_path, workdir)
     csv = _find_gj_csv(unz, spec["csv_stem"])
     header, row_iter = _stream_csv_rows(csv)
