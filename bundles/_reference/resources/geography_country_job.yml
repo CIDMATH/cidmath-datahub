@@ -2,16 +2,17 @@
 #
 # Downloads GADM 4.1 zipped GeoPackage (~1.4 GB) from geodata.ucdavis.edu,
 # reads only the ADM_0 layer via pyogrio, joins to ISO 3166-1 codes from
-# pycountry and WHO/UN M49 region attributes from country_converter, writes
+# pycountry and to WHO + UN M49 region attributes from the in-repo
+# cidmath_datahub.reference.country_classifications module, writes
 # geography.country (overwrite) and appends ADM0 polygons to geography.boundary
 # (DELETE-WHERE-geo_level='country' then append).
 #
 # Update semantics: full_refresh (ADR 0007). Refresh cadence: roughly annual
 # to track new GADM releases; ISO 3166-1 is essentially static.
 #
-# Environment carries pycountry + country_converter + geopandas + pyogrio +
-# shapely. No secret scope needed (GADM is HTTP without auth; pycountry +
-# country_converter are pip packages with embedded data).
+# Environment carries pycountry + geopandas + pyogrio + shapely. No secret
+# scope needed (GADM is HTTP without auth; pycountry is a pip package with
+# embedded data; WHO/UN classifications ship in the cidmath_datahub wheel).
 #
 # See bundles/_reference/src/build_geography_country.py and ADR 0022.
 
@@ -44,7 +45,6 @@ resources:
             dependencies:
               - ../../../dist/cidmath_datahub-*.whl
               - pycountry>=23.12
-              - country_converter>=1.2
               - geopandas>=1.0
               - pyogrio>=0.9
               - shapely>=2.0

@@ -1,8 +1,11 @@
 """Build the global geography.country table + ADM0 boundaries (ADR 0022, slice 3a).
 
-Pulls ISO 3166-1 codes from pycountry, WHO + UN M49 region attributes from
-country_converter (which embeds the canonical mappings), and GADM 4.1 ADM0
-polygons from geodata.ucdavis.edu. Writes:
+Pulls ISO 3166-1 codes from pycountry, WHO region (GHO ParentCode form),
+UN macro region, UN M49 sub-region, and UN membership from the in-repo
+static lookup :mod:`cidmath_datahub.reference.country_classifications`
+(neither country_converter nor pycountry expose these cleanly — see that
+module's docstring), and GADM 4.1 ADM0 polygons from geodata.ucdavis.edu.
+Writes:
 
   - ``geography.country`` — one row per ISO 3166-1 entry (~249), keyed by
     ``country_alpha3``. Centroids derived from GADM ADM0 representative
@@ -45,6 +48,7 @@ from cidmath_datahub.common import grants
 from cidmath_datahub.common.dq import DQRecorder, new_run_id
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
+from cidmath_datahub.reference import country_classifications as cclass
 from cidmath_datahub.reference import geography_intl as gi
 
 log = get_logger(__name__)
@@ -196,15 +200,6 @@ def _build_country_rows(
     """
     import pycountry
 
-    try:
-        import country_converter as coco
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "country_converter is required for WHO and UN M49 region attributes; "
-            "add country_converter>=1.2 to the job environment dependencies."
-        ) from exc
-
-    cc = coco.CountryConverter()
     now = datetime.now(tz=UTC)
 
     attr_rows: list[dict[str, Any]] = []
@@ -217,36 +212,33 @@ def _build_country_rows(
         name = country.name
         official_name = getattr(country, "official_name", None)
 
-        # country_converter returns 'not found' (string) for unknown codes;
-        # normalize that to None.
-        who = cc.convert(names=alpha3, src="ISO3", to="WHO")
-        un_region = cc.convert(names=alpha3, src="ISO3", to="UNregion")
-        un_subregion = cc.convert(names=alpha3, src="ISO3", to="continent")  # closest match in cc
-        who = None if (not isinstance(who, str) or who == "not found") else who
-        un_region = (
-            None if (not isinstance(un_region, str) or un_region == "not found") else un_region
-        )
-        un_subregion = (
-            None
-            if (not isinstance(un_subregion, str) or un_subregion == "not found")
-            else un_subregion
-        )
+        # WHO region, UN macro region, UN M49 sub-region, and UN member
+        # status all come from our in-repo static lookup
+        # (cidmath_datahub.reference.country_classifications). country_converter
+        # was tried first but doesn't expose a 'WHO' column at all and its
+        # 'UNmember' / 'UNregion' columns don't match our controlled vocabulary
+        # cleanly. The static lookup is small, deterministic, and removes the
+        # runtime dependency entirely. See cclass module docstring for sources.
+        who = cclass.who_region(alpha3)
+        un_region = cclass.un_region(alpha3)
+        un_subregion = cclass.un_subregion(alpha3)
+        is_un_member = cclass.is_un_member(alpha3)
 
-        # is_un_member proxy: country_converter exposes UNmember as 'member'/'observer'/'other'
-        un_status = cc.convert(names=alpha3, src="ISO3", to="UNmember")
-        is_un_member = isinstance(un_status, str) and un_status.lower() == "member"
-        # is_sovereign proxy: most ISO 3166-1 entries are sovereign; dependent territories
-        # have an ISO alpha-2 starting with a parent's prefix in some cases but ISO doesn't
-        # mark sovereignty directly. For now treat UN member status as the proxy; refine in
-        # slice 3a.1 if needed (Kosovo, Taiwan, Palestine fall in the gap).
+        # is_sovereign proxy: most ISO 3166-1 entries are sovereign; dependent
+        # territories have an ISO alpha-2 starting with a parent's prefix in
+        # some cases but ISO doesn't mark sovereignty directly. For now treat
+        # UN member status as the proxy with explicit overrides for the
+        # well-known non-UN-member sovereign states (Taiwan, Palestine,
+        # Vatican, Kosovo). Refine in slice 3a.1 if needed.
         is_sovereign = is_un_member or alpha3 in {"TWN", "PSE", "VAT", "XKX"}
 
         geom = gadm_geom_by_alpha3.get(alpha3)
         lon, lat = _centroid(geom) if geom is not None else (None, None)
 
-        # Whitelist WHO/UN values into our controlled vocabulary; anything else
-        # becomes None rather than failing assembly (country_converter
-        # occasionally returns long names for regions where we want None).
+        # Whitelist WHO/UN values into our controlled vocabulary; anything
+        # else becomes None rather than failing assembly. Defensive guard in
+        # case the cclass static lookup gains a non-vocabulary value during
+        # a future refresh.
         if who not in gi.WHO_REGION_CODES:
             who = None
         if un_region not in gi.UN_REGION_NAMES:
@@ -316,15 +308,18 @@ def _comment_table(spark: SparkSession, catalog: str) -> None:
     spark.sql(
         f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TABLE} IS "
         f"'ISO 3166-1 countries (alpha-3 PK) with WHO and UN M49 region attributes; "
-        f"centroids from GADM ADM_0 representative points. Source: pycountry + "
-        f"country_converter + GADM 4.1. ADR 0022.'"
+        f"centroids from GADM ADM_0 representative points. Source: pycountry "
+        f"+ in-repo WHO/UN classifications + GADM 4.1. ADR 0022.'"
     )
 
 
 def _register_dataset(spark: SparkSession, catalog: str, pipeline_ref: str) -> None:
     """Register geography.country in _ops.dataset_catalog + _ops.dataset_engineering."""
     full = f"{catalog}.{SCHEMA}.{TABLE}"
-    src = "'pycountry (MIT) + country_converter + GADM 4.1 (academic non-commercial)'"
+    src = (
+        "'pycountry (MIT) + in-repo country_classifications (WHO + UN M49) "
+        "+ GADM 4.1 (academic non-commercial)'"
+    )
     desc = (
         "Global country reference. ISO 3166-1 alpha-3 PK; alpha-2/numeric "
         "alternates; WHO + UN M49 region attributes; centroids from GADM ADM0."
