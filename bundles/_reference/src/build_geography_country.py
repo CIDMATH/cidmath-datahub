@@ -314,12 +314,14 @@ def _comment_table(spark: SparkSession, catalog: str) -> None:
 
 
 def _register_dataset(spark: SparkSession, catalog: str, pipeline_ref: str) -> None:
-    """Register geography.country in _ops.dataset_catalog + _ops.dataset_engineering."""
+    """Register geography.country in _ops.dataset_catalog + _ops.dataset_engineering.
+
+    Mirrors the explicit-column pattern from build_geography.py (`MERGE ... UPDATE
+    SET col = s.col, ...`). MERGE ... UPDATE SET * shorthand fails on
+    _ops.dataset_catalog because the target has 17 columns and the source
+    SELECT only supplies a subset.
+    """
     full = f"{catalog}.{SCHEMA}.{TABLE}"
-    src = (
-        "'pycountry (MIT) + in-repo country_classifications (WHO + UN M49) "
-        "+ GADM 4.1 (academic non-commercial)'"
-    )
     desc = (
         "Global country reference. ISO 3166-1 alpha-3 PK; alpha-2/numeric "
         "alternates; WHO + UN M49 region attributes; centroids from GADM ADM0."
@@ -329,41 +331,110 @@ def _register_dataset(spark: SparkSession, catalog: str, pipeline_ref: str) -> N
         "alpha-3 matches WHO, IHR, and GBD conventions; WHO region enables "
         "regional aggregation."
     )
+
+    cat_schema = T.StructType(
+        [
+            T.StructField("full_table_name", T.StringType()),
+            T.StructField("subject", T.StringType()),
+            T.StructField("layer", T.StringType()),
+            T.StructField("description", T.StringType()),
+            T.StructField("public_health_relevance", T.StringType()),
+            T.StructField("spatial_resolution", T.StringType()),
+            T.StructField("spatial_coverage", T.StringType()),
+            T.StructField("source_provider_code", T.StringType()),
+            T.StructField("source_url", T.StringType()),
+            T.StructField("source_documentation_url", T.StringType()),
+            T.StructField("license", T.StringType()),
+            T.StructField("dua_required", T.BooleanType()),
+            T.StructField("dua_reference", T.StringType()),
+            T.StructField("access_tier", T.StringType()),
+            T.StructField("external_maintainer_name", T.StringType()),
+            T.StructField("is_hosted", T.BooleanType()),
+            T.StructField("owner", T.StringType()),
+        ]
+    )
+    cat_row = [
+        (
+            full,
+            SCHEMA,
+            "reference",
+            desc,
+            pubhealth,
+            "country",
+            "global",
+            "gadm",
+            "https://gadm.org/",
+            "https://gadm.org/metadata.html",
+            GADM_LICENSE,
+            True,
+            (
+                "GADM citation required (Hijmans, R. GADM database of Global "
+                "Administrative Areas). pycountry MIT; country_classifications "
+                "derived from WHO GHO + UN M49 (public)."
+            ),
+            "restricted",
+            "GADM, University of California, Davis",
+            True,
+            "cidmath-data-team",
+        )
+    ]
+    spark.createDataFrame(cat_row, cat_schema).createOrReplaceTempView("_tmp_geo_country_cat")
     spark.sql(
         f"""
         MERGE INTO {catalog}._ops.dataset_catalog AS t
-        USING (SELECT
-            '{full}' AS full_table_name,
-            '{desc}' AS description,
-            '{pubhealth}' AS public_health_relevance,
-            'country' AS spatial_resolution,
-            'global' AS geographic_scope,
-            {src} AS source,
-            '{GADM_LICENSE.replace("'", "''")}' AS license,
-            true AS dua_required,
-            '{pipeline_ref}' AS pipeline_reference,
-            'cidmath-data-team' AS owner
-        ) AS s
+        USING _tmp_geo_country_cat AS s
         ON t.full_table_name = s.full_table_name
-        WHEN MATCHED THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
+        WHEN MATCHED THEN UPDATE SET
+            subject = s.subject, layer = s.layer, description = s.description,
+            public_health_relevance = s.public_health_relevance,
+            spatial_resolution = s.spatial_resolution, spatial_coverage = s.spatial_coverage,
+            source_provider_code = s.source_provider_code, source_url = s.source_url,
+            source_documentation_url = s.source_documentation_url, license = s.license,
+            dua_required = s.dua_required, dua_reference = s.dua_reference,
+            access_tier = s.access_tier, external_maintainer_name = s.external_maintainer_name,
+            is_hosted = s.is_hosted, owner = s.owner, last_validated = CURRENT_DATE()
+        WHEN NOT MATCHED THEN INSERT
+            (full_table_name, subject, layer, description, public_health_relevance,
+             spatial_resolution, spatial_coverage, source_provider_code, source_url,
+             source_documentation_url, license, dua_required, dua_reference, access_tier,
+             external_maintainer_name, is_hosted, owner, last_validated)
+            VALUES
+            (s.full_table_name, s.subject, s.layer, s.description, s.public_health_relevance,
+             s.spatial_resolution, s.spatial_coverage, s.source_provider_code, s.source_url,
+             s.source_documentation_url, s.license, s.dua_required, s.dua_reference, s.access_tier,
+             s.external_maintainer_name, s.is_hosted, s.owner, CURRENT_DATE())
         """
     )
+
+    eng_schema = T.StructType(
+        [
+            T.StructField("full_table_name", T.StringType()),
+            T.StructField("update_semantics", T.StringType()),
+            T.StructField("materialization_type", T.StringType()),
+            T.StructField("cluster_columns", T.ArrayType(T.StringType())),
+            T.StructField("pipeline_reference", T.StringType()),
+            T.StructField("schema_version", T.IntegerType()),
+        ]
+    )
+    eng_row = [(full, "full_refresh", "table", ["country_alpha3"], pipeline_ref, 1)]
+    spark.createDataFrame(eng_row, eng_schema).createOrReplaceTempView("_tmp_geo_country_eng")
     spark.sql(
         f"""
         MERGE INTO {catalog}._ops.dataset_engineering AS t
-        USING (SELECT
-            '{full}' AS full_table_name,
-            'full_refresh' AS update_semantics,
-            'table' AS materialization_type,
-            'country_alpha3' AS cluster_columns,
-            '{pipeline_ref}' AS pipeline_reference,
-            1 AS schema_version,
-            CURRENT_TIMESTAMP() AS last_refresh_at
-        ) AS s
+        USING _tmp_geo_country_eng AS s
         ON t.full_table_name = s.full_table_name
-        WHEN MATCHED THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
+        WHEN MATCHED THEN UPDATE SET
+            update_semantics = s.update_semantics,
+            materialization_type = s.materialization_type,
+            cluster_columns = s.cluster_columns,
+            pipeline_reference = s.pipeline_reference,
+            last_refresh_at = CURRENT_TIMESTAMP()
+        WHEN NOT MATCHED THEN INSERT
+            (full_table_name, update_semantics, materialization_type, cluster_columns,
+             pipeline_reference, schema_version, last_refresh_at)
+            VALUES
+            (s.full_table_name, s.update_semantics, s.materialization_type, s.cluster_columns,
+             s.pipeline_reference, s.schema_version, CURRENT_TIMESTAMP())
         """
     )
     log.info("Registered geography.country metadata", extra={"table": full})
@@ -408,7 +479,6 @@ def _dq_checks(
         },
     )
 
-    # Cardinality sanity — ISO 3166-1 currently lists ~249 entries; warn outside ±10.
     passed_count = 230 <= total <= 270
     recorder.record(
         table_name=f"{SCHEMA}.{TABLE}",
