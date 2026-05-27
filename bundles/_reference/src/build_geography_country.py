@@ -100,7 +100,7 @@ BOUNDARY_SPARK_SCHEMA = T.StructType(
         T.StructField("vintage", T.IntegerType(), False),
         T.StructField("resolution", T.StringType(), False),
         T.StructField("gisjoin", T.StringType(), True),
-        T.StructField("geom_wkb", T.BinaryType(), False),
+        T.StructField("geometry_wkb", T.BinaryType(), False),
     ]
 )
 
@@ -274,7 +274,7 @@ def _build_country_rows(
                     "vintage": GADM_VINTAGE,
                     "resolution": "generalized",
                     "gisjoin": None,
-                    "geom_wkb": shapely.to_wkb(simplified, output_dimension=2),
+                    "geometry_wkb": shapely.to_wkb(simplified, output_dimension=2),
                 }
             )
 
