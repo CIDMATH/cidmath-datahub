@@ -64,13 +64,14 @@ GADM_ADM1_LAYER = "ADM_1"
 
 # Join-coverage threshold: share of NON-NESTED subdivisions that should match a
 # GADM ADM_1 polygon (nested subdivisions inherit their parent's polygon
-# spatially and are excluded from the denominator). PROVISIONAL — the original
-# 90% was a pre-data guess; code-only matching hit ~28% in the first dev run,
-# and name-based matching (ADR 0023) lifts that substantially but cannot reach
-# 90% because of genuine ISO-vs-GADM grain mismatches (e.g. Slovenia's 212 ISO
-# municipalities vs ~12 GADM ADM_1 regions). Recalibrate from the first
-# post-ADR-0023 dev run before treating a WARN here as actionable.
-JOIN_COVERAGE_THRESHOLD_PCT = 70.0
+# spatially and are excluded from the denominator). Set from data: code-only
+# matching floored at 27.88%; name-based matching (ADR 0023) measured 72.04%
+# (2,586/3,590) on the 2026-05-29 dev run. It cannot reach 90% because of
+# genuine ISO-vs-GADM grain mismatches (e.g. Slovenia's 212 ISO municipalities
+# vs ~12 GADM ADM_1 regions). 65% leaves ~7pt headroom below the observed
+# ceiling so the WARN fires on a real regression, not normal GADM/pycountry
+# drift. Re-confirm if either source version changes materially.
+JOIN_COVERAGE_THRESHOLD_PCT = 65.0
 CARDINALITY_MIN = 4500
 CARDINALITY_MAX = 5500
 
@@ -220,7 +221,7 @@ def _write_subdivision_boundaries(
     df.write.mode("append").saveAsTable(f"{catalog}.{SCHEMA}.{BOUNDARY_TABLE}")
     log.info(
         "Wrote country_subdivision boundaries",
-        extra={"rows": len(rows), "vintage": GADM_VINTAGE},
+        extra={"rows": len(rows), "vintage": gadm.GADM_VINTAGE},
     )
 
 

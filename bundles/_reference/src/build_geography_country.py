@@ -227,7 +227,7 @@ def _write_country_boundaries(
     spark.sql(f"DELETE FROM {catalog}.{SCHEMA}.{BOUNDARY_TABLE} WHERE geo_level = 'country'")
     df = spark.createDataFrame(rows, schema=gadm.boundary_spark_schema())
     df.write.mode("append").saveAsTable(f"{catalog}.{SCHEMA}.{BOUNDARY_TABLE}")
-    log.info("Wrote country boundaries", extra={"rows": len(rows), "vintage": GADM_VINTAGE})
+    log.info("Wrote country boundaries", extra={"rows": len(rows), "vintage": gadm.GADM_VINTAGE})
 
 
 def _comment_table(spark: SparkSession, catalog: str) -> None:
