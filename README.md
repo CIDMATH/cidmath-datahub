@@ -63,7 +63,7 @@ See [`docs/operations.md`](docs/operations.md) for prerequisites (one-time manua
 
 ## Conventions and decisions
 
-All architectural conventions live in [`docs/adr/`](docs/adr/README.md). Sixteen ADRs cover layering, schema structure, catalog organization, bundle structure, discovery, naming, update semantics, metadata, data quality, observability, testing, identity, documentation, reference data, integrated table naming, and CI enforcement policy.
+All architectural conventions live in [`docs/adr/`](docs/adr/README.md). Twenty-three ADRs cover layering, schema structure, catalog organization, bundle structure, discovery, naming, update semantics, metadata, data quality, observability, testing, identity, documentation, reference data, integrated table naming, CI enforcement policy, access groups, the analyst discovery view, geography reference (US levels, crosswalks, and international scope), and shared pipeline helpers.
 
 ## Contact
 

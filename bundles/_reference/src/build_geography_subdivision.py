@@ -33,8 +33,7 @@ from __future__ import annotations
 
 import argparse
 import tempfile
-import urllib.request
-import zipfile
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -46,6 +45,7 @@ from cidmath_datahub.common import grants
 from cidmath_datahub.common.dq import DQRecorder, new_run_id
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
+from cidmath_datahub.reference import gadm
 from cidmath_datahub.reference import geography_intl as gi
 
 log = get_logger(__name__)
@@ -56,25 +56,21 @@ COUNTRY_TABLE = "country"
 BOUNDARY_TABLE = "boundary"
 GEO_LEVEL = "country_subdivision"
 
-# GADM 4.1 download (same artifact as build_geography_country.py, slice 3a).
-GADM_ZIP_URL = "https://geodata.ucdavis.edu/gadm/gadm4.1/gadm_410-levels.zip"
-GADM_GPKG_NAME = "gadm_410-levels.gpkg"
+# GADM ADM_1 layer in the shared GADM 4.1 GeoPackage. Download / extract /
+# read helpers, the GADM constants (URL, vintage, license, generalization
+# tolerance), and the geography.boundary schema all live in
+# cidmath_datahub.reference.gadm (ADR 0023).
 GADM_ADM1_LAYER = "ADM_1"
-GADM_VINTAGE = 2022
-GADM_USER_AGENT = "Mozilla/5.0 cidmath-datahub/1.0 (+https://github.com/cidmath)"
-GADM_LICENSE = (
-    "GADM data may be used for academic and other non-commercial use. "
-    "Redistribution requires explicit permission. See https://gadm.org/license.html"
-)
 
-# Generalization tolerance matches 3a / US tables (ADR 0020).
-GENERALIZE_TOLERANCE_DEG = 0.005
-
-# Join-coverage threshold: 90% of NON-NESTED subdivisions should match a GADM
-# ADM_1 polygon. Nested subdivisions (parent_subdivision_code IS NOT NULL,
-# ~1,300 of 5,046 pycountry entries) inherit their parent's polygon spatially
-# and are excluded from the denominator. See ADR 0022 + slice 3b plan.
-JOIN_COVERAGE_THRESHOLD_PCT = 90.0
+# Join-coverage threshold: share of NON-NESTED subdivisions that should match a
+# GADM ADM_1 polygon (nested subdivisions inherit their parent's polygon
+# spatially and are excluded from the denominator). PROVISIONAL — the original
+# 90% was a pre-data guess; code-only matching hit ~28% in the first dev run,
+# and name-based matching (ADR 0023) lifts that substantially but cannot reach
+# 90% because of genuine ISO-vs-GADM grain mismatches (e.g. Slovenia's 212 ISO
+# municipalities vs ~12 GADM ADM_1 regions). Recalibrate from the first
+# post-ADR-0023 dev run before treating a WARN here as actionable.
+JOIN_COVERAGE_THRESHOLD_PCT = 70.0
 CARDINALITY_MIN = 4500
 CARDINALITY_MAX = 5500
 
@@ -95,130 +91,85 @@ SUBDIVISION_SPARK_SCHEMA = T.StructType(
     ]
 )
 
-# Matches geography.boundary's schema (ADR 0020 / build_geography.py).
-BOUNDARY_SPARK_SCHEMA = T.StructType(
-    [
-        T.StructField("geo_level", T.StringType(), False),
-        T.StructField("geoid", T.StringType(), False),
-        T.StructField("vintage", T.IntegerType(), False),
-        T.StructField("resolution", T.StringType(), False),
-        T.StructField("gisjoin", T.StringType(), True),
-        T.StructField("geometry_wkb", T.BinaryType(), False),
-    ]
-)
-
-
-def _download_gadm_zip(dest: Path) -> Path:
-    target = dest / "gadm_410-levels.zip"
-    log.info("Downloading GADM", extra={"url": GADM_ZIP_URL, "dest": str(target)})
-    req = urllib.request.Request(GADM_ZIP_URL, headers={"User-Agent": GADM_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=600) as resp, open(target, "wb") as out:
-        chunk = resp.read(1 << 20)
-        while chunk:
-            out.write(chunk)
-            chunk = resp.read(1 << 20)
-    log.info("Downloaded GADM zip", extra={"bytes": target.stat().st_size})
-    return target
-
-
-def _extract_gpkg(zip_path: Path, dest: Path) -> Path:
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(dest)
-    gpkg = dest / GADM_GPKG_NAME
-    if not gpkg.exists():
-        candidates = list(dest.rglob("*.gpkg"))
-        if not candidates:
-            raise FileNotFoundError(f"No .gpkg found under {dest}")
-        gpkg = candidates[0]
-    log.info("Extracted GeoPackage", extra={"path": str(gpkg)})
-    return gpkg
+# geography.boundary schema is provided by gadm.boundary_spark_schema() (ADR 0023).
 
 
 def _read_adm1(gpkg: Path) -> Any:
-    """Read the ADM_1 layer as a GeoDataFrame in EPSG:4326.
+    """Read the ADM_1 layer and assert the columns we depend on.
 
-    Asserts the expected column set immediately after read so a GADM schema
-    change fails locally with a clear message rather than producing silently
-    empty matches downstream (per CLAUDE.md guidance).
+    Column assertion runs immediately after read so a GADM schema change
+    fails locally with a clear message (per CLAUDE.md guidance) rather than
+    producing silently empty matches downstream.
     """
-    import geopandas as gpd
-
-    gdf = gpd.read_file(gpkg, layer=GADM_ADM1_LAYER)
+    gdf = gadm.read_layer(gpkg, GADM_ADM1_LAYER)
     gi.assert_gadm_adm1_columns(gdf.columns)
-    if gdf.crs is None:
-        gdf = gdf.set_crs(4326, allow_override=True)
-    else:
-        gdf = gdf.to_crs(4326)
-    log.info("Read GADM ADM_1", extra={"rows": len(gdf), "columns": list(gdf.columns)})
     return gdf
 
 
-def _gdf_to_dict_rows(gdf: Any) -> list[dict[str, Any]]:
-    """Materialize a GeoDataFrame to plain row dicts.
+def _collect_subdivisions() -> list[dict[str, Any]]:
+    """Collect pycountry subdivisions as plain dicts for matching + assembly.
 
-    Decouples the rest of the pipeline from GeoPandas so the matching logic
-    in ``geography_intl.match_gadm_adm1`` stays unit-testable with dicts.
-    Geometry is carried through as a shapely object.
+    One dict per ISO 3166-2 subdivision with the fields the resolver
+    (``geography_intl.resolve_subdivision_polygons``) and
+    :func:`assemble_subdivision_row` need. Skips any subdivision whose country
+    prefix doesn't resolve to a pycountry country (shouldn't happen, but fail
+    soft rather than crash the build).
     """
-    cols = [c for c in gdf.columns if c != "geometry"]
-    rows: list[dict[str, Any]] = []
-    for _, r in gdf.iterrows():
-        d: dict[str, Any] = {c: r[c] for c in cols}
-        d["geometry"] = r.geometry
-        rows.append(d)
-    return rows
+    import pycountry
 
-
-def _centroid(geom: Any) -> tuple[float, float] | tuple[None, None]:
-    if geom is None or geom.is_empty:
-        return (None, None)
-    pt = geom.representative_point()
-    return (float(pt.x), float(pt.y))
+    records: list[dict[str, Any]] = []
+    for sub in pycountry.subdivisions:
+        country_obj = pycountry.countries.get(alpha_2=sub.country_code)
+        if country_obj is None:
+            log.warning(
+                "Skipping subdivision with unknown country",
+                extra={"code": sub.code, "country_alpha2": sub.country_code},
+            )
+            continue
+        records.append(
+            {
+                "subdivision_code": sub.code,
+                "country_alpha2": sub.country_code,
+                "country_alpha3": country_obj.alpha_3,
+                "name": sub.name,
+                "type_label": sub.type,
+                "parent_code": sub.parent_code,
+            }
+        )
+    return records
 
 
 def _build_subdivision_rows(
-    iso_to_gadm: dict[str, dict[str, Any]],
+    subdivisions: list[dict[str, Any]],
+    resolved: dict[str, dict[str, Any]],
     source_file: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Iterate pycountry.subdivisions and emit (attribute_rows, boundary_rows).
+    """Assemble (attribute_rows, boundary_rows) from subdivisions + resolved polygons.
 
-    Joins each pycountry subdivision to its GADM ADM_1 polygon via the
-    ``iso_to_gadm`` lookup. Subdivisions with no polygon still produce an
-    attribute row (centroid / gadm_gid_1 left null); the build's DQ surfaces
-    coverage as a WARN, not a FAIL.
+    ``resolved`` maps ``subdivision_code → gadm_row`` (from
+    ``resolve_subdivision_polygons``). Subdivisions with no polygon still
+    produce an attribute row (centroid / gadm_gid_1 left null); the build's DQ
+    surfaces coverage as a WARN, not a FAIL.
     """
-    import pycountry
-    import shapely
-
     now = datetime.now(tz=UTC)
     attr_rows: list[dict[str, Any]] = []
     boundary_rows: list[dict[str, Any]] = []
 
-    for sub in pycountry.subdivisions:
-        code = sub.code
-        country_alpha2 = sub.country_code
-        country_obj = pycountry.countries.get(alpha_2=country_alpha2)
-        if country_obj is None:
-            log.warning(
-                "Skipping subdivision with unknown country",
-                extra={"code": code, "country_alpha2": country_alpha2},
-            )
-            continue
-        country_alpha3 = country_obj.alpha_3
-
-        gadm_row = iso_to_gadm.get(code)
+    for rec in subdivisions:
+        code = rec["subdivision_code"]
+        gadm_row = resolved.get(code)
         gadm_gid_1 = gadm_row.get("GID_1") if gadm_row else None
         geom = gadm_row.get("geometry") if gadm_row else None
-        lon, lat = _centroid(geom) if geom is not None else (None, None)
+        lon, lat = gadm.centroid(geom) if geom is not None else (None, None)
 
         try:
             row = gi.assemble_subdivision_row(
                 subdivision_code=code,
-                country_alpha2=country_alpha2,
-                country_alpha3=country_alpha3,
-                subdivision_name=sub.name,
-                subdivision_type_label=sub.type,
-                parent_subdivision_code=sub.parent_code,
+                country_alpha2=rec["country_alpha2"],
+                country_alpha3=rec["country_alpha3"],
+                subdivision_name=rec["name"],
+                subdivision_type_label=rec["type_label"],
+                parent_subdivision_code=rec["parent_code"],
                 gadm_gid_1=gadm_gid_1,
                 centroid_geo_lon=lon,
                 centroid_geo_lat=lat,
@@ -234,15 +185,14 @@ def _build_subdivision_rows(
         attr_rows.append(row)
 
         if geom is not None and not geom.is_empty:
-            simplified = geom.simplify(GENERALIZE_TOLERANCE_DEG, preserve_topology=True)
             boundary_rows.append(
                 {
                     "geo_level": GEO_LEVEL,
                     "geoid": row["subdivision_code"],
-                    "vintage": GADM_VINTAGE,
+                    "vintage": gadm.GADM_VINTAGE,
                     "resolution": "generalized",
                     "gisjoin": None,
-                    "geometry_wkb": shapely.to_wkb(simplified, output_dimension=2),
+                    "geometry_wkb": gadm.simplify_to_wkb(geom),
                 }
             )
 
@@ -266,7 +216,7 @@ def _write_subdivision_boundaries(
     slice 3a's _write_country_boundaries pattern.
     """
     spark.sql(f"DELETE FROM {catalog}.{SCHEMA}.{BOUNDARY_TABLE} WHERE geo_level = '{GEO_LEVEL}'")
-    df = spark.createDataFrame(rows, schema=BOUNDARY_SPARK_SCHEMA)
+    df = spark.createDataFrame(rows, schema=gadm.boundary_spark_schema())
     df.write.mode("append").saveAsTable(f"{catalog}.{SCHEMA}.{BOUNDARY_TABLE}")
     log.info(
         "Wrote country_subdivision boundaries",
@@ -335,7 +285,7 @@ def _register_dataset(spark: SparkSession, catalog: str, pipeline_ref: str) -> N
             "gadm",
             "https://gadm.org/",
             "https://gadm.org/metadata.html",
-            GADM_LICENSE,
+            gadm.GADM_LICENSE,
             True,
             (
                 "GADM citation required (Hijmans, R. GADM database of Global "
@@ -427,8 +377,8 @@ def _dq_checks(
     Join-coverage check also logs ``sample_unmatched_gid_1`` so future
     GADM_ADM1_ISO_FIXUPS entries have ground truth to work from.
     """
-    codes = [r["subdivision_code"] for r in rows]
-    dups = sorted({c for c in codes if codes.count(c) > 1})
+    code_counts = Counter(r["subdivision_code"] for r in rows)
+    dups = sorted(c for c, n in code_counts.items() if n > 1)
     recorder.record(
         table_name=f"{SCHEMA}.{TABLE}",
         check_name="subdivision_code_uniqueness",
@@ -523,22 +473,28 @@ def run(
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
 
     workdir = Path(tempfile.mkdtemp(prefix="gadm_"))
-    zip_path = _download_gadm_zip(workdir)
-    gpkg = _extract_gpkg(zip_path, workdir)
+    zip_path = gadm.download_gadm_zip(workdir)
+    gpkg = gadm.extract_gpkg(zip_path, workdir)
     gdf = _read_adm1(gpkg)
-    gadm_rows = _gdf_to_dict_rows(gdf)
+    gadm_rows = gadm.gdf_to_dict_rows(gdf)
 
-    iso_to_gadm, unmatched_gid_1s = gi.match_gadm_adm1(gadm_rows, fixups=gi.GADM_ADM1_ISO_FIXUPS)
+    subdivisions = _collect_subdivisions()
+    resolved, unmatched_gid_1s = gi.resolve_subdivision_polygons(
+        gadm_rows, subdivisions, fixups=gi.GADM_ADM1_ISO_FIXUPS
+    )
     log.info(
-        "Matched GADM ADM_1 to ISO 3166-2",
+        "Resolved ISO 3166-2 subdivisions to GADM ADM_1 polygons",
         extra={
-            "matched_iso_codes": len(iso_to_gadm),
+            "subdivisions": len(subdivisions),
+            "matched": len(resolved),
             "unmatched_gadm_rows": len(unmatched_gid_1s),
             "sample_unmatched_gid_1": unmatched_gid_1s[:10],
         },
     )
 
-    attr_rows, boundary_rows = _build_subdivision_rows(iso_to_gadm, source_file=GADM_GPKG_NAME)
+    attr_rows, boundary_rows = _build_subdivision_rows(
+        subdivisions, resolved, source_file=gadm.GADM_GPKG_NAME
+    )
     log.info(
         "Assembled subdivision rows",
         extra={"attribute_rows": len(attr_rows), "boundary_rows": len(boundary_rows)},

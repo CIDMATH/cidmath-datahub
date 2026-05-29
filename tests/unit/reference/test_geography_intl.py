@@ -433,3 +433,141 @@ class TestCheckJoinCoverage:
         assert len(missing) == 10
         # First ten in sorted order
         assert missing == sorted(iso_list)[:10]
+
+
+@pytest.mark.unit
+class TestNormalizeSubdivisionName:
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("Georgia", "georgia"),
+            ("  North  East  England ", "north east england"),
+            ("Côte-d'Or", "cote d or"),
+            ("Bavīria", "baviria"),
+            ("Île-de-France", "ile de france"),
+            ("São Paulo", "sao paulo"),
+            ("Region 7", "region 7"),
+        ],
+    )
+    def test_normalizes(self, given, expected):
+        assert gi.normalize_subdivision_name(given) == expected
+
+    @pytest.mark.parametrize("bad", [None, 123, "", "   ", "---", "．"])
+    def test_empty_or_nonstring_returns_none(self, bad):
+        assert gi.normalize_subdivision_name(bad) is None
+
+    def test_accent_insensitive_equality(self):
+        assert gi.normalize_subdivision_name("Vlaanderen") == gi.normalize_subdivision_name(
+            "vlaanderen"
+        )
+
+
+@pytest.mark.unit
+class TestBuildGadmNameIndex:
+    @staticmethod
+    def _row(gid_0, gid_1, name, varname=None):
+        return {"GID_0": gid_0, "GID_1": gid_1, "NAME_1": name, "VARNAME_1": varname}
+
+    def test_indexes_by_country_and_normalized_name(self):
+        rows = [self._row("USA", "USA.10_1", "Georgia")]
+        index = gi.build_gadm_name_index(rows)
+        assert index["USA"]["georgia"]["GID_1"] == "USA.10_1"
+
+    def test_varname_alternates_indexed(self):
+        rows = [self._row("BEL", "BEL.1_1", "Flanders", varname="Vlaanderen|Flandre")]
+        index = gi.build_gadm_name_index(rows)
+        assert "flanders" in index["BEL"]
+        assert "vlaanderen" in index["BEL"]
+        assert "flandre" in index["BEL"]
+
+    def test_same_name_different_countries_not_collapsed(self):
+        rows = [
+            self._row("USA", "USA.10_1", "Georgia"),
+            self._row("GEO", "GEO.1_1", "Georgia"),  # the country, but illustrates scoping
+        ]
+        index = gi.build_gadm_name_index(rows)
+        assert index["USA"]["georgia"]["GID_1"] == "USA.10_1"
+        assert index["GEO"]["georgia"]["GID_1"] == "GEO.1_1"
+
+    def test_missing_gid0_skipped(self):
+        rows = [self._row(None, "X.1_1", "Nowhere")]
+        assert gi.build_gadm_name_index(rows) == {}
+
+
+@pytest.mark.unit
+class TestResolveSubdivisionPolygons:
+    @staticmethod
+    def _gadm(gid_0, gid_1, name="X", hasc_1=None, iso_1=None, varname=None):
+        return {
+            "GID_0": gid_0,
+            "GID_1": gid_1,
+            "NAME_1": name,
+            "TYPE_1": "State",
+            "ENGTYPE_1": "State",
+            "HASC_1": hasc_1,
+            "ISO_1": iso_1,
+            "VARNAME_1": varname,
+            "geometry": None,
+        }
+
+    @staticmethod
+    def _target(code, alpha3, name):
+        return {"subdivision_code": code, "country_alpha3": alpha3, "name": name}
+
+    def test_exact_code_path_wins(self):
+        gadm_rows = [self._gadm("USA", "USA.10_1", name="Georgia", hasc_1="US.GA")]
+        targets = [self._target("US-GA", "USA", "Georgia")]
+        resolved, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        assert resolved["US-GA"]["GID_1"] == "USA.10_1"
+        assert unmatched == []
+
+    def test_name_path_recovers_code_blank_country(self):
+        # Afghanistan-style: HASC/ISO blank, but NAME_1 aligns with ISO name.
+        gadm_rows = [self._gadm("AFG", "AFG.1_1", name="Balkh")]
+        targets = [self._target("AF-BAL", "AFG", "Balkh")]
+        resolved, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        assert resolved["AF-BAL"]["GID_1"] == "AFG.1_1"
+        assert unmatched == []
+
+    def test_name_match_is_accent_insensitive(self):
+        gadm_rows = [self._gadm("BRA", "BRA.25_1", name="São Paulo")]
+        targets = [self._target("BR-SP", "BRA", "Sao Paulo")]
+        resolved, _ = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        assert resolved["BR-SP"]["GID_1"] == "BRA.25_1"
+
+    def test_name_match_scoped_within_country(self):
+        # A same-named subdivision in another country must not match.
+        gadm_rows = [self._gadm("USA", "USA.10_1", name="Georgia")]
+        targets = [self._target("XX-GA", "XXX", "Georgia")]
+        resolved, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        assert "XX-GA" not in resolved
+        assert unmatched == ["USA.10_1"]
+
+    def test_fixup_is_last_resort(self):
+        gadm_rows = [self._gadm("GBR", "GBR.1_1", name="North East")]
+        targets = [self._target("GB-ENG", "GBR", "England")]  # no code, no name match
+        resolved, _ = gi.resolve_subdivision_polygons(
+            gadm_rows, targets, fixups={"GB-ENG": "GBR.1_1"}
+        )
+        assert resolved["GB-ENG"]["GID_1"] == "GBR.1_1"
+
+    def test_unmatched_gids_reported_sorted(self):
+        gadm_rows = [
+            self._gadm("SVN", "SVN.2_1", name="Gorenjska"),
+            self._gadm("SVN", "SVN.1_1", name="Pomurska"),
+        ]
+        # ISO grain mismatch: municipality codes that match neither region.
+        targets = [self._target("SI-001", "SVN", "Ajdovščina")]
+        resolved, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        assert resolved == {}
+        assert unmatched == ["SVN.1_1", "SVN.2_1"]
+
+    def test_priority_code_over_name(self):
+        # If both a code row and a name row exist, the exact-code row wins.
+        gadm_rows = [
+            self._gadm("USA", "USA.10_1", name="Georgia", hasc_1="US.GA"),
+            self._gadm("USA", "USA.99_1", name="Georgia"),
+        ]
+        targets = [self._target("US-GA", "USA", "Georgia")]
+        resolved, _ = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        assert resolved["US-GA"]["GID_1"] == "USA.10_1"

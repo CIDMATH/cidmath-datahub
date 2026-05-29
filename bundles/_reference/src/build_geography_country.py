@@ -35,8 +35,7 @@ from __future__ import annotations
 
 import argparse
 import tempfile
-import urllib.request
-import zipfile
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +48,7 @@ from cidmath_datahub.common.dq import DQRecorder, new_run_id
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import country_classifications as cclass
+from cidmath_datahub.reference import gadm
 from cidmath_datahub.reference import geography_intl as gi
 
 log = get_logger(__name__)
@@ -57,20 +57,11 @@ SCHEMA = "geography"
 TABLE = "country"
 BOUNDARY_TABLE = "boundary"
 
-# GADM 4.1 download (verified URL pattern, gadm.org/download_world.html).
-# Zipped GeoPackage containing six layers (ADM_0..ADM_5); we only read ADM_0.
-GADM_ZIP_URL = "https://geodata.ucdavis.edu/gadm/gadm4.1/gadm_410-levels.zip"
-GADM_GPKG_NAME = "gadm_410-levels.gpkg"
+# GADM ADM_0 layer in the shared GADM 4.1 GeoPackage. Download / extract /
+# read helpers, the GADM constants (URL, vintage, license, generalization
+# tolerance), and the geography.boundary schema live in
+# cidmath_datahub.reference.gadm (ADR 0023). We read only the ADM_0 layer.
 GADM_ADM0_LAYER = "ADM_0"
-GADM_VINTAGE = 2022  # GADM 4.1 release year, recorded on each boundary row.
-GADM_USER_AGENT = "Mozilla/5.0 cidmath-datahub/1.0 (+https://github.com/cidmath)"
-GADM_LICENSE = (
-    "GADM data may be used for academic and other non-commercial use. "
-    "Redistribution requires explicit permission. See https://gadm.org/license.html"
-)
-
-# Geometry generalization tolerance matches the US tables (ADR 0020).
-GENERALIZE_TOLERANCE_DEG = 0.005
 
 COUNTRY_SPARK_SCHEMA = T.StructType(
     [
@@ -92,66 +83,12 @@ COUNTRY_SPARK_SCHEMA = T.StructType(
     ]
 )
 
-# Matches geography.boundary's schema as defined in build_geography.py (ADR 0020).
-BOUNDARY_SPARK_SCHEMA = T.StructType(
-    [
-        T.StructField("geo_level", T.StringType(), False),
-        T.StructField("geoid", T.StringType(), False),
-        T.StructField("vintage", T.IntegerType(), False),
-        T.StructField("resolution", T.StringType(), False),
-        T.StructField("gisjoin", T.StringType(), True),
-        T.StructField("geometry_wkb", T.BinaryType(), False),
-    ]
-)
-
-
-def _download_gadm_zip(dest: Path) -> Path:
-    """Download the GADM 4.1 zipped GeoPackage to ``dest`` and return its path.
-
-    Sets a real User-Agent header — geodata.ucdavis.edu has been observed to
-    403 default Python user-agents.
-    """
-    target = dest / "gadm_410-levels.zip"
-    log.info("Downloading GADM", extra={"url": GADM_ZIP_URL, "dest": str(target)})
-    req = urllib.request.Request(GADM_ZIP_URL, headers={"User-Agent": GADM_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=600) as resp, open(target, "wb") as out:
-        chunk = resp.read(1 << 20)  # 1 MiB chunks
-        while chunk:
-            out.write(chunk)
-            chunk = resp.read(1 << 20)
-    log.info("Downloaded GADM zip", extra={"bytes": target.stat().st_size})
-    return target
-
-
-def _extract_gpkg(zip_path: Path, dest: Path) -> Path:
-    """Unzip the GADM archive and return the path to the .gpkg file."""
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(dest)
-    gpkg = dest / GADM_GPKG_NAME
-    if not gpkg.exists():
-        # GADM occasionally nests; fall back to recursive find.
-        candidates = list(dest.rglob("*.gpkg"))
-        if not candidates:
-            raise FileNotFoundError(f"No .gpkg found under {dest}")
-        gpkg = candidates[0]
-    log.info("Extracted GeoPackage", extra={"path": str(gpkg)})
-    return gpkg
+# geography.boundary schema is provided by gadm.boundary_spark_schema() (ADR 0023).
 
 
 def _read_adm0(gpkg: Path) -> Any:
     """Read the ADM_0 layer from the GADM GeoPackage as a GeoDataFrame in EPSG:4326."""
-    import geopandas as gpd
-
-    gdf = gpd.read_file(gpkg, layer=GADM_ADM0_LAYER)
-    if gdf.crs is None:
-        gdf = gdf.set_crs(4326, allow_override=True)
-    else:
-        gdf = gdf.to_crs(4326)
-    log.info(
-        "Read GADM ADM_0",
-        extra={"rows": len(gdf), "columns": list(gdf.columns)},
-    )
-    return gdf
+    return gadm.read_layer(gpkg, GADM_ADM0_LAYER)
 
 
 def _gadm_alpha3_to_geometry(gdf: Any) -> dict[str, Any]:
@@ -177,14 +114,6 @@ def _gadm_alpha3_to_geometry(gdf: Any) -> dict[str, Any]:
         },
     )
     return lookup
-
-
-def _centroid(geom: Any) -> tuple[float, float] | tuple[None, None]:
-    """Return (lon, lat) representative point for a (Multi)Polygon, or (None, None)."""
-    if geom is None or geom.is_empty:
-        return (None, None)
-    pt = geom.representative_point()
-    return (float(pt.x), float(pt.y))
 
 
 def _build_country_rows(
@@ -233,7 +162,7 @@ def _build_country_rows(
         is_sovereign = is_un_member or alpha3 in {"TWN", "PSE", "VAT", "XKX"}
 
         geom = gadm_geom_by_alpha3.get(alpha3)
-        lon, lat = _centroid(geom) if geom is not None else (None, None)
+        lon, lat = gadm.centroid(geom) if geom is not None else (None, None)
 
         # Whitelist WHO/UN values into our controlled vocabulary; anything
         # else becomes None rather than failing assembly. Defensive guard in
@@ -264,17 +193,14 @@ def _build_country_rows(
         attr_rows.append(row)
 
         if geom is not None and not geom.is_empty:
-            import shapely
-
-            simplified = geom.simplify(GENERALIZE_TOLERANCE_DEG, preserve_topology=True)
             boundary_rows.append(
                 {
                     "geo_level": "country",
                     "geoid": alpha3,
-                    "vintage": GADM_VINTAGE,
+                    "vintage": gadm.GADM_VINTAGE,
                     "resolution": "generalized",
                     "gisjoin": None,
-                    "geometry_wkb": shapely.to_wkb(simplified, output_dimension=2),
+                    "geometry_wkb": gadm.simplify_to_wkb(geom),
                 }
             )
 
@@ -299,7 +225,7 @@ def _write_country_boundaries(
     they touch disjoint rows.
     """
     spark.sql(f"DELETE FROM {catalog}.{SCHEMA}.{BOUNDARY_TABLE} WHERE geo_level = 'country'")
-    df = spark.createDataFrame(rows, schema=BOUNDARY_SPARK_SCHEMA)
+    df = spark.createDataFrame(rows, schema=gadm.boundary_spark_schema())
     df.write.mode("append").saveAsTable(f"{catalog}.{SCHEMA}.{BOUNDARY_TABLE}")
     log.info("Wrote country boundaries", extra={"rows": len(rows), "vintage": GADM_VINTAGE})
 
@@ -365,7 +291,7 @@ def _register_dataset(spark: SparkSession, catalog: str, pipeline_ref: str) -> N
             "gadm",
             "https://gadm.org/",
             "https://gadm.org/metadata.html",
-            GADM_LICENSE,
+            gadm.GADM_LICENSE,
             True,
             (
                 "GADM citation required (Hijmans, R. GADM database of Global "
@@ -447,7 +373,8 @@ def _dq_checks(
 ) -> None:
     """Run DQ on the assembled rows (ADR 0009) and persist results."""
     alpha3s = [r["country_alpha3"] for r in rows]
-    dups = sorted({a for a in alpha3s if alpha3s.count(a) > 1})
+    alpha3_counts = Counter(alpha3s)
+    dups = sorted(a for a, n in alpha3_counts.items() if n > 1)
     recorder.record(
         table_name=f"{SCHEMA}.{TABLE}",
         check_name="country_alpha3_uniqueness",
@@ -505,12 +432,12 @@ def run(
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
 
     workdir = Path(tempfile.mkdtemp(prefix="gadm_"))
-    zip_path = _download_gadm_zip(workdir)
-    gpkg = _extract_gpkg(zip_path, workdir)
+    zip_path = gadm.download_gadm_zip(workdir)
+    gpkg = gadm.extract_gpkg(zip_path, workdir)
     gdf = _read_adm0(gpkg)
     gadm_by_alpha3 = _gadm_alpha3_to_geometry(gdf)
 
-    attr_rows, boundary_rows = _build_country_rows(gadm_by_alpha3, source_file=GADM_GPKG_NAME)
+    attr_rows, boundary_rows = _build_country_rows(gadm_by_alpha3, source_file=gadm.GADM_GPKG_NAME)
     log.info(
         "Assembled country rows",
         extra={"attribute_rows": len(attr_rows), "boundary_rows": len(boundary_rows)},

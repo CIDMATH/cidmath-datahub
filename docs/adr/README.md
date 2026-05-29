@@ -88,6 +88,7 @@ both positive and negative consequences honestly.
 | [0020](0020-geography-reference.md) | Geography reference: IPUMS NHGIS source, vintaged snapshots + crosswalks, lean attributes + companion WKB geometry | Accepted |
 | [0021](0021-geography-crosswalks.md) | Geography crosswalks: ship NHGIS bg-sourced 2010↔2020 files as published, normalized into one long-form table | Accepted |
 | [0022](0022-geography-international-scope.md) | Geography reference: international scope (ISO 3166-1/2 codes + GADM boundaries; new country, country_subdivision, subnational tables) | Accepted |
+| [0023](0023-shared-pipeline-helpers-and-gadm-matching.md) | Shared pipeline helpers (GADM IO module) and multi-tier ISO↔GADM subdivision matching (code → name → fixup) | Accepted |
 
 ## Future ADRs (backlog)
 
@@ -95,7 +96,7 @@ The following are known gaps to be addressed when the need is concrete. Captured
 
 | Anticipated # | Topic | Likely trigger |
 |---|---|---|
-| TBD | **Pipeline standardization and modular composition** | After 2-3 pipelines exist and patterns can be extracted from real code. Will codify the reference-pipeline pattern, common modules, and how to compose source ingestion + processing + analysis steps consistently. |
+| TBD | **Pipeline standardization and modular composition** | Partially addressed by ADR 0023 (shared GADM IO module). Remaining: codify the full reference-pipeline pattern and how to compose source ingestion + processing + analysis steps consistently, once a non-geography subject bundle exists to generalize from. |
 | TBD | Schema evolution and breaking-change policy | First time a source adds a column or we need to rename one |
 | TBD | Data retention and VACUUM policy | When storage cost or commercial-data contract expiry forces the question |
 | TBD | Notebook-to-pipeline graduation policy | First exploratory notebook that becomes a candidate for productionization |

@@ -26,6 +26,8 @@ ISO surveillance key. Territories with ISO codes but no WHO membership
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Iterable
 from typing import Any
 
@@ -438,3 +440,135 @@ def match_gadm_adm1(
 
     unmatched = sorted(g for g in by_gid if g not in matched_gid_1s)
     return lookup, unmatched
+
+
+# ---------------------------------------------------------------------------
+# Name-based matching (ADR 0023). The HASC_1 / ISO_1 code columns are blank
+# for a large share of countries in GADM 4.1 (verified against the slice-3b
+# dev run: only ~28% of non-nested subdivisions matched on codes alone, and
+# the misses cluster by country — AD, AF, BE, TR, JP, MX … carry no usable
+# code but DO carry a NAME_1 that aligns with the ISO 3166-2 grain). So name
+# matching within the GADM ``GID_0`` country is the primary recovery path,
+# layered after the exact-code path and before the manual fixup map. Genuine
+# grain mismatches (e.g. Slovenia: 212 ISO municipalities vs ~12 GADM ADM_1
+# regions) legitimately stay unmatched and keep ``gadm_gid_1 = NULL``.
+# ---------------------------------------------------------------------------
+
+# Optional GADM column carrying pipe-delimited alternate / transliterated names
+# (e.g. "Flanders|Vlaanderen"). Not in GADM_ADM1_REQUIRED_COLUMNS — name
+# matching uses it opportunistically when present and never fails on its
+# absence.
+GADM_ADM1_VARNAME_COLUMN = "VARNAME_1"
+
+
+def normalize_subdivision_name(name: Any) -> str | None:
+    """Normalize a subdivision name for cross-source matching, or ``None``.
+
+    Lower-cases, strips accents/diacritics (NFKD decomposition), and collapses
+    any run of non-alphanumerics to a single space (so ``"Côte-d'Or"`` and
+    ``"Cote d Or"`` compare equal). Returns ``None`` for non-strings or names
+    that normalize to empty. Deliberately conservative — it does not strip
+    administrative-type words (``"Province of …"``), because doing so blindly
+    causes more false matches than it fixes; alternate spellings are handled
+    by also indexing ``VARNAME_1``.
+    """
+    if not isinstance(name, str):
+        return None
+    decomposed = unicodedata.normalize("NFKD", name)
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    collapsed = re.sub(r"[^a-z0-9]+", " ", stripped.lower()).strip()
+    return collapsed or None
+
+
+def build_gadm_name_index(
+    gadm_rows: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Index GADM ADM_1 rows by ``{alpha3: {normalized_name: row}}``.
+
+    Keyed on the GADM ``GID_0`` (alpha-3) so name matching is scoped *within*
+    a country — two countries can have an identically-named subdivision, and
+    we never want a cross-country collision. Both ``NAME_1`` and the optional
+    pipe-delimited ``VARNAME_1`` are indexed. First writer wins on a
+    within-country normalized-name collision; the caller's DQ surfaces any
+    residual ambiguity via unmatched counts.
+    """
+    index: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in gadm_rows:
+        gid0 = row.get("GID_0")
+        if not isinstance(gid0, str) or not gid0.strip():
+            continue
+        alpha3 = gid0.strip().upper()
+        names: list[str] = []
+        primary = row.get("NAME_1")
+        if isinstance(primary, str):
+            names.append(primary)
+        variants = row.get(GADM_ADM1_VARNAME_COLUMN)
+        if isinstance(variants, str) and variants:
+            names.extend(variants.split("|"))
+        country_map = index.setdefault(alpha3, {})
+        for raw in names:
+            norm = normalize_subdivision_name(raw)
+            if norm and norm not in country_map:
+                country_map[norm] = row
+    return index
+
+
+def resolve_subdivision_polygons(
+    gadm_rows: Iterable[dict[str, Any]],
+    targets: Iterable[dict[str, Any]],
+    fixups: dict[str, str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Resolve each ISO 3166-2 subdivision to a GADM ADM_1 polygon (ADR 0023).
+
+    Three tiers, applied per target in order:
+
+    1. **Exact code** — the ``{iso_code: row}`` lookup from
+       :func:`match_gadm_adm1` (HASC_1 → ISO_1).
+    2. **Name within country** — normalized ``NAME_1`` / ``VARNAME_1`` match
+       scoped to the target's ``country_alpha3`` (== GADM ``GID_0``).
+    3. **Fixup** — manual ``{subdivision_code: gid_1}`` override for the
+       residual handful that neither code nor name resolves.
+
+    Args:
+        gadm_rows: GADM ADM_1 row dicts (``GID_0``, ``GID_1``, ``NAME_1``,
+            ``HASC_1``, ``ISO_1``, optional ``VARNAME_1``, ``geometry``).
+        targets: The subdivisions to resolve — dicts with at least
+            ``subdivision_code``, ``country_alpha3``, and ``name``.
+        fixups: Optional manual override map; applied last and never displaces
+            a code/name match.
+
+    Returns:
+        ``(resolved, unmatched_gid_1s)`` where ``resolved`` maps
+        ``subdivision_code → gadm_row`` and ``unmatched_gid_1s`` is the sorted
+        list of GADM ``GID_1`` values not claimed by any target (the
+        fixup-seeding ground truth recorded in DQ).
+    """
+    fixups = fixups or {}
+    rows_list = list(gadm_rows)
+    code_lookup, _ = match_gadm_adm1(rows_list)
+    name_index = build_gadm_name_index(rows_list)
+    by_gid: dict[str, dict[str, Any]] = {
+        r["GID_1"]: r for r in rows_list if isinstance(r.get("GID_1"), str) and r.get("GID_1")
+    }
+
+    resolved: dict[str, dict[str, Any]] = {}
+    matched_gids: set[str] = set()
+
+    for target in targets:
+        code = target["subdivision_code"]
+        alpha3 = normalize_alpha3(target["country_alpha3"])
+        row = code_lookup.get(code)
+        if row is None:
+            norm = normalize_subdivision_name(target.get("name"))
+            if norm is not None:
+                row = name_index.get(alpha3, {}).get(norm)
+        if row is None and code in fixups:
+            row = by_gid.get(fixups[code])
+        if row is not None:
+            resolved[code] = row
+            gid = row.get("GID_1")
+            if isinstance(gid, str):
+                matched_gids.add(gid)
+
+    unmatched = sorted(g for g in by_gid if g not in matched_gids)
+    return resolved, unmatched

@@ -8,7 +8,7 @@ CIDMATH Data Hub: a Databricks-based platform for ingesting, transforming, and s
 
 ## Current phase
 
-Initial scaffolding. The repo skeleton, `_platform` bundle, and shared Python package are in place. Reference data (`_reference` bundle) and the first subject bundle (wastewater) are next.
+Reference data build-out. The `_platform` bundle, the shared Python package, and the `_reference` bundle are live. The geography reference is in dev for US levels (`us_state`/`us_county`/`us_tract`/`us_zcta`/`us_hhs_region` + 2010↔2020 crosswalks), countries (`country`: ISO 3166-1 + GADM ADM0), and first-level subdivisions (`country_subdivision`: ISO 3166-2 + GADM ADM1, with multi-tier code→name→fixup matching per ADR 0023). Next: GADM subnational (ADR 0022 slice 3c), then the first subject bundle.
 
 ## Conventions
 
