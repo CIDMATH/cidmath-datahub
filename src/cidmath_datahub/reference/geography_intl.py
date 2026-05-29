@@ -558,8 +558,11 @@ def resolve_subdivision_polygons(
        :func:`match_gadm_adm1` (HASC_1 → ISO_1). Highest confidence.
     2. **Name within country** (``"name"`` / ``"name_ambiguous"``) — normalized
        ``NAME_1`` / ``VARNAME_1`` match scoped to the target's
-       ``country_alpha3`` (== GADM ``GID_0``). Marked ``name_ambiguous`` when
-       the matched name collided with another polygon in that country.
+       ``country_alpha3`` (== GADM ``GID_0``). When the matched name collided
+       with another polygon in that country the result is ``name_ambiguous``:
+       the method is recorded for review but the polygon is **not** linked
+       (excluded from ``resolved``), so we never ship a low-confidence
+       attribution into the canonical table.
     3. **Fixup** (``"fixup"``) — manual ``{subdivision_code: gid_1}`` override
        for the residual that neither code nor name resolves.
 
@@ -577,11 +580,13 @@ def resolve_subdivision_polygons(
 
     Returns:
         ``(resolved, methods, unmatched_gid_1s)`` — ``resolved`` maps
-        ``subdivision_code → gadm_row``; ``methods`` maps
-        ``subdivision_code → match-method string`` (see
-        :data:`SUBDIVISION_MATCH_METHODS`); ``unmatched_gid_1s`` is the sorted
-        list of GADM ``GID_1`` values not claimed by any target (fixup-seeding
-        ground truth recorded in DQ).
+        ``subdivision_code → gadm_row`` for **confidently-linked** subdivisions
+        only (``code`` / ``name`` / ``fixup``; ``name_ambiguous`` is excluded);
+        ``methods`` maps ``subdivision_code → match-method string`` (see
+        :data:`SUBDIVISION_MATCH_METHODS`) and *does* include the ambiguous
+        codes so DQ can surface them; ``unmatched_gid_1s`` is the sorted list of
+        GADM ``GID_1`` values not claimed by any target (fixup-seeding ground
+        truth recorded in DQ).
     """
     fixups = fixups or {}
     rows_list = list(gadm_rows)
@@ -616,11 +621,19 @@ def resolve_subdivision_polygons(
                 method = "fixup"
 
         if row is not None and method is not None:
-            resolved[code] = row
-            methods[code] = method
-            gid = row.get("GID_1")
-            if isinstance(gid, str):
-                matched_gids.add(gid)
+            if method == "name_ambiguous":
+                # Treat ambiguous name matches as UNLINKED (ADR 0023 review
+                # decision): record the method for review/fixup visibility, but
+                # don't ship a polygon we can't confidently attribute — two
+                # distinct GADM polygons shared the name and we can't tell which
+                # is right. The GADM polygon stays in unmatched_gid_1s.
+                methods[code] = method
+            else:
+                resolved[code] = row
+                methods[code] = method
+                gid = row.get("GID_1")
+                if isinstance(gid, str):
+                    matched_gids.add(gid)
 
     unmatched = sorted(g for g in by_gid if g not in matched_gids)
     return resolved, methods, unmatched

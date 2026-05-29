@@ -597,15 +597,18 @@ class TestResolveSubdivisionPolygons:
 
     def test_method_name_ambiguous_when_collision(self):
         # Two distinct GADM polygons in the same country normalize to the same
-        # name -> the name match is flagged lower-confidence.
+        # name -> flagged ambiguous, method recorded, but NOT linked (review
+        # decision): no polygon shipped, both GADM rows stay unmatched.
         gadm_rows = [
             self._gadm("XYZ", "XYZ.1_1", name="Central"),
             self._gadm("XYZ", "XYZ.2_1", name="Central"),
         ]
-        _, methods, _ = gi.resolve_subdivision_polygons(
+        resolved, methods, unmatched = gi.resolve_subdivision_polygons(
             gadm_rows, [self._target("XY-C", "XYZ", "Central")]
         )
         assert methods["XY-C"] == "name_ambiguous"
+        assert "XY-C" not in resolved
+        assert unmatched == ["XYZ.1_1", "XYZ.2_1"]
 
     def test_collision_surfaced_by_name_index(self):
         rows = [
