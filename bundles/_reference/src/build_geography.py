@@ -560,7 +560,7 @@ def _build_hhs_region(spark: SparkSession, catalog: str) -> None:
         f"{catalog}.{SCHEMA}.us_hhs_region"
     )
     spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.hhs_region IS "
+        f"COMMENT ON TABLE {catalog}.{SCHEMA}.us_hhs_region IS "
         f"'The ten HHS regions (static federal grouping of states). Reference "
         f"table; full_refresh. ADR 0020.'"
     )
