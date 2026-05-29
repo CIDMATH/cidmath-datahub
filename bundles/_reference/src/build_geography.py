@@ -741,6 +741,25 @@ def _comment_tables(spark: SparkSession, catalog: str) -> None:
         spark.sql(f"COMMENT ON TABLE {catalog}.{SCHEMA}.{table} IS '{text}'")
 
 
+def _reset_us_boundaries(spark: SparkSession, catalog: str) -> None:
+    """Delete only this build's geo_levels from the shared boundary table.
+
+    ``geography.boundary`` is polymorphic — the country / country_subdivision
+    builds also write to it (geo_level='country', 'country_subdivision', …).
+    This build must refresh only its own US levels and append, NOT overwrite the
+    whole table, or it silently wipes the GADM-sourced international rows. This
+    matches the per-level full_refresh contract the GADM builds already follow
+    (ADR 0023 review — fixes a latent boundary-overwrite landmine). No-op on a
+    fresh catalog where the table doesn't exist yet.
+    """
+    levels = ", ".join(f"'{lvl}'" for lvl in LEVELS)
+    try:
+        spark.sql(f"DELETE FROM {catalog}.{SCHEMA}.boundary WHERE geo_level IN ({levels})")
+        log.info("Reset US boundary rows", extra={"geo_levels": list(LEVELS)})
+    except Exception as exc:  # noqa: BLE001 — table absent on first-ever run
+        log.info("boundary table not present yet; nothing to delete", extra={"error": str(exc)})
+
+
 def run(
     catalog: str,
     vintages: list[int],
@@ -800,6 +819,13 @@ def run(
     county_geoids: dict[int, set[str]] = {}
     run_id = new_run_id()
     log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
+
+    # boundary is shared/polymorphic: refresh only this build's geo_levels and
+    # always append, so we never overwrite the country / country_subdivision
+    # rows. Pre-marking it "written" forces _write_chunk into append mode from
+    # the first chunk (ADR 0023 review — boundary-overwrite landmine fix).
+    _reset_us_boundaries(spark, catalog)
+    written.add("boundary")
 
     with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
         for lvl in LEVELS:

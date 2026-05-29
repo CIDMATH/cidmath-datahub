@@ -437,7 +437,12 @@ def run(
     gdf = _read_adm0(gpkg)
     gadm_by_alpha3 = _gadm_alpha3_to_geometry(gdf)
 
-    attr_rows, boundary_rows = _build_country_rows(gadm_by_alpha3, source_file=gadm.GADM_GPKG_NAME)
+    # Stamp data-defining versions for reproducibility (ADR 0023 review P1-7):
+    # the row set comes from pycountry; the boundaries from GADM 4.1.
+    import pycountry
+
+    source_file = f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE}); pycountry {pycountry.__version__}"
+    attr_rows, boundary_rows = _build_country_rows(gadm_by_alpha3, source_file=source_file)
     log.info(
         "Assembled country rows",
         extra={"attribute_rows": len(attr_rows), "boundary_rows": len(boundary_rows)},

@@ -504,6 +504,43 @@ def _dq_checks(
         },
     )
 
+    # US / international reconciliation (ADR 0023 review P1-8). The US rows of
+    # country_subdivision (ISO 3166-2, from pycountry) and geography.us_state
+    # (from NHGIS) describe the same real-world units via two independent
+    # sources; this surfaces any symmetric difference so drift is visible. WARN,
+    # not FAIL — ISO 3166-2:US and NHGIS legitimately differ on some outlying
+    # territories, so a non-empty diff is a review prompt, not a publish-blocker.
+    us_local = {r["subdivision_local_code"] for r in rows if r["country_alpha2"] == "US"}
+    try:
+        us_state_codes: set[str] | None = {
+            r["stusps"]
+            for r in spark.sql(f"SELECT DISTINCT stusps FROM {catalog}.{SCHEMA}.us_state").collect()
+        }
+    except Exception as e:  # noqa: BLE001 — us_state may not be built yet
+        log.warning("us_state reconciliation skipped", extra={"error": str(e)})
+        us_state_codes = None
+    if us_state_codes is not None:
+        only_in_subdivision = sorted(us_local - us_state_codes)
+        only_in_us_state = sorted(us_state_codes - us_local)
+        reconciled = not only_in_subdivision and not only_in_us_state
+        recorder.record(
+            table_name=f"{SCHEMA}.{TABLE}",
+            check_name="us_subdivision_vs_us_state_reconciliation",
+            category=DQCategory.REFERENTIAL,
+            severity=DQSeverity.WARN,
+            passed=reconciled,
+            failing_row_count=len(only_in_subdivision) + len(only_in_us_state),
+            total_row_count=len(us_local),
+            details=(
+                {
+                    "only_in_country_subdivision": only_in_subdivision,
+                    "only_in_us_state": only_in_us_state,
+                }
+                if not reconciled
+                else None
+            ),
+        )
+
 
 def run(
     catalog: str,
@@ -542,7 +579,7 @@ def run(
     # the GADM 4.1 download. GADM is pinned by URL; pycountry is captured here.
     import pycountry
 
-    source_file = f"{gadm.GADM_GPKG_NAME} (GADM 4.1); pycountry {pycountry.__version__}"
+    source_file = f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE}); pycountry {pycountry.__version__}"
     attr_rows, boundary_rows = _build_subdivision_rows(
         subdivisions, resolved, methods, source_file=source_file
     )

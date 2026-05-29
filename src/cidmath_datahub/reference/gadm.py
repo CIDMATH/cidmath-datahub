@@ -35,6 +35,7 @@ GADM_ZIP_URL = "https://geodata.ucdavis.edu/gadm/gadm4.1/gadm_410-levels.zip"
 GADM_ZIP_NAME = "gadm_410-levels.zip"
 GADM_GPKG_NAME = "gadm_410-levels.gpkg"
 GADM_VINTAGE = 2022  # GADM 4.1 release year, recorded on each boundary row.
+GADM_RELEASE = "4.1"  # GADM release identifier, stamped into source_file (ADR 0023 review P1-7).
 # geodata.ucdavis.edu 403s default Python user-agents; send a real one.
 GADM_USER_AGENT = "Mozilla/5.0 cidmath-datahub/1.0 (+https://github.com/cidmath)"
 GADM_LICENSE = (
