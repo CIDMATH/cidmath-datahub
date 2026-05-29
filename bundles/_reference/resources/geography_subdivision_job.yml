@@ -1,0 +1,65 @@
+# Job that builds geography.country_subdivision + GADM ADM_1 boundaries
+# (ADR 0022, slice 3b).
+#
+# Downloads GADM 4.1 zipped GeoPackage (~1.4 GB) from geodata.ucdavis.edu —
+# same artifact as the slice 3a country job — but reads only the ADM_1
+# layer via pyogrio. Joins to ISO 3166-2 codes from pycountry, matches GADM
+# polygons via HASC_1 -> ISO_1 -> manual GADM_ADM1_ISO_FIXUPS (ships empty;
+# populated iteratively from first-run DQ misses). Writes
+# geography.country_subdivision (overwrite) and appends ADM_1 polygons to
+# geography.boundary (DELETE-WHERE-geo_level='country_subdivision' then
+# append).
+#
+# Update semantics: full_refresh (ADR 0007). Refresh cadence: roughly annual
+# to track new GADM releases; ISO 3166-2 is essentially static.
+#
+# Environment carries pycountry + geopandas + pyogrio + shapely (same recipe
+# as geography_country_job.yml; no secret scope needed).
+#
+# See bundles/_reference/src/build_geography_subdivision.py and ADR 0022.
+
+resources:
+  jobs:
+    build_geography_subdivision_reference:
+      name: "[_reference] build_geography_subdivision_reference"
+      description: |
+        Builds geography.country_subdivision (ISO 3166-2 + parent links)
+        and appends country_subdivision rows to geography.boundary from
+        GADM 4.1 ADM_1. full_refresh. Long-running: ~1.4 GB GADM download
+        dominates.
+
+      tasks:
+        - task_key: build_geography_subdivision
+          spark_python_task:
+            python_file: ../src/build_geography_subdivision.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_subdivision_env
+
+      environments:
+        - environment_key: geography_subdivision_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+              - pycountry>=23.12
+              - geopandas>=1.0
+              - pyogrio>=0.9
+              - shapely>=2.0
+
+      timeout_seconds: 7200
+
+      # Alerting (ADR 0010): Teams primary via notification destination,
+      # email as redundant secondary. Same pattern as geography_country_job.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

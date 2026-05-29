@@ -162,6 +162,252 @@ class TestAssembleCountryRow:
 
 
 @pytest.mark.unit
+class TestParseSubdivisionCode:
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("US-GA", ("US", "GA")),
+            ("us-ga", ("US", "GA")),
+            (" BR-SP ", ("BR", "SP")),
+            ("CN-11", ("CN", "11")),  # ISO uses numeric locals for many CN/JP/RU subs
+            ("JP-01", ("JP", "01")),
+        ],
+    )
+    def test_valid(self, given, expected):
+        assert gi.parse_subdivision_code(given) == expected
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            "USGA",  # no dash
+            "US-",  # empty local
+            "-GA",  # empty alpha2
+            "US-GAAA",  # local too long
+            "US-G@",  # non-alnum local
+            "U-GA",  # alpha2 wrong length
+            "US-GA-X",  # two dashes
+            123,  # not a string
+        ],
+    )
+    def test_invalid_raises(self, bad):
+        with pytest.raises(ValueError):
+            gi.parse_subdivision_code(bad)
+
+
+@pytest.mark.unit
+class TestAssembleSubdivisionRow:
+    @staticmethod
+    def _base_args(**overrides):
+        defaults = dict(
+            subdivision_code="US-GA",
+            country_alpha2="US",
+            country_alpha3="USA",
+            subdivision_name="Georgia",
+            subdivision_type_label="State",
+            parent_subdivision_code=None,
+            gadm_gid_1="USA.10_1",
+            centroid_geo_lon=-83.0,
+            centroid_geo_lat=32.7,
+            source_file="gadm_410-levels.gpkg",
+        )
+        defaults.update(overrides)
+        return defaults
+
+    def test_assembles_full_row(self):
+        row = gi.assemble_subdivision_row(**self._base_args())
+        assert row["subdivision_code"] == "US-GA"
+        assert row["country_alpha2"] == "US"
+        assert row["country_alpha3"] == "USA"
+        assert row["subdivision_local_code"] == "GA"
+        assert row["subdivision_type_label"] == "State"
+        assert row["parent_subdivision_code"] is None
+        assert row["gadm_gid_1"] == "USA.10_1"
+        assert row["centroid_geo_lon"] == -83.0
+
+    def test_normalizes_lowercase(self):
+        row = gi.assemble_subdivision_row(
+            **self._base_args(subdivision_code="us-ga", country_alpha2="us", country_alpha3="usa")
+        )
+        assert row["subdivision_code"] == "US-GA"
+        assert row["country_alpha2"] == "US"
+        assert row["country_alpha3"] == "USA"
+        assert row["subdivision_local_code"] == "GA"
+
+    def test_country_prefix_must_match(self):
+        with pytest.raises(ValueError, match="does not match prefix"):
+            gi.assemble_subdivision_row(
+                **self._base_args(subdivision_code="US-GA", country_alpha2="BR")
+            )
+
+    def test_centroid_requires_both_or_neither(self):
+        with pytest.raises(ValueError, match="centroid"):
+            gi.assemble_subdivision_row(
+                **self._base_args(centroid_geo_lon=-83.0, centroid_geo_lat=None)
+            )
+
+    def test_centroid_both_none_allowed(self):
+        row = gi.assemble_subdivision_row(
+            **self._base_args(centroid_geo_lon=None, centroid_geo_lat=None)
+        )
+        assert row["centroid_geo_lon"] is None
+        assert row["centroid_geo_lat"] is None
+
+    def test_gadm_gid_1_nullable(self):
+        # Subdivisions without an ADM_1 polygon (and nested subdivisions
+        # whose match is on the parent's polygon) get null gadm_gid_1.
+        row = gi.assemble_subdivision_row(**self._base_args(gadm_gid_1=None))
+        assert row["gadm_gid_1"] is None
+
+    def test_nested_parent_recorded(self):
+        # AZ-BAB rolls up to AZ-NX in pycountry.
+        row = gi.assemble_subdivision_row(
+            **self._base_args(
+                subdivision_code="AZ-BAB",
+                country_alpha2="AZ",
+                country_alpha3="AZE",
+                subdivision_name="Babək",
+                subdivision_type_label="Rayon",
+                parent_subdivision_code="AZ-NX",
+                gadm_gid_1=None,
+            )
+        )
+        assert row["parent_subdivision_code"] == "AZ-NX"
+
+    def test_nested_parent_country_mismatch_rejected(self):
+        with pytest.raises(ValueError, match="parent_subdivision_code"):
+            gi.assemble_subdivision_row(
+                **self._base_args(
+                    subdivision_code="AZ-BAB",
+                    country_alpha2="AZ",
+                    country_alpha3="AZE",
+                    parent_subdivision_code="US-GA",
+                )
+            )
+
+
+@pytest.mark.unit
+class TestAssertGadmAdm1Columns:
+    def test_all_present_passes(self):
+        gi.assert_gadm_adm1_columns(
+            ["GID_0", "GID_1", "NAME_1", "TYPE_1", "ENGTYPE_1", "HASC_1", "ISO_1", "geometry"]
+        )
+
+    def test_missing_columns_raises(self):
+        with pytest.raises(ValueError, match="HASC_1"):
+            gi.assert_gadm_adm1_columns(
+                ["GID_0", "GID_1", "NAME_1", "TYPE_1", "ENGTYPE_1", "ISO_1"]
+            )
+
+
+@pytest.mark.unit
+class TestHascToIsoSubdivision:
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("US.GA", "US-GA"),
+            ("BR.SP", "BR-SP"),
+            (" jp.01 ", "JP-01"),
+        ],
+    )
+    def test_valid(self, given, expected):
+        assert gi.hasc_to_iso_subdivision(given) == expected
+
+    @pytest.mark.parametrize("bad", [None, "", "US-GA", "US.GA.X", "U.GA", "US.GAAA", 123])
+    def test_invalid_returns_none(self, bad):
+        assert gi.hasc_to_iso_subdivision(bad) is None
+
+
+@pytest.mark.unit
+class TestNormalizeIso1:
+    @pytest.mark.parametrize(
+        "given,expected",
+        [("US-GA", "US-GA"), (" us-ga ", "US-GA"), ("BR-SP", "BR-SP")],
+    )
+    def test_valid(self, given, expected):
+        assert gi.normalize_iso_1(given) == expected
+
+    @pytest.mark.parametrize("bad", [None, "", "USGA", "US.GA", 7])
+    def test_invalid_returns_none(self, bad):
+        assert gi.normalize_iso_1(bad) is None
+
+
+@pytest.mark.unit
+class TestMatchGadmAdm1:
+    @staticmethod
+    def _row(gid_0, gid_1, hasc_1=None, iso_1=None, name="X"):
+        return {
+            "GID_0": gid_0,
+            "GID_1": gid_1,
+            "NAME_1": name,
+            "TYPE_1": "State",
+            "ENGTYPE_1": "State",
+            "HASC_1": hasc_1,
+            "ISO_1": iso_1,
+            "geometry": None,
+        }
+
+    def test_hasc_match_preferred(self):
+        rows = [self._row("USA", "USA.10_1", hasc_1="US.GA", iso_1="US-GA")]
+        lookup, unmatched = gi.match_gadm_adm1(rows)
+        assert "US-GA" in lookup
+        assert lookup["US-GA"]["GID_1"] == "USA.10_1"
+        assert unmatched == []
+
+    def test_iso_fallback_when_hasc_blank(self):
+        rows = [self._row("BRA", "BRA.25_1", hasc_1=None, iso_1="BR-SP")]
+        lookup, unmatched = gi.match_gadm_adm1(rows)
+        assert "BR-SP" in lookup
+        assert unmatched == []
+
+    def test_unmatched_rows_reported(self):
+        rows = [
+            self._row("GBR", "GBR.1_1", hasc_1=None, iso_1=None, name="North East England"),
+            self._row("USA", "USA.10_1", hasc_1="US.GA", iso_1="US-GA"),
+        ]
+        lookup, unmatched = gi.match_gadm_adm1(rows)
+        assert "US-GA" in lookup
+        assert unmatched == ["GBR.1_1"]
+
+    def test_fixups_fill_in_unmatched(self):
+        rows = [
+            self._row("GBR", "GBR.1_1", hasc_1=None, iso_1=None, name="North East England"),
+        ]
+        lookup, unmatched = gi.match_gadm_adm1(rows, fixups={"GB-ENG": "GBR.1_1"})
+        assert lookup["GB-ENG"]["GID_1"] == "GBR.1_1"
+        assert unmatched == []
+
+    def test_fixup_pointing_at_missing_gid_ignored(self):
+        rows = [self._row("USA", "USA.10_1", hasc_1="US.GA")]
+        lookup, unmatched = gi.match_gadm_adm1(rows, fixups={"XX-YY": "ZZZ.999_1"})
+        assert "XX-YY" not in lookup
+        assert "US-GA" in lookup
+
+    def test_fixup_does_not_override_successful_match(self):
+        # If HASC/ISO already produced a match, a fixup for the same code
+        # should not silently displace it.
+        rows = [
+            self._row("USA", "USA.10_1", hasc_1="US.GA"),
+            self._row("USA", "USA.99_1", hasc_1=None),
+        ]
+        lookup, _ = gi.match_gadm_adm1(rows, fixups={"US-GA": "USA.99_1"})
+        assert lookup["US-GA"]["GID_1"] == "USA.10_1"
+
+    def test_fixups_default_empty_dict(self):
+        # GADM_ADM1_ISO_FIXUPS ships empty; match_gadm_adm1 should handle the
+        # default-arg path cleanly.
+        rows = [self._row("USA", "USA.10_1", hasc_1="US.GA")]
+        lookup, unmatched = gi.match_gadm_adm1(rows)
+        assert "US-GA" in lookup
+        assert unmatched == []
+
+    def test_module_constant_ships_empty(self):
+        # Documented in the ADR / build: GADM_ADM1_ISO_FIXUPS starts empty
+        # and is populated from observed DQ misses, not training-data priors.
+        assert gi.GADM_ADM1_ISO_FIXUPS == {}
+
+
+@pytest.mark.unit
 class TestCheckJoinCoverage:
     def test_full_coverage(self):
         matched, total, missing = gi.check_join_coverage(

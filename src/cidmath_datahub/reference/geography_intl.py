@@ -182,3 +182,259 @@ def check_join_coverage(
     missing = sorted(a for a in iso_list if a not in gadm_alpha3_set)
     matched = len(iso_list) - len(missing)
     return matched, len(iso_list), missing[:10]
+
+
+# ---------------------------------------------------------------------------
+# Slice 3b — country_subdivision helpers (ADR 0022)
+# ---------------------------------------------------------------------------
+
+# ISO 3166-2 codes are ``<alpha2>-<local>`` where ``local`` is 1–3 alphanumerics
+# (most are 2–3 letters; a handful are digits — e.g., ``US-AS`` vs. ``CN-11``).
+_SUBDIVISION_LOCAL_MAX_LEN = 3
+
+# Expected columns on the GADM 4.1 ADM_1 layer. Asserted at runtime so a GADM
+# schema change fails locally on the build, not 40 minutes into a Databricks
+# job (per CLAUDE.md guidance on third-party API surface).
+GADM_ADM1_REQUIRED_COLUMNS: frozenset[str] = frozenset(
+    {"GID_0", "GID_1", "NAME_1", "TYPE_1", "ENGTYPE_1", "HASC_1", "ISO_1"}
+)
+
+# ISO 3166-2 codes whose GADM ADM_1 polygon cannot be located by either the
+# HASC_1 column ("US.GA") or the ISO_1 column ("US-GA") and therefore need a
+# manual ``{iso_3166_2_code: gadm_gid_1}`` override. Ship **empty**: populate
+# iteratively from the first-run job's ``_ops.dq_results.details.sample_missing``
+# payload (see ``_dq_checks`` in ``build_geography_subdivision``). Known
+# suspect categories that may need entries here once we see the data:
+#
+#   - UK constituent countries (``GB-ENG``, ``GB-SCT``, ``GB-WLS``, ``GB-NIR``):
+#     GADM ADM_1 splits England into nine regions, which has no ISO 3166-2
+#     counterpart at the constituent-country level.
+#   - French overseas departments (``FR-GF``, ``FR-RE``, ``FR-MQ``, ``FR-GP``,
+#     ``FR-YT``): GADM may model these as ADM_0 entries instead of ADM_1.
+#   - Norway / Svalbard (``NO-21``, ``NO-22``): Svalbard and Jan Mayen are
+#     treated separately in some GADM releases.
+#   - Finland / Åland (``FI-01``): Åland is a distinct GADM ADM_0 in some
+#     releases.
+#   - Spain / Ceuta and Melilla (``ES-CE``, ``ES-ML``).
+#
+# Do NOT seed these from training data — the actual GADM 4.1 release may or
+# may not need any of them. Add entries only after seeing them in the missing
+# sample.
+GADM_ADM1_ISO_FIXUPS: dict[str, str] = {}
+
+
+def parse_subdivision_code(value: str) -> tuple[str, str]:
+    """Parse an ISO 3166-2 code into ``(alpha2, local_code)``.
+
+    ``"US-GA"`` → ``("US", "GA")``. Validates the dash-separated shape; the
+    alpha-2 prefix goes through :func:`normalize_alpha2`; the local part must
+    be 1–3 alphanumerics (matches the ISO 3166-2 publication, which has
+    examples like ``CN-11`` and ``JP-01`` alongside ``US-GA``).
+
+    Raises ``ValueError`` for any deviation.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"subdivision_code must be a string, got {type(value).__name__}")
+    s = value.strip().upper()
+    if "-" not in s:
+        raise ValueError(f"subdivision_code {value!r} missing '-' separator")
+    parts = s.split("-")
+    if len(parts) != 2:
+        raise ValueError(f"subdivision_code {value!r} must have exactly one '-'")
+    alpha2_raw, local = parts
+    alpha2 = normalize_alpha2(alpha2_raw)
+    if not local or len(local) > _SUBDIVISION_LOCAL_MAX_LEN or not local.isalnum():
+        raise ValueError(
+            f"subdivision_code {value!r} has invalid local part {local!r} "
+            f"(expected 1-{_SUBDIVISION_LOCAL_MAX_LEN} alphanumerics)"
+        )
+    return alpha2, local
+
+
+def assemble_subdivision_row(
+    *,
+    subdivision_code: str,
+    country_alpha2: str,
+    country_alpha3: str,
+    subdivision_name: str,
+    subdivision_type_label: str,
+    parent_subdivision_code: str | None,
+    gadm_gid_1: str | None,
+    centroid_geo_lon: float | None,
+    centroid_geo_lat: float | None,
+    source_file: str,
+) -> dict[str, Any]:
+    """Assemble one ``geography.country_subdivision`` row from validated inputs.
+
+    Centralizes normalization + nullability the same way
+    :func:`assemble_country_row` does for ``geography.country``. The build
+    script calls this once per pycountry subdivision; output dict matches the
+    Spark schema exactly. Raises ``ValueError`` for malformed identifiers or
+    inconsistent inputs.
+    """
+    alpha2_from_code, local = parse_subdivision_code(subdivision_code)
+    a2 = normalize_alpha2(country_alpha2)
+    a3 = normalize_alpha3(country_alpha3)
+
+    # The alpha-2 prefix on the code must match the supplied country_alpha2 —
+    # pycountry guarantees this, but a hand-built call should fail loudly.
+    if alpha2_from_code != a2:
+        raise ValueError(
+            f"country_alpha2 {a2!r} does not match prefix on subdivision_code {subdivision_code!r}"
+        )
+
+    if (centroid_geo_lon is None) != (centroid_geo_lat is None):
+        raise ValueError(
+            f"centroid lon/lat must both be set or both None (got "
+            f"lon={centroid_geo_lon}, lat={centroid_geo_lat})"
+        )
+
+    parent = None
+    if parent_subdivision_code is not None:
+        # Run through parse to validate the shape, then re-emit normalized.
+        p_alpha2, p_local = parse_subdivision_code(parent_subdivision_code)
+        if p_alpha2 != a2:
+            raise ValueError(
+                f"parent_subdivision_code {parent_subdivision_code!r} country "
+                f"prefix does not match subdivision country {a2!r}"
+            )
+        parent = f"{p_alpha2}-{p_local}"
+
+    return {
+        "subdivision_code": f"{a2}-{local}",
+        "country_alpha2": a2,
+        "country_alpha3": a3,
+        "subdivision_local_code": local,
+        "subdivision_name": subdivision_name,
+        "subdivision_type_label": subdivision_type_label,
+        "parent_subdivision_code": parent,
+        "gadm_gid_1": gadm_gid_1,
+        "centroid_geo_lon": centroid_geo_lon,
+        "centroid_geo_lat": centroid_geo_lat,
+        "source_file": source_file,
+    }
+
+
+def assert_gadm_adm1_columns(columns: Iterable[str]) -> None:
+    """Assert the GADM ADM_1 layer has the columns we depend on.
+
+    Raises ``ValueError`` listing the missing columns. Called by the build
+    immediately after reading the ADM_1 layer so a GADM schema change fails
+    loudly with a clear message rather than producing silently-empty matches.
+    """
+    have = set(columns)
+    missing = sorted(GADM_ADM1_REQUIRED_COLUMNS - have)
+    if missing:
+        raise ValueError(
+            f"GADM ADM_1 layer missing expected columns: {missing}. Got: {sorted(have)}"
+        )
+
+
+def hasc_to_iso_subdivision(hasc_1: Any) -> str | None:
+    """Convert a GADM ``HASC_1`` value to an ISO 3166-2 subdivision code.
+
+    GADM stores HASC as ``US.GA``; ISO 3166-2 spells it ``US-GA``. Returns
+    ``None`` for null, empty, or malformed HASC values so the caller can
+    fall back to the ``ISO_1`` column.
+    """
+    if hasc_1 is None:
+        return None
+    if not isinstance(hasc_1, str):
+        return None
+    s = hasc_1.strip()
+    if not s or "." not in s:
+        return None
+    parts = s.split(".")
+    if len(parts) != 2:
+        return None
+    alpha2_raw, local = parts
+    try:
+        alpha2 = normalize_alpha2(alpha2_raw)
+    except ValueError:
+        return None
+    if not local or len(local) > _SUBDIVISION_LOCAL_MAX_LEN or not local.isalnum():
+        return None
+    return f"{alpha2}-{local.upper()}"
+
+
+def normalize_iso_1(iso_1: Any) -> str | None:
+    """Normalize the GADM ``ISO_1`` column to an ISO 3166-2 code, or ``None``.
+
+    Many GADM rows have a blank ``ISO_1``; some carry the value with extra
+    whitespace or in alternate case. Returns ``None`` for anything that
+    doesn't parse cleanly as ``<alpha2>-<local>``.
+    """
+    if iso_1 is None or not isinstance(iso_1, str):
+        return None
+    s = iso_1.strip()
+    if not s or "-" not in s:
+        return None
+    try:
+        alpha2, local = parse_subdivision_code(s)
+    except ValueError:
+        return None
+    return f"{alpha2}-{local}"
+
+
+def match_gadm_adm1(
+    gadm_rows: Iterable[dict[str, Any]],
+    fixups: dict[str, str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Build a ``{iso_3166_2_code: gadm_row}`` lookup from GADM ADM_1 rows.
+
+    Match order per ADR 0022: HASC_1 first (clean for most countries), then
+    ISO_1 (fills in the long tail where HASC is blank), then the manual
+    ``fixups`` map (``{iso_code: gid_1}``) for countries where ISO and GADM
+    legitimately disagree. The fixups map is shipped empty (see
+    :data:`GADM_ADM1_ISO_FIXUPS`); operators populate it iteratively from
+    first-run DQ output, not from priors.
+
+    ``gadm_rows`` is an iterable of dicts with at least ``GID_0``, ``GID_1``,
+    ``NAME_1``, ``TYPE_1``, ``ENGTYPE_1``, ``HASC_1``, ``ISO_1``, and
+    ``geometry``. The function is geometry-blind — it just passes the dicts
+    through — which lets unit tests use plain dicts without GeoPandas.
+
+    Returns ``(lookup, unmatched_gid_1s)`` where ``unmatched_gid_1s`` is a
+    sorted list of GADM ``GID_1`` values that did not resolve to any ISO
+    subdivision code; the build records a sample of these in DQ so future
+    fixups have ground truth to work from.
+    """
+    fixups = fixups or {}
+    # Build a {gid_1: row} index for the fixups path.
+    by_gid: dict[str, dict[str, Any]] = {}
+    rows_list: list[dict[str, Any]] = []
+    for row in gadm_rows:
+        gid_1 = row.get("GID_1")
+        if isinstance(gid_1, str) and gid_1:
+            by_gid[gid_1] = row
+        rows_list.append(row)
+
+    lookup: dict[str, dict[str, Any]] = {}
+    matched_gid_1s: set[str] = set()
+
+    for row in rows_list:
+        iso_code = hasc_to_iso_subdivision(row.get("HASC_1"))
+        if iso_code is None:
+            iso_code = normalize_iso_1(row.get("ISO_1"))
+        if iso_code is None:
+            continue
+        if iso_code in lookup:
+            # Duplicate HASC/ISO across rows — keep the first deterministic
+            # match and let the build's DQ surface the conflict.
+            continue
+        lookup[iso_code] = row
+        gid_1 = row.get("GID_1")
+        if isinstance(gid_1, str):
+            matched_gid_1s.add(gid_1)
+
+    for iso_code, gid_1 in fixups.items():
+        if iso_code in lookup:
+            continue  # Don't override a successful HASC/ISO match.
+        row = by_gid.get(gid_1)
+        if row is None:
+            continue  # Fixup points at a GID_1 not in this GADM release.
+        lookup[iso_code] = row
+        matched_gid_1s.add(gid_1)
+
+    unmatched = sorted(g for g in by_gid if g not in matched_gid_1s)
+    return lookup, unmatched
