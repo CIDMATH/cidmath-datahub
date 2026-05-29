@@ -47,6 +47,11 @@ resources:
             client: ${var.serverless_client_version}
             dependencies:
               - ../../../dist/cidmath_datahub-*.whl
+              # pycountry defines the subdivision row set, so it is a
+              # data-defining dependency (ADR 0023 review P0-4): pin it to an
+              # exact version for reproducibility. The build records the
+              # resolved version in source_file each run — read it from the
+              # first run's output and replace the >= bound with == below.
               - pycountry>=23.12
               - geopandas>=1.0
               - pyogrio>=0.9

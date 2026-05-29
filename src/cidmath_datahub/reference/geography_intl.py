@@ -253,6 +253,17 @@ def parse_subdivision_code(value: str) -> tuple[str, str]:
     return alpha2, local
 
 
+# How a subdivision's GADM ADM_1 polygon was resolved (set by
+# resolve_subdivision_polygons, stored on each row for auditability — ADR 0023
+# review item P0-2). "code" = exact HASC_1/ISO_1 (high confidence); "name" =
+# unambiguous within-country name match; "name_ambiguous" = name match where
+# >1 GADM ADM_1 in that country shared the normalized name (lower confidence,
+# flagged for review); "fixup" = manual override; "none" = no polygon matched.
+SUBDIVISION_MATCH_METHODS: frozenset[str] = frozenset(
+    {"code", "name", "name_ambiguous", "fixup", "none"}
+)
+
+
 def assemble_subdivision_row(
     *,
     subdivision_code: str,
@@ -262,6 +273,7 @@ def assemble_subdivision_row(
     subdivision_type_label: str,
     parent_subdivision_code: str | None,
     gadm_gid_1: str | None,
+    gadm_match_method: str,
     centroid_geo_lon: float | None,
     centroid_geo_lat: float | None,
     source_file: str,
@@ -277,6 +289,11 @@ def assemble_subdivision_row(
     alpha2_from_code, local = parse_subdivision_code(subdivision_code)
     a2 = normalize_alpha2(country_alpha2)
     a3 = normalize_alpha3(country_alpha3)
+
+    if gadm_match_method not in SUBDIVISION_MATCH_METHODS:
+        raise ValueError(
+            f"gadm_match_method {gadm_match_method!r} not in {sorted(SUBDIVISION_MATCH_METHODS)}"
+        )
 
     # The alpha-2 prefix on the code must match the supplied country_alpha2 —
     # pycountry guarantees this, but a hand-built call should fail loudly.
@@ -311,6 +328,7 @@ def assemble_subdivision_row(
         "subdivision_type_label": subdivision_type_label,
         "parent_subdivision_code": parent,
         "gadm_gid_1": gadm_gid_1,
+        "gadm_match_method": gadm_match_method,
         "centroid_geo_lon": centroid_geo_lon,
         "centroid_geo_lat": centroid_geo_lat,
         "source_file": source_file,
@@ -482,22 +500,30 @@ def normalize_subdivision_name(name: Any) -> str | None:
 
 def build_gadm_name_index(
     gadm_rows: Iterable[dict[str, Any]],
-) -> dict[str, dict[str, dict[str, Any]]]:
-    """Index GADM ADM_1 rows by ``{alpha3: {normalized_name: row}}``.
+) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, set[str]]]:
+    """Index GADM ADM_1 rows by ``{alpha3: {normalized_name: row}}`` + collisions.
 
     Keyed on the GADM ``GID_0`` (alpha-3) so name matching is scoped *within*
-    a country — two countries can have an identically-named subdivision, and
-    we never want a cross-country collision. Both ``NAME_1`` and the optional
-    pipe-delimited ``VARNAME_1`` are indexed. First writer wins on a
-    within-country normalized-name collision; the caller's DQ surfaces any
-    residual ambiguity via unmatched counts.
+    a country — two countries can share a subdivision name and we never want a
+    cross-country match. Both ``NAME_1`` and the optional pipe-delimited
+    ``VARNAME_1`` are indexed. First writer wins on a within-country
+    normalized-name collision.
+
+    Returns ``(index, collisions)`` where ``collisions`` maps ``alpha3`` to the
+    set of normalized names that **more than one distinct GADM ADM_1 polygon**
+    claimed in that country. A name match landing on one of those names is
+    ambiguous (we kept an arbitrary first-writer row), so the resolver marks it
+    ``name_ambiguous`` and the build's DQ flags it for review — this is the
+    precision signal the ADR 0023 review (P0-1) asked for.
     """
     index: dict[str, dict[str, dict[str, Any]]] = {}
+    collisions: dict[str, set[str]] = {}
     for row in gadm_rows:
         gid0 = row.get("GID_0")
         if not isinstance(gid0, str) or not gid0.strip():
             continue
         alpha3 = gid0.strip().upper()
+        gid1 = row.get("GID_1")
         names: list[str] = []
         primary = row.get("NAME_1")
         if isinstance(primary, str):
@@ -508,26 +534,38 @@ def build_gadm_name_index(
         country_map = index.setdefault(alpha3, {})
         for raw in names:
             norm = normalize_subdivision_name(raw)
-            if norm and norm not in country_map:
-                country_map[norm] = row
-    return index
+            if not norm:
+                continue
+            if norm in country_map:
+                # Only a genuine collision if a *different* polygon wants it.
+                if country_map[norm].get("GID_1") != gid1:
+                    collisions.setdefault(alpha3, set()).add(norm)
+                continue
+            country_map[norm] = row
+    return index, collisions
 
 
 def resolve_subdivision_polygons(
     gadm_rows: Iterable[dict[str, Any]],
     targets: Iterable[dict[str, Any]],
     fixups: dict[str, str] | None = None,
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, str], list[str]]:
     """Resolve each ISO 3166-2 subdivision to a GADM ADM_1 polygon (ADR 0023).
 
     Three tiers, applied per target in order:
 
-    1. **Exact code** — the ``{iso_code: row}`` lookup from
-       :func:`match_gadm_adm1` (HASC_1 → ISO_1).
-    2. **Name within country** — normalized ``NAME_1`` / ``VARNAME_1`` match
-       scoped to the target's ``country_alpha3`` (== GADM ``GID_0``).
-    3. **Fixup** — manual ``{subdivision_code: gid_1}`` override for the
-       residual handful that neither code nor name resolves.
+    1. **Exact code** (``method="code"``) — the ``{iso_code: row}`` lookup from
+       :func:`match_gadm_adm1` (HASC_1 → ISO_1). Highest confidence.
+    2. **Name within country** (``"name"`` / ``"name_ambiguous"``) — normalized
+       ``NAME_1`` / ``VARNAME_1`` match scoped to the target's
+       ``country_alpha3`` (== GADM ``GID_0``). Marked ``name_ambiguous`` when
+       the matched name collided with another polygon in that country.
+    3. **Fixup** (``"fixup"``) — manual ``{subdivision_code: gid_1}`` override
+       for the residual that neither code nor name resolves.
+
+    Match is always scoped to the country, so a cross-country mis-link is
+    impossible by construction; the residual precision risk is within-country
+    name ambiguity, which is what ``name_ambiguous`` surfaces.
 
     Args:
         gadm_rows: GADM ADM_1 row dicts (``GID_0``, ``GID_1``, ``NAME_1``,
@@ -538,37 +576,51 @@ def resolve_subdivision_polygons(
             a code/name match.
 
     Returns:
-        ``(resolved, unmatched_gid_1s)`` where ``resolved`` maps
-        ``subdivision_code → gadm_row`` and ``unmatched_gid_1s`` is the sorted
-        list of GADM ``GID_1`` values not claimed by any target (the
-        fixup-seeding ground truth recorded in DQ).
+        ``(resolved, methods, unmatched_gid_1s)`` — ``resolved`` maps
+        ``subdivision_code → gadm_row``; ``methods`` maps
+        ``subdivision_code → match-method string`` (see
+        :data:`SUBDIVISION_MATCH_METHODS`); ``unmatched_gid_1s`` is the sorted
+        list of GADM ``GID_1`` values not claimed by any target (fixup-seeding
+        ground truth recorded in DQ).
     """
     fixups = fixups or {}
     rows_list = list(gadm_rows)
     code_lookup, _ = match_gadm_adm1(rows_list)
-    name_index = build_gadm_name_index(rows_list)
+    name_index, name_collisions = build_gadm_name_index(rows_list)
     by_gid: dict[str, dict[str, Any]] = {
         r["GID_1"]: r for r in rows_list if isinstance(r.get("GID_1"), str) and r.get("GID_1")
     }
 
     resolved: dict[str, dict[str, Any]] = {}
+    methods: dict[str, str] = {}
     matched_gids: set[str] = set()
 
     for target in targets:
         code = target["subdivision_code"]
         alpha3 = normalize_alpha3(target["country_alpha3"])
-        row = code_lookup.get(code)
+        row: dict[str, Any] | None = code_lookup.get(code)
+        method = "code" if row is not None else None
+
         if row is None:
             norm = normalize_subdivision_name(target.get("name"))
             if norm is not None:
                 row = name_index.get(alpha3, {}).get(norm)
+                if row is not None:
+                    method = (
+                        "name_ambiguous" if norm in name_collisions.get(alpha3, set()) else "name"
+                    )
+
         if row is None and code in fixups:
             row = by_gid.get(fixups[code])
-        if row is not None:
+            if row is not None:
+                method = "fixup"
+
+        if row is not None and method is not None:
             resolved[code] = row
+            methods[code] = method
             gid = row.get("GID_1")
             if isinstance(gid, str):
                 matched_gids.add(gid)
 
     unmatched = sorted(g for g in by_gid if g not in matched_gids)
-    return resolved, unmatched
+    return resolved, methods, unmatched

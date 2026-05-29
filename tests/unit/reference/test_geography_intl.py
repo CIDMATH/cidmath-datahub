@@ -207,6 +207,7 @@ class TestAssembleSubdivisionRow:
             subdivision_type_label="State",
             parent_subdivision_code=None,
             gadm_gid_1="USA.10_1",
+            gadm_match_method="code",
             centroid_geo_lon=-83.0,
             centroid_geo_lat=32.7,
             source_file="gadm_410-levels.gpkg",
@@ -223,7 +224,12 @@ class TestAssembleSubdivisionRow:
         assert row["subdivision_type_label"] == "State"
         assert row["parent_subdivision_code"] is None
         assert row["gadm_gid_1"] == "USA.10_1"
+        assert row["gadm_match_method"] == "code"
         assert row["centroid_geo_lon"] == -83.0
+
+    def test_invalid_match_method_rejected(self):
+        with pytest.raises(ValueError, match="gadm_match_method"):
+            gi.assemble_subdivision_row(**self._base_args(gadm_match_method="guessed"))
 
     def test_normalizes_lowercase(self):
         row = gi.assemble_subdivision_row(
@@ -470,12 +476,12 @@ class TestBuildGadmNameIndex:
 
     def test_indexes_by_country_and_normalized_name(self):
         rows = [self._row("USA", "USA.10_1", "Georgia")]
-        index = gi.build_gadm_name_index(rows)
+        index, _ = gi.build_gadm_name_index(rows)
         assert index["USA"]["georgia"]["GID_1"] == "USA.10_1"
 
     def test_varname_alternates_indexed(self):
         rows = [self._row("BEL", "BEL.1_1", "Flanders", varname="Vlaanderen|Flandre")]
-        index = gi.build_gadm_name_index(rows)
+        index, _ = gi.build_gadm_name_index(rows)
         assert "flanders" in index["BEL"]
         assert "vlaanderen" in index["BEL"]
         assert "flandre" in index["BEL"]
@@ -485,13 +491,15 @@ class TestBuildGadmNameIndex:
             self._row("USA", "USA.10_1", "Georgia"),
             self._row("GEO", "GEO.1_1", "Georgia"),  # the country, but illustrates scoping
         ]
-        index = gi.build_gadm_name_index(rows)
+        index, _ = gi.build_gadm_name_index(rows)
         assert index["USA"]["georgia"]["GID_1"] == "USA.10_1"
         assert index["GEO"]["georgia"]["GID_1"] == "GEO.1_1"
 
     def test_missing_gid0_skipped(self):
         rows = [self._row(None, "X.1_1", "Nowhere")]
-        assert gi.build_gadm_name_index(rows) == {}
+        index, collisions = gi.build_gadm_name_index(rows)
+        assert index == {}
+        assert collisions == {}
 
 
 @pytest.mark.unit
@@ -517,7 +525,7 @@ class TestResolveSubdivisionPolygons:
     def test_exact_code_path_wins(self):
         gadm_rows = [self._gadm("USA", "USA.10_1", name="Georgia", hasc_1="US.GA")]
         targets = [self._target("US-GA", "USA", "Georgia")]
-        resolved, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        resolved, _, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
         assert resolved["US-GA"]["GID_1"] == "USA.10_1"
         assert unmatched == []
 
@@ -525,31 +533,32 @@ class TestResolveSubdivisionPolygons:
         # Afghanistan-style: HASC/ISO blank, but NAME_1 aligns with ISO name.
         gadm_rows = [self._gadm("AFG", "AFG.1_1", name="Balkh")]
         targets = [self._target("AF-BAL", "AFG", "Balkh")]
-        resolved, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        resolved, _, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
         assert resolved["AF-BAL"]["GID_1"] == "AFG.1_1"
         assert unmatched == []
 
     def test_name_match_is_accent_insensitive(self):
         gadm_rows = [self._gadm("BRA", "BRA.25_1", name="São Paulo")]
         targets = [self._target("BR-SP", "BRA", "Sao Paulo")]
-        resolved, _ = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        resolved, _, _ = gi.resolve_subdivision_polygons(gadm_rows, targets)
         assert resolved["BR-SP"]["GID_1"] == "BRA.25_1"
 
     def test_name_match_scoped_within_country(self):
         # A same-named subdivision in another country must not match.
         gadm_rows = [self._gadm("USA", "USA.10_1", name="Georgia")]
         targets = [self._target("XX-GA", "XXX", "Georgia")]
-        resolved, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        resolved, _, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
         assert "XX-GA" not in resolved
         assert unmatched == ["USA.10_1"]
 
     def test_fixup_is_last_resort(self):
         gadm_rows = [self._gadm("GBR", "GBR.1_1", name="North East")]
         targets = [self._target("GB-ENG", "GBR", "England")]  # no code, no name match
-        resolved, _ = gi.resolve_subdivision_polygons(
+        resolved, methods, _ = gi.resolve_subdivision_polygons(
             gadm_rows, targets, fixups={"GB-ENG": "GBR.1_1"}
         )
         assert resolved["GB-ENG"]["GID_1"] == "GBR.1_1"
+        assert methods["GB-ENG"] == "fixup"
 
     def test_unmatched_gids_reported_sorted(self):
         gadm_rows = [
@@ -558,7 +567,7 @@ class TestResolveSubdivisionPolygons:
         ]
         # ISO grain mismatch: municipality codes that match neither region.
         targets = [self._target("SI-001", "SVN", "Ajdovščina")]
-        resolved, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        resolved, _, unmatched = gi.resolve_subdivision_polygons(gadm_rows, targets)
         assert resolved == {}
         assert unmatched == ["SVN.1_1", "SVN.2_1"]
 
@@ -569,5 +578,39 @@ class TestResolveSubdivisionPolygons:
             self._gadm("USA", "USA.99_1", name="Georgia"),
         ]
         targets = [self._target("US-GA", "USA", "Georgia")]
-        resolved, _ = gi.resolve_subdivision_polygons(gadm_rows, targets)
+        resolved, _, _ = gi.resolve_subdivision_polygons(gadm_rows, targets)
         assert resolved["US-GA"]["GID_1"] == "USA.10_1"
+
+    def test_method_code_reported(self):
+        gadm_rows = [self._gadm("USA", "USA.10_1", name="Georgia", hasc_1="US.GA")]
+        _, methods, _ = gi.resolve_subdivision_polygons(
+            gadm_rows, [self._target("US-GA", "USA", "Georgia")]
+        )
+        assert methods["US-GA"] == "code"
+
+    def test_method_name_reported(self):
+        gadm_rows = [self._gadm("AFG", "AFG.1_1", name="Balkh")]
+        _, methods, _ = gi.resolve_subdivision_polygons(
+            gadm_rows, [self._target("AF-BAL", "AFG", "Balkh")]
+        )
+        assert methods["AF-BAL"] == "name"
+
+    def test_method_name_ambiguous_when_collision(self):
+        # Two distinct GADM polygons in the same country normalize to the same
+        # name -> the name match is flagged lower-confidence.
+        gadm_rows = [
+            self._gadm("XYZ", "XYZ.1_1", name="Central"),
+            self._gadm("XYZ", "XYZ.2_1", name="Central"),
+        ]
+        _, methods, _ = gi.resolve_subdivision_polygons(
+            gadm_rows, [self._target("XY-C", "XYZ", "Central")]
+        )
+        assert methods["XY-C"] == "name_ambiguous"
+
+    def test_collision_surfaced_by_name_index(self):
+        rows = [
+            {"GID_0": "XYZ", "GID_1": "XYZ.1_1", "NAME_1": "Central", "VARNAME_1": None},
+            {"GID_0": "XYZ", "GID_1": "XYZ.2_1", "NAME_1": "Central", "VARNAME_1": None},
+        ]
+        _, collisions = gi.build_gadm_name_index(rows)
+        assert "central" in collisions["XYZ"]

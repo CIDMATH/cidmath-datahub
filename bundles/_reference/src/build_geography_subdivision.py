@@ -85,6 +85,7 @@ SUBDIVISION_SPARK_SCHEMA = T.StructType(
         T.StructField("subdivision_type_label", T.StringType(), False),
         T.StructField("parent_subdivision_code", T.StringType(), True),
         T.StructField("gadm_gid_1", T.StringType(), True),
+        T.StructField("gadm_match_method", T.StringType(), False),
         T.StructField("centroid_geo_lon", T.DoubleType(), True),
         T.StructField("centroid_geo_lat", T.DoubleType(), True),
         T.StructField("ingested_at", T.TimestampType(), False),
@@ -143,14 +144,16 @@ def _collect_subdivisions() -> list[dict[str, Any]]:
 def _build_subdivision_rows(
     subdivisions: list[dict[str, Any]],
     resolved: dict[str, dict[str, Any]],
+    methods: dict[str, str],
     source_file: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Assemble (attribute_rows, boundary_rows) from subdivisions + resolved polygons.
 
-    ``resolved`` maps ``subdivision_code → gadm_row`` (from
+    ``resolved`` maps ``subdivision_code → gadm_row`` and ``methods`` maps
+    ``subdivision_code → match-method`` (both from
     ``resolve_subdivision_polygons``). Subdivisions with no polygon still
-    produce an attribute row (centroid / gadm_gid_1 left null); the build's DQ
-    surfaces coverage as a WARN, not a FAIL.
+    produce an attribute row (centroid / gadm_gid_1 null, method ``none``); the
+    build's DQ surfaces coverage as a WARN, not a FAIL.
     """
     now = datetime.now(tz=UTC)
     attr_rows: list[dict[str, Any]] = []
@@ -172,6 +175,7 @@ def _build_subdivision_rows(
                 subdivision_type_label=rec["type_label"],
                 parent_subdivision_code=rec["parent_code"],
                 gadm_gid_1=gadm_gid_1,
+                gadm_match_method=methods.get(code, "none"),
                 centroid_geo_lon=lon,
                 centroid_geo_lat=lat,
                 source_file=source_file,
@@ -409,12 +413,18 @@ def _dq_checks(
         table_name=f"{SCHEMA}.{TABLE}",
         check_name="subdivision_country_fk_integrity",
         category=DQCategory.REFERENTIAL,
-        severity=DQSeverity.WARN,
+        severity=DQSeverity.FAIL,
         passed=not fk_missing,
         failing_row_count=fk_failing,
         total_row_count=len(rows),
         details={"sample_missing_alpha2": fk_missing[:10]} if fk_missing else None,
     )
+    # Blocking on a canonical reference others FK against (ADR 0023 review P0-3):
+    # a real referential break should stop the publish, not just warn. The
+    # check above no-ops (known_alpha2 = our own set) when geography.country
+    # doesn't exist yet, so this only fires on a genuine break.
+    if fk_missing:
+        raise ValueError(f"Subdivisions reference unknown countries: {fk_missing[:10]}")
 
     # Join coverage — denominator restricted to NON-NESTED rows so the
     # threshold is meaningful. Nested rows inherit their parent's polygon
@@ -460,6 +470,40 @@ def _dq_checks(
         details={"expected_range": [CARDINALITY_MIN, CARDINALITY_MAX], "actual": total},
     )
 
+    # Match-precision visibility (ADR 0023 review P0-1/P0-2). Coverage counts how
+    # many matched; this reports HOW, and flags the low-confidence subset. Match
+    # is country-scoped so cross-country mis-links can't happen; the residual
+    # risk is within-country name ambiguity (name_ambiguous). WARN + a reviewable
+    # sample so a human can spot-check the heuristic matches rather than trusting
+    # a coverage number alone.
+    method_counts = Counter(r["gadm_match_method"] for r in rows)
+    ambiguous = sorted(r["subdivision_code"] for r in rows if r["gadm_match_method"] == "name_ambiguous")
+    name_review_sample = [
+        {
+            "subdivision_code": r["subdivision_code"],
+            "subdivision_name": r["subdivision_name"],
+            "gadm_gid_1": r["gadm_gid_1"],
+            "method": r["gadm_match_method"],
+        }
+        for r in rows
+        if r["gadm_match_method"] in ("name", "name_ambiguous")
+    ][:20]
+    recorder.record(
+        table_name=f"{SCHEMA}.{TABLE}",
+        check_name="subdivision_match_precision",
+        category=DQCategory.BUSINESS_RULE,
+        severity=DQSeverity.WARN,
+        passed=not ambiguous,
+        failing_row_count=len(ambiguous),
+        total_row_count=len(rows),
+        details={
+            "method_counts": dict(method_counts),
+            "ambiguous_count": len(ambiguous),
+            "sample_ambiguous": ambiguous[:20],
+            "sample_name_matches_for_review": name_review_sample,
+        },
+    )
+
 
 def run(
     catalog: str,
@@ -480,7 +524,7 @@ def run(
     gadm_rows = gadm.gdf_to_dict_rows(gdf)
 
     subdivisions = _collect_subdivisions()
-    resolved, unmatched_gid_1s = gi.resolve_subdivision_polygons(
+    resolved, methods, unmatched_gid_1s = gi.resolve_subdivision_polygons(
         gadm_rows, subdivisions, fixups=gi.GADM_ADM1_ISO_FIXUPS
     )
     log.info(
@@ -493,8 +537,14 @@ def run(
         },
     )
 
+    # Stamp the data-defining versions on every row for reproducibility (ADR
+    # 0023 review P0-4): the row set is determined by the pycountry release and
+    # the GADM 4.1 download. GADM is pinned by URL; pycountry is captured here.
+    import pycountry
+
+    source_file = f"{gadm.GADM_GPKG_NAME} (GADM 4.1); pycountry {pycountry.__version__}"
     attr_rows, boundary_rows = _build_subdivision_rows(
-        subdivisions, resolved, source_file=gadm.GADM_GPKG_NAME
+        subdivisions, resolved, methods, source_file=source_file
     )
     log.info(
         "Assembled subdivision rows",

@@ -52,6 +52,16 @@ jobs:
       - name: Ruff lint
         run: ruff check src tests
 
+      # Bundle entrypoints (bundles/*/src) are intentionally outside the
+      # format/lint scope above (long SQL DDL string literals). They still must
+      # not ship undefined-name or syntax bugs — those only surface 40 minutes
+      # into a Databricks job otherwise (ADR 0023 review P0-5). F821 +
+      # py_compile catch that class without imposing line-length formatting.
+      - name: Bundle entrypoints — undefined-name + compile check
+        run: |
+          ruff check --select F821 bundles
+          python -m compileall -q bundles/*/src
+
       - name: Unit and data tests
         run: pytest tests/unit tests/data -v --cov
 

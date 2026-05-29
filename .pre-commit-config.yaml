@@ -24,6 +24,13 @@ repos:
       # Format (same scope as the linter and CI).
       - id: ruff-format
         files: ^(src|tests)/
+      # Bundle entrypoints are outside the lint/format scope above, but must
+      # not ship undefined-name bugs that only surface deep in a Databricks job
+      # (ADR 0023 review P0-5). F821 only — no formatting, no line-length.
+      - id: ruff
+        name: ruff (F821 undefined-name, bundle entrypoints)
+        args: [--select, F821]
+        files: ^bundles/.*/src/.*\.py$
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
