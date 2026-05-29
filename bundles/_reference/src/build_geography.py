@@ -46,6 +46,7 @@ from cidmath_datahub.common import grants
 from cidmath_datahub.common.dq import DQRecorder, new_run_id
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
+from cidmath_datahub.reference import gadm
 from cidmath_datahub.reference import geography as geo
 
 log = get_logger(__name__)
@@ -160,16 +161,7 @@ ZCTA_SPARK_SCHEMA = T.StructType(
     ]
 )
 
-BOUNDARY_SPARK_SCHEMA = T.StructType(
-    [
-        T.StructField("geo_level", T.StringType(), False),
-        T.StructField("geoid", T.StringType(), False),
-        T.StructField("vintage", T.IntegerType(), False),
-        T.StructField("resolution", T.StringType(), False),
-        T.StructField("gisjoin", T.StringType(), False),
-        T.StructField("geometry_wkb", T.BinaryType(), False),
-    ]
-)
+# geography.boundary schema is shared via gadm.boundary_spark_schema() (ADR 0023).
 
 ENTITY_SCHEMAS: dict[str, T.StructType] = {
     "us_state": STATE_SPARK_SCHEMA,
@@ -331,6 +323,7 @@ def _boundary_row(
 ) -> dict[str, Any]:
     return {
         "geo_level": level,
+        "geoid_system": gadm.GEOID_SYSTEM_CENSUS,
         "geoid": row["geoid"],
         "vintage": vintage,
         "resolution": resolution,
@@ -593,6 +586,11 @@ def _write_chunk(
     writer = df.write.mode(mode)
     if mode == "overwrite":
         writer = writer.option("overwriteSchema", "true")
+    else:
+        # mergeSchema lets the append evolve a new column into an existing
+        # table (e.g. adding geoid_system to the shared boundary table on the
+        # first re-run — ADR 0023 review P1-6); no-op once the column exists.
+        writer = writer.option("mergeSchema", "true")
     writer.saveAsTable(f"{catalog}.{SCHEMA}.{table}")
     written.add(table)
     log.info("Wrote chunk", extra={"table": table, "rows": len(rows), "mode": mode})
@@ -874,7 +872,7 @@ def run(
                     )
 
                 _write_chunk(spark, catalog, lvl, rows, ENTITY_SCHEMAS[lvl], written)
-                _write_chunk(spark, catalog, "boundary", boundary, BOUNDARY_SPARK_SCHEMA, written)
+                _write_chunk(spark, catalog, "boundary", boundary, gadm.boundary_spark_schema(), written)
                 log.info(
                     "Processed",
                     extra={"level": lvl, "vintage": v, "rows": len(rows), "cenpop": len(cenpop)},

@@ -196,6 +196,7 @@ def _build_country_rows(
             boundary_rows.append(
                 {
                     "geo_level": "country",
+                    "geoid_system": gadm.GEOID_SYSTEM_ISO_ALPHA3,
                     "geoid": alpha3,
                     "vintage": gadm.GADM_VINTAGE,
                     "resolution": "generalized",
@@ -226,7 +227,11 @@ def _write_country_boundaries(
     """
     spark.sql(f"DELETE FROM {catalog}.{SCHEMA}.{BOUNDARY_TABLE} WHERE geo_level = 'country'")
     df = spark.createDataFrame(rows, schema=gadm.boundary_spark_schema())
-    df.write.mode("append").saveAsTable(f"{catalog}.{SCHEMA}.{BOUNDARY_TABLE}")
+    # mergeSchema evolves geoid_system into the existing boundary table on the
+    # first re-run (ADR 0023 review P1-6); no-op once the column exists.
+    df.write.option("mergeSchema", "true").mode("append").saveAsTable(
+        f"{catalog}.{SCHEMA}.{BOUNDARY_TABLE}"
+    )
     log.info("Wrote country boundaries", extra={"rows": len(rows), "vintage": gadm.GADM_VINTAGE})
 
 

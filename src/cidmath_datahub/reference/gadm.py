@@ -46,6 +46,16 @@ GADM_LICENSE = (
 # Geometry generalization tolerance (degrees) — matches the US tables (ADR 0020).
 GENERALIZE_TOLERANCE_DEG = 0.005
 
+# geoid_system values for geography.boundary (ADR 0023 review P1-6). The
+# boundary table is polymorphic across geo_levels whose `geoid` columns use
+# different key systems; this column names the system explicitly so a consumer
+# doesn't have to infer it from geo_level. One named constant per system keeps
+# the builds from drifting on the string.
+GEOID_SYSTEM_CENSUS = "census_geoid"  # US levels: 2/5/11-digit Census GEOID
+GEOID_SYSTEM_ISO_ALPHA3 = "iso_3166_1_alpha3"  # country
+GEOID_SYSTEM_ISO_3166_2 = "iso_3166_2"  # country_subdivision (US-GA, …)
+GEOID_SYSTEM_GADM = "gadm_gid"  # subnational ADM2/3/4 (3c)
+
 
 def download_gadm_zip(dest: Path) -> Path:
     """Download the GADM 4.1 zipped GeoPackage to ``dest`` and return its path."""
@@ -137,15 +147,18 @@ def simplify_to_wkb(geom: Any, tolerance: float = GENERALIZE_TOLERANCE_DEG) -> b
 def boundary_spark_schema() -> Any:
     """Return the Spark schema for ``geography.boundary`` (ADR 0020).
 
-    Lazy ``pyspark`` import so this module loads without Spark. Mirrors the
-    definition originally in ``build_geography.py``; the GADM builds (3a/3b/3c)
-    append their ``geo_level`` slices through this shared schema.
+    Lazy ``pyspark`` import so this module loads without Spark. Shared by every
+    boundary writer — the US (NHGIS) build and the GADM builds (3a/3b/3c) — so
+    the polymorphic table has exactly one schema definition. ``geoid_system``
+    names the key system of each row's ``geoid`` (see the ``GEOID_SYSTEM_*``
+    constants); ``gisjoin`` is nullable because only the US/NHGIS rows carry it.
     """
     from pyspark.sql import types as T
 
     return T.StructType(
         [
             T.StructField("geo_level", T.StringType(), False),
+            T.StructField("geoid_system", T.StringType(), False),
             T.StructField("geoid", T.StringType(), False),
             T.StructField("vintage", T.IntegerType(), False),
             T.StructField("resolution", T.StringType(), False),

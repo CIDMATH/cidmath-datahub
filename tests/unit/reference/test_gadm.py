@@ -98,5 +98,15 @@ class TestConstants:
         assert gadm.GADM_ZIP_URL.startswith("https://")
         assert gadm.GADM_GPKG_NAME.endswith(".gpkg")
         assert gadm.GADM_VINTAGE == 2022
+        assert gadm.GADM_RELEASE == "4.1"
         assert "non-commercial" in gadm.GADM_LICENSE
         assert gadm.GENERALIZE_TOLERANCE_DEG == 0.005
+
+    def test_geoid_system_constants_distinct(self):
+        systems = {
+            gadm.GEOID_SYSTEM_CENSUS,
+            gadm.GEOID_SYSTEM_ISO_ALPHA3,
+            gadm.GEOID_SYSTEM_ISO_3166_2,
+            gadm.GEOID_SYSTEM_GADM,
+        }
+        assert len(systems) == 4  # no accidental duplicates across systems
