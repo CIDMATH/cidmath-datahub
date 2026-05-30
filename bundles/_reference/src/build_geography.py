@@ -43,6 +43,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
 from cidmath_datahub.common import grants
+from cidmath_datahub.common import registration
 from cidmath_datahub.common.dq import DQRecorder, new_run_id
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
@@ -622,109 +623,35 @@ def _register_dataset(
     pipeline_reference: str,
 ) -> None:
     full = f"{catalog}.{SCHEMA}.{table}"
-
-    cat_schema = T.StructType(
-        [
-            T.StructField("full_table_name", T.StringType()),
-            T.StructField("subject", T.StringType()),
-            T.StructField("layer", T.StringType()),
-            T.StructField("description", T.StringType()),
-            T.StructField("public_health_relevance", T.StringType()),
-            T.StructField("spatial_resolution", T.StringType()),
-            T.StructField("spatial_coverage", T.StringType()),
-            T.StructField("source_provider_code", T.StringType()),
-            T.StructField("source_url", T.StringType()),
-            T.StructField("source_documentation_url", T.StringType()),
-            T.StructField("license", T.StringType()),
-            T.StructField("dua_required", T.BooleanType()),
-            T.StructField("dua_reference", T.StringType()),
-            T.StructField("access_tier", T.StringType()),
-            T.StructField("external_maintainer_name", T.StringType()),
-            T.StructField("is_hosted", T.BooleanType()),
-            T.StructField("owner", T.StringType()),
-        ]
+    registration.register_dataset(
+        spark,
+        catalog,
+        registration.DatasetCatalogEntry(
+            full_table_name=full,
+            subject=SCHEMA,
+            layer="reference",
+            description=description,
+            public_health_relevance=public_health_relevance,
+            spatial_resolution=spatial_resolution,
+            spatial_coverage="United States",
+            source_provider_code="ipums_nhgis",
+            source_url=NHGIS_SOURCE_URL,
+            source_documentation_url=NHGIS_DOC_URL,
+            license=NHGIS_LICENSE,
+            dua_required=True,
+            dua_reference=NHGIS_DUA_REFERENCE,
+            access_tier="restricted",
+            external_maintainer_name=NHGIS_MAINTAINER,
+            is_hosted=True,
+        ),
+        registration.DatasetEngineeringEntry(
+            full_table_name=full,
+            update_semantics="full_refresh",
+            materialization_type="table",
+            cluster_columns=cluster_columns,
+            pipeline_reference=pipeline_reference,
+        ),
     )
-    cat_row = [
-        (
-            full,
-            SCHEMA,
-            "reference",
-            description,
-            public_health_relevance,
-            spatial_resolution,
-            "United States",
-            "ipums_nhgis",
-            NHGIS_SOURCE_URL,
-            NHGIS_DOC_URL,
-            NHGIS_LICENSE,
-            True,
-            NHGIS_DUA_REFERENCE,
-            "restricted",
-            NHGIS_MAINTAINER,
-            True,
-            "cidmath-data-team",
-        )
-    ]
-    spark.createDataFrame(cat_row, cat_schema).createOrReplaceTempView("_tmp_geo_cat")
-    spark.sql(
-        f"""
-        MERGE INTO {catalog}._ops.dataset_catalog AS t
-        USING _tmp_geo_cat AS s
-        ON t.full_table_name = s.full_table_name
-        WHEN MATCHED THEN UPDATE SET
-            subject = s.subject, layer = s.layer, description = s.description,
-            public_health_relevance = s.public_health_relevance,
-            spatial_resolution = s.spatial_resolution, spatial_coverage = s.spatial_coverage,
-            source_provider_code = s.source_provider_code, source_url = s.source_url,
-            source_documentation_url = s.source_documentation_url, license = s.license,
-            dua_required = s.dua_required, dua_reference = s.dua_reference,
-            access_tier = s.access_tier, external_maintainer_name = s.external_maintainer_name,
-            is_hosted = s.is_hosted, owner = s.owner, last_validated = CURRENT_DATE()
-        WHEN NOT MATCHED THEN INSERT
-            (full_table_name, subject, layer, description, public_health_relevance,
-             spatial_resolution, spatial_coverage, source_provider_code, source_url,
-             source_documentation_url, license, dua_required, dua_reference, access_tier,
-             external_maintainer_name, is_hosted, owner, last_validated)
-            VALUES
-            (s.full_table_name, s.subject, s.layer, s.description, s.public_health_relevance,
-             s.spatial_resolution, s.spatial_coverage, s.source_provider_code, s.source_url,
-             s.source_documentation_url, s.license, s.dua_required, s.dua_reference, s.access_tier,
-             s.external_maintainer_name, s.is_hosted, s.owner, CURRENT_DATE())
-        """
-    )
-
-    eng_schema = T.StructType(
-        [
-            T.StructField("full_table_name", T.StringType()),
-            T.StructField("update_semantics", T.StringType()),
-            T.StructField("materialization_type", T.StringType()),
-            T.StructField("cluster_columns", T.ArrayType(T.StringType())),
-            T.StructField("pipeline_reference", T.StringType()),
-            T.StructField("schema_version", T.IntegerType()),
-        ]
-    )
-    eng_row = [(full, "full_refresh", "table", cluster_columns, pipeline_reference, 1)]
-    spark.createDataFrame(eng_row, eng_schema).createOrReplaceTempView("_tmp_geo_eng")
-    spark.sql(
-        f"""
-        MERGE INTO {catalog}._ops.dataset_engineering AS t
-        USING _tmp_geo_eng AS s
-        ON t.full_table_name = s.full_table_name
-        WHEN MATCHED THEN UPDATE SET
-            update_semantics = s.update_semantics,
-            materialization_type = s.materialization_type,
-            cluster_columns = s.cluster_columns,
-            pipeline_reference = s.pipeline_reference,
-            last_refresh_at = CURRENT_TIMESTAMP()
-        WHEN NOT MATCHED THEN INSERT
-            (full_table_name, update_semantics, materialization_type, cluster_columns,
-             pipeline_reference, schema_version, last_refresh_at)
-            VALUES
-            (s.full_table_name, s.update_semantics, s.materialization_type, s.cluster_columns,
-             s.pipeline_reference, s.schema_version, CURRENT_TIMESTAMP())
-        """
-    )
-    log.info("Registered dataset metadata", extra={"table": full})
 
 
 def _comment_tables(spark: SparkSession, catalog: str) -> None:
