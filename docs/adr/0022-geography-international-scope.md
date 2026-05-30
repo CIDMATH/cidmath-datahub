@@ -1,7 +1,7 @@
 # 0022 — Geography reference: international scope (countries, subdivisions, GADM)
 
 ## Status
-Accepted — 2026-05-26
+Accepted — 2026-05-26. Temporal-model sub-decision (single-vintage snapshots, `full_refresh`) amended by [ADR 0024](0024-international-geography-vintaging.md) — 2026-05-29: the international tables are now vintaged like the US tables. The rest of this ADR stands.
 
 ## Context
 ADR 0020 scoped `geography` to US units sourced from IPUMS NHGIS (state, county, ZCTA, tract, CBSA, HHS region, with the 2010↔2020 crosswalks in slice 2b). That scope is sufficient for US-centric surveillance work but blocks every modeling effort with an international dimension — multi-country pathogen surveillance (mpox, AMR, COVID variants), WHO-aligned reporting, global weather/climate joins (the next planned subject bundle), and any collaboration with non-US partners. WHO, IHR, and GBD pipelines all use **ISO 3166-1 alpha-3** as the canonical country key, so we cannot punt on country-level reference much longer without forcing every subject bundle to re-derive its own country lookup.
