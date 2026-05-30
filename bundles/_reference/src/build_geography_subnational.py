@@ -18,6 +18,12 @@ Keying and links:
     geography.country_subdivision (slice 3b). NULL where the parent ADM_1 didn't
     resolve to ISO — the honest inherited gap (ADR 0023/0024).
 
+Known gaps (recorded in the ``subnational_rows_dropped`` DQ check): GADM 4.1
+codes Ghana's ADM_2 GIDs malformed (``GHA1.1_2`` rather than ``GHA.1.1_2``), so
+its ~260 districts drop as level-mismatched — an accepted gap to revisit if GADM
+fixes the coding (decision 2026-05-30). Hong Kong / Macao appear in the ADM_2
+layer as ADM_1-shaped rows (no real ADM_2) and are likewise dropped.
+
 Pure logic (GID parsing/level, row assembly, the reverse-map builder) lives in
 ``cidmath_datahub.reference.geography_intl`` (ADR 0011). This entrypoint is the
 thin IO + Spark layer. GADM download/extract/read/geometry helpers are shared
@@ -123,17 +129,20 @@ def _build_subnational_rows(
     gadm_rows: list[dict[str, Any]],
     gid1_to_subcode: dict[str, str],
     source_file: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Assemble (attribute_rows, boundary_rows) from GADM ADM_2 rows.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Assemble (attribute_rows, boundary_rows, drops) from GADM ADM_2 rows.
 
-    Skips non-ISO (X-prefixed) GADM territories so country_alpha3 FKs cleanly to
+    Skips non-ISO GADM territories so country_alpha3 FKs cleanly to
     geography.country (same posture as slice 3a/3b). subdivision_code is
     inherited from the parent ADM_1 via the 3b map, NULL where unmatched.
+    ``drops`` carries dropped-row counts + a sample for the DQ visibility check.
     """
     now = datetime.now(tz=UTC)
     attr_rows: list[dict[str, Any]] = []
     boundary_rows: list[dict[str, Any]] = []
     skipped_non_iso = 0
+    skipped_malformed = 0
+    sample_malformed: list[str] = []
 
     for rec in gadm_rows:
         gid0 = rec.get("GID_0")
@@ -161,6 +170,9 @@ def _build_subnational_rows(
                 source_file=source_file,
             )
         except ValueError as e:
+            skipped_malformed += 1
+            if len(sample_malformed) < 20:
+                sample_malformed.append(str(gid2))
             log.warning("Skipping malformed ADM_2 row", extra={"gid_2": gid2, "error": str(e)})
             continue
         row["ingested_at"] = now
@@ -180,15 +192,22 @@ def _build_subnational_rows(
                 }
             )
 
+    drops = {
+        "total_read": len(gadm_rows),
+        "non_iso": skipped_non_iso,
+        "malformed": skipped_malformed,
+        "sample_malformed": sample_malformed,
+    }
     log.info(
         "Assembled subnational rows",
         extra={
             "attribute_rows": len(attr_rows),
             "boundary_rows": len(boundary_rows),
             "skipped_non_iso": skipped_non_iso,
+            "skipped_malformed": skipped_malformed,
         },
     )
-    return attr_rows, boundary_rows
+    return attr_rows, boundary_rows, drops
 
 
 def _write_chunks(
@@ -258,6 +277,7 @@ def _dq_checks(
     spark: SparkSession,
     catalog: str,
     rows: list[dict[str, Any]],
+    drops: dict[str, Any],
 ) -> None:
     """Run DQ on the assembled rows (ADR 0009).
 
@@ -265,6 +285,8 @@ def _dq_checks(
       2. country_alpha3 FK to geography.country — FAIL (blocking, ADR 0023 P0-3).
       3. subdivision_code link coverage — INFO (inherits 3b's ~72%; not gated).
       4. ADM_2 cardinality sanity range — WARN.
+      5. rows dropped during assembly (non-ISO / malformed) — WARN if >5%, with
+         a reviewable sample so silent drops are auditable (not just logged).
     """
     gid_counts = Counter(r["gadm_gid"] for r in rows)
     dups = sorted(g for g, n in gid_counts.items() if n > 1)
@@ -334,6 +356,34 @@ def _dq_checks(
         failing_row_count=0 if passed_count else 1,
         total_row_count=total,
         details={"expected_range": [CARDINALITY_MIN, CARDINALITY_MAX], "actual": total},
+    )
+
+    # Dropped-row visibility (ADR 0023 review theme): rows the assembler rejected
+    # (non-ISO territories, or malformed/level-mismatched GIDs) only existed as
+    # scattered log warnings; record the counts + a sample so they're auditable.
+    # WARNs if the drop rate spikes (a future GADM release breaking more rows),
+    # not at the small steady-state level.
+    dropped = drops["non_iso"] + drops["malformed"]
+    total_read = drops["total_read"]
+    drop_pct = (dropped / total_read * 100) if total_read else 0.0
+    recorder.record(
+        table_name=f"{SCHEMA}.{TABLE}",
+        check_name="subnational_rows_dropped",
+        category=DQCategory.BUSINESS_RULE,
+        severity=DQSeverity.WARN,
+        passed=drop_pct < 5.0,
+        failing_row_count=dropped,
+        total_row_count=total_read,
+        details={
+            "non_iso": drops["non_iso"],
+            "malformed": drops["malformed"],
+            "drop_pct": round(drop_pct, 2),
+            "sample_malformed": drops["sample_malformed"],
+            "known_gap": (
+                "GADM 4.1 malformed Ghana ADM_2 GIDs (GHA1.1_2): ~260 districts "
+                "in the malformed bucket. Accepted gap (2026-05-30); revisit on GADM fix."
+            ),
+        },
     )
 
 
@@ -491,13 +541,15 @@ def run(
     gid1_to_subcode = _load_gid1_to_subdivision_code(spark, catalog)
 
     source_file = f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE})"
-    attr_rows, boundary_rows = _build_subnational_rows(gadm_rows, gid1_to_subcode, source_file)
+    attr_rows, boundary_rows, drops = _build_subnational_rows(
+        gadm_rows, gid1_to_subcode, source_file
+    )
 
     run_id = new_run_id()
     log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
 
     with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
-        _dq_checks(recorder, spark, catalog, attr_rows)
+        _dq_checks(recorder, spark, catalog, attr_rows, drops)
         _write_subnational_table(spark, catalog, attr_rows)
         if boundary_rows:
             _write_subnational_boundaries(spark, catalog, boundary_rows)

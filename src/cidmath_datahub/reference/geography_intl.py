@@ -95,8 +95,11 @@ def is_iso_gid0(gid0: str) -> bool:
     """Return True if a GADM GID_0 value is a real ISO 3166-1 alpha-3.
 
     GADM uses GID_0 as the alpha-3 *when available* (gadm.org/metadata.html)
-    and coins X-prefixed codes for non-ISO territories. This excludes the
-    GADM-coined codes from anything ISO-keyed.
+    and coins non-ISO codes for territories without one: X-prefixed (``XKO``,
+    ``XNC``) and Z-prefixed-with-digits (``Z01``–``Z09``, disputed border
+    areas). Real ISO alpha-3 codes are exactly three *letters*, so anything
+    carrying a digit is excluded — which filters GADM's disputed-area codes
+    cleanly at the source instead of failing later in alpha-3 validation.
     """
     if not isinstance(gid0, str) or len(gid0) != 3:
         return False
@@ -104,6 +107,10 @@ def is_iso_gid0(gid0: str) -> bool:
         return False
     # Belt-and-suspenders for any future X-prefixed code GADM might add.
     if gid0.startswith("X"):
+        return False
+    # Real alpha-3 codes are all letters; GADM disputed-area codes (Z02, …)
+    # carry digits.
+    if not gid0.isalpha():
         return False
     return True
 

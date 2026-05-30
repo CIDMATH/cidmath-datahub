@@ -88,6 +88,11 @@ class TestIsIsoGid0:
         # If GADM coins a new X-prefixed code, we still want to exclude it.
         assert gi.is_iso_gid0("XZZ") is False
 
+    @pytest.mark.parametrize("gid0", ["Z01", "Z02", "Z09", "A1B", "1AB"])
+    def test_codes_with_digits_rejected(self, gid0):
+        # GADM disputed-area codes (Z01-Z09) carry digits; real alpha-3 don't.
+        assert gi.is_iso_gid0(gid0) is False
+
 
 @pytest.mark.unit
 class TestAssembleCountryRow:
