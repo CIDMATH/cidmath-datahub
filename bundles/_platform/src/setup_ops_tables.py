@@ -195,6 +195,13 @@ COMMENT 'Provider code registry. Documented-only per ADR 0006 (not CI-enforced).
 # Created in both catalogs; LEFT JOINs domain extensions as they materialize.
 # Initial version joins only the universal tables; updated when extensions land.
 
+# dq_status_last is DERIVED from _ops.dq_results (latest result per check, rolled
+# up per table) rather than read from the dataset_engineering column of the same
+# name — no pipeline writes that column, so it was perpetually null. failed if any
+# fail/quarantine check failed; warned if any warn check failed; passed otherwise;
+# unknown (COALESCE) when a table has no DQ results. dq_results.table_name is
+# schema-qualified ("geography.country"), so it joins to full_table_name via the
+# catalog prefix.
 DATASET_CATALOG_FULL_VIEW_DDL = """
 CREATE OR REPLACE VIEW {catalog}._ops.dataset_catalog_full AS
 SELECT
@@ -202,12 +209,27 @@ SELECT
     e.update_semantics,
     e.materialization_type,
     e.last_refresh_at,
-    e.dq_status_last,
+    COALESCE(dq.dq_status_last, 'unknown') AS dq_status_last,
     e.freshness_sla_hours,
     e.pipeline_reference AS pipeline_reference_engineering
 FROM {catalog}._ops.dataset_catalog c
 LEFT JOIN {catalog}._ops.dataset_engineering e
-    ON c.full_table_name = e.full_table_name;
+    ON c.full_table_name = e.full_table_name
+LEFT JOIN (
+    SELECT table_name,
+        CASE
+            WHEN MAX(CASE WHEN severity IN ('fail', 'quarantine') AND NOT passed THEN 1 ELSE 0 END) = 1 THEN 'failed'
+            WHEN MAX(CASE WHEN severity = 'warn' AND NOT passed THEN 1 ELSE 0 END) = 1 THEN 'warned'
+            ELSE 'passed'
+        END AS dq_status_last
+    FROM (
+        SELECT table_name, severity, passed,
+            ROW_NUMBER() OVER (PARTITION BY table_name, check_name ORDER BY checked_at DESC) AS rn
+        FROM {catalog}._ops.dq_results
+    )
+    WHERE rn = 1
+    GROUP BY table_name
+) dq ON c.full_table_name = '{catalog}.' || dq.table_name;
 """
 
 
@@ -277,10 +299,25 @@ SELECT
     c.last_validated,
     e.update_semantics,
     e.last_refresh_at,
-    e.dq_status_last
+    COALESCE(dq.dq_status_last, 'unknown') AS dq_status_last
 FROM {catalog}._ops.dataset_catalog c
 LEFT JOIN {catalog}._ops.dataset_engineering e
-    ON c.full_table_name = e.full_table_name;
+    ON c.full_table_name = e.full_table_name
+LEFT JOIN (
+    SELECT table_name,
+        CASE
+            WHEN MAX(CASE WHEN severity IN ('fail', 'quarantine') AND NOT passed THEN 1 ELSE 0 END) = 1 THEN 'failed'
+            WHEN MAX(CASE WHEN severity = 'warn' AND NOT passed THEN 1 ELSE 0 END) = 1 THEN 'warned'
+            ELSE 'passed'
+        END AS dq_status_last
+    FROM (
+        SELECT table_name, severity, passed,
+            ROW_NUMBER() OVER (PARTITION BY table_name, check_name ORDER BY checked_at DESC) AS rn
+        FROM {catalog}._ops.dq_results
+    )
+    WHERE rn = 1
+    GROUP BY table_name
+) dq ON c.full_table_name = '{catalog}.' || dq.table_name;
 """
 
 # --- Grants ---
