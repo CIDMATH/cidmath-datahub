@@ -66,6 +66,7 @@ GADM_ADM0_LAYER = "ADM_0"
 COUNTRY_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("country_alpha3", T.StringType(), False),
+        T.StructField("vintage", T.IntegerType(), False),
         T.StructField("country_alpha2", T.StringType(), False),
         T.StructField("country_numeric", T.StringType(), False),
         T.StructField("country_name", T.StringType(), False),
@@ -190,6 +191,7 @@ def _build_country_rows(
             source_file=source_file,
         )
         row["ingested_at"] = now
+        row["vintage"] = gadm.GADM_VINTAGE
         attr_rows.append(row)
 
         if geom is not None and not geom.is_empty:
@@ -210,10 +212,16 @@ def _build_country_rows(
 
 def _write_country_table(spark: SparkSession, catalog: str, rows: list[dict[str, Any]]) -> None:
     df = spark.createDataFrame(rows, schema=COUNTRY_SPARK_SCHEMA).sort("country_alpha3")
-    df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        f"{catalog}.{SCHEMA}.{TABLE}"
-    )
-    log.info("Wrote geography.country", extra={"rows": len(rows)})
+    full = f"{catalog}.{SCHEMA}.{TABLE}"
+    if gadm.table_has_column(spark, full, "vintage"):
+        # Per-vintage refresh (ADR 0024): replace only this release's vintage,
+        # leaving any other loaded vintages intact.
+        spark.sql(f"DELETE FROM {full} WHERE vintage = {gadm.GADM_VINTAGE}")
+        df.write.option("mergeSchema", "true").mode("append").saveAsTable(full)
+    else:
+        # Migration / first build: establish the table and the vintage column.
+        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full)
+    log.info("Wrote geography.country", extra={"rows": len(rows), "vintage": gadm.GADM_VINTAGE})
 
 
 def _write_country_boundaries(
@@ -238,7 +246,7 @@ def _write_country_boundaries(
 def _comment_table(spark: SparkSession, catalog: str) -> None:
     spark.sql(
         f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TABLE} IS "
-        f"'ISO 3166-1 countries (alpha-3 PK) with WHO and UN M49 region attributes; "
+        f"'ISO 3166-1 countries (PK country_alpha3, vintage) with WHO and UN M49 region attributes; "
         f"centroids from GADM ADM_0 representative points. Source: pycountry "
         f"+ in-repo WHO/UN classifications + GADM 4.1. ADR 0022.'"
     )

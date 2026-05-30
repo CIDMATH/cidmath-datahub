@@ -144,6 +144,20 @@ def simplify_to_wkb(geom: Any, tolerance: float = GENERALIZE_TOLERANCE_DEG) -> b
     return shapely.to_wkb(simplified, output_dimension=2)
 
 
+def table_has_column(spark: Any, full_table_name: str, column: str) -> bool:
+    """Return True if ``full_table_name`` exists and has ``column``.
+
+    Used by the vintaged builds (ADR 0024) to tell a one-time migration run
+    (table predates the ``vintage`` column → full overwrite to establish it)
+    from a steady-state run (column present → per-vintage delete-and-append).
+    Returns False if the table doesn't exist yet (fresh catalog).
+    """
+    try:
+        return column in [f.name for f in spark.table(full_table_name).schema.fields]
+    except Exception:
+        return False
+
+
 def boundary_spark_schema() -> Any:
     """Return the Spark schema for ``geography.boundary`` (ADR 0020).
 

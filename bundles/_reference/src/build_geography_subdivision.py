@@ -78,6 +78,7 @@ CARDINALITY_MAX = 5500
 SUBDIVISION_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("subdivision_code", T.StringType(), False),
+        T.StructField("vintage", T.IntegerType(), False),
         T.StructField("country_alpha2", T.StringType(), False),
         T.StructField("country_alpha3", T.StringType(), False),
         T.StructField("subdivision_local_code", T.StringType(), False),
@@ -187,6 +188,7 @@ def _build_subdivision_rows(
             )
             continue
         row["ingested_at"] = now
+        row["vintage"] = gadm.GADM_VINTAGE
         attr_rows.append(row)
 
         if geom is not None and not geom.is_empty:
@@ -207,10 +209,19 @@ def _build_subdivision_rows(
 
 def _write_subdivision_table(spark: SparkSession, catalog: str, rows: list[dict[str, Any]]) -> None:
     df = spark.createDataFrame(rows, schema=SUBDIVISION_SPARK_SCHEMA).sort("subdivision_code")
-    df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        f"{catalog}.{SCHEMA}.{TABLE}"
+    full = f"{catalog}.{SCHEMA}.{TABLE}"
+    if gadm.table_has_column(spark, full, "vintage"):
+        # Per-vintage refresh (ADR 0024): replace only this release's vintage,
+        # leaving any other loaded vintages intact.
+        spark.sql(f"DELETE FROM {full} WHERE vintage = {gadm.GADM_VINTAGE}")
+        df.write.option("mergeSchema", "true").mode("append").saveAsTable(full)
+    else:
+        # Migration / first build: establish the table and the vintage column.
+        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full)
+    log.info(
+        "Wrote geography.country_subdivision",
+        extra={"rows": len(rows), "vintage": gadm.GADM_VINTAGE},
     )
-    log.info("Wrote geography.country_subdivision", extra={"rows": len(rows)})
 
 
 def _write_subdivision_boundaries(
@@ -237,7 +248,7 @@ def _write_subdivision_boundaries(
 def _comment_table(spark: SparkSession, catalog: str) -> None:
     spark.sql(
         f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TABLE} IS "
-        f"'ISO 3166-2 first-level subdivisions (subdivision_code PK like ''US-GA''). "
+        f"'ISO 3166-2 first-level subdivisions (PK subdivision_code, vintage; like ''US-GA''). "
         f"gadm_gid_1 links to geography.boundary where a GADM ADM_1 polygon resolves; "
         f"nested subdivisions (parent_subdivision_code IS NOT NULL) inherit their "
         f"parent''s polygon spatially. Source: pycountry + GADM 4.1. ADR 0022.'"
