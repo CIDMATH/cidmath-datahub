@@ -617,3 +617,127 @@ class TestResolveSubdivisionPolygons:
         ]
         _, collisions = gi.build_gadm_name_index(rows)
         assert "central" in collisions["XYZ"]
+
+
+@pytest.mark.unit
+class TestAssertGadmAdm2Columns:
+    def test_all_present_passes(self):
+        gi.assert_gadm_adm2_columns(
+            ["GID_0", "GID_1", "GID_2", "NAME_2", "TYPE_2", "ENGTYPE_2", "geometry"]
+        )
+
+    def test_missing_columns_raises(self):
+        with pytest.raises(ValueError, match="GID_2"):
+            gi.assert_gadm_adm2_columns(["GID_0", "GID_1", "NAME_2", "TYPE_2", "ENGTYPE_2"])
+
+
+@pytest.mark.unit
+class TestGadmLevelFromGid:
+    @pytest.mark.parametrize(
+        "gid,level",
+        [
+            ("USA", 0),
+            ("USA.10_1", 1),
+            ("USA.10.121_1", 2),
+            ("USA.10.121.4_1", 3),
+            (" BRA.25.300_1 ", 2),
+        ],
+    )
+    def test_level(self, gid, level):
+        assert gi.gadm_level_from_gid(gid) == level
+
+    @pytest.mark.parametrize("bad", [None, "", "   ", 123])
+    def test_invalid_raises(self, bad):
+        with pytest.raises(ValueError):
+            gi.gadm_level_from_gid(bad)
+
+
+@pytest.mark.unit
+class TestBuildGid1ToSubdivisionCode:
+    def test_maps_matched_rows(self):
+        rows = [
+            {"gadm_gid_1": "USA.10_1", "subdivision_code": "US-GA"},
+            {"gadm_gid_1": "BRA.25_1", "subdivision_code": "BR-SP"},
+        ]
+        assert gi.build_gid1_to_subdivision_code(rows) == {
+            "USA.10_1": "US-GA",
+            "BRA.25_1": "BR-SP",
+        }
+
+    def test_skips_unmatched_rows(self):
+        rows = [
+            {"gadm_gid_1": None, "subdivision_code": "SI-001"},  # no polygon match
+            {"gadm_gid_1": "USA.10_1", "subdivision_code": "US-GA"},
+        ]
+        assert gi.build_gid1_to_subdivision_code(rows) == {"USA.10_1": "US-GA"}
+
+    def test_first_writer_wins_on_dup_gid1(self):
+        rows = [
+            {"gadm_gid_1": "USA.10_1", "subdivision_code": "US-GA"},
+            {"gadm_gid_1": "USA.10_1", "subdivision_code": "US-XX"},
+        ]
+        assert gi.build_gid1_to_subdivision_code(rows) == {"USA.10_1": "US-GA"}
+
+
+@pytest.mark.unit
+class TestAssembleSubnationalRow:
+    @staticmethod
+    def _base_args(**overrides):
+        defaults = dict(
+            gadm_gid="USA.10.121_1",
+            gadm_level=2,
+            subnational_name="Fulton",
+            subnational_type_label="County",
+            parent_gid="USA.10_1",
+            country_alpha3="USA",
+            subdivision_code="US-GA",
+            centroid_geo_lon=-84.4,
+            centroid_geo_lat=33.8,
+            source_file="gadm_410-levels.gpkg",
+        )
+        defaults.update(overrides)
+        return defaults
+
+    def test_assembles_full_row(self):
+        row = gi.assemble_subnational_row(**self._base_args())
+        assert row["gadm_gid"] == "USA.10.121_1"
+        assert row["gadm_level"] == 2
+        assert row["parent_gid"] == "USA.10_1"
+        assert row["country_alpha3"] == "USA"
+        assert row["subdivision_code"] == "US-GA"
+        assert row["subnational_type_label"] == "County"
+
+    def test_gid_suffix_preserved(self):
+        # Stripping GADM's _N suffix breaks the polygon join (ADR 0022 guardrail).
+        row = gi.assemble_subnational_row(**self._base_args())
+        assert row["gadm_gid"].endswith("_1")
+
+    def test_level_must_agree_with_gid(self):
+        with pytest.raises(ValueError, match="disagrees with GID"):
+            gi.assemble_subnational_row(**self._base_args(gadm_gid="USA.10.121_1", gadm_level=3))
+
+    def test_level_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="gadm_level"):
+            gi.assemble_subnational_row(**self._base_args(gadm_gid="USA.10_1", gadm_level=1))
+
+    def test_subdivision_code_optional(self):
+        row = gi.assemble_subnational_row(**self._base_args(subdivision_code=None))
+        assert row["subdivision_code"] is None
+
+    def test_subdivision_code_normalized(self):
+        row = gi.assemble_subnational_row(**self._base_args(subdivision_code="us-ga"))
+        assert row["subdivision_code"] == "US-GA"
+
+    def test_parent_gid_optional(self):
+        row = gi.assemble_subnational_row(**self._base_args(parent_gid=None))
+        assert row["parent_gid"] is None
+
+    def test_centroid_requires_both_or_neither(self):
+        with pytest.raises(ValueError, match="centroid"):
+            gi.assemble_subnational_row(
+                **self._base_args(centroid_geo_lon=-84.4, centroid_geo_lat=None)
+            )
+
+    def test_empty_gid_rejected(self):
+        with pytest.raises(ValueError, match="gadm_gid"):
+            gi.assemble_subnational_row(**self._base_args(gadm_gid="  "))

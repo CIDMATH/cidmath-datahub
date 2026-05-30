@@ -637,3 +637,132 @@ def resolve_subdivision_polygons(
 
     unmatched = sorted(g for g in by_gid if g not in matched_gids)
     return resolved, methods, unmatched
+
+
+# ---------------------------------------------------------------------------
+# Slice 3c — subnational (GADM ADM2/3/4) helpers (ADR 0022; vintaged per 0024)
+# ---------------------------------------------------------------------------
+
+# Expected columns on the GADM ADM_2 layer (the slice-3c grain). Asserted at
+# runtime so a GADM schema change fails locally on the build, not 40 minutes
+# into a Databricks job (per CLAUDE.md third-party-API guidance). GID_0/GID_1
+# carry the ancestor ids GADM ships on every level's layer, so parent links
+# need no derivation.
+GADM_ADM2_REQUIRED_COLUMNS: frozenset[str] = frozenset(
+    {"GID_0", "GID_1", "GID_2", "NAME_2", "TYPE_2", "ENGTYPE_2"}
+)
+
+# GADM admin levels allowed in geography.subnational. ADM2 ships in slice 3c;
+# 3/4 follow per-country as coverage warrants (ADR 0022).
+SUBNATIONAL_GADM_LEVELS: frozenset[int] = frozenset({2, 3, 4})
+
+
+def assert_gadm_adm2_columns(columns: Iterable[str]) -> None:
+    """Assert the GADM ADM_2 layer has the columns slice 3c depends on.
+
+    Raises ``ValueError`` listing the missing columns, with a clear message
+    rather than producing silently-empty rows downstream.
+    """
+    have = set(columns)
+    missing = sorted(GADM_ADM2_REQUIRED_COLUMNS - have)
+    if missing:
+        raise ValueError(
+            f"GADM ADM_2 layer missing expected columns: {missing}. Got: {sorted(have)}"
+        )
+
+
+def gadm_level_from_gid(gid: str) -> int:
+    """Return the GADM admin level implied by a GID.
+
+    The level is the count of dot-separated segments below the country, i.e.
+    the number of dots: ``"USA"`` → 0, ``"USA.10_1"`` → 1, ``"USA.10.121_1"``
+    → 2, ``"USA.10.121.4_1"`` → 3. Raises ``ValueError`` for a non-string or
+    empty GID.
+    """
+    if not isinstance(gid, str) or not gid.strip():
+        raise ValueError(f"gadm_gid must be a non-empty string, got {gid!r}")
+    return gid.strip().count(".")
+
+
+def build_gid1_to_subdivision_code(
+    subdivision_rows: Iterable[dict[str, Any]],
+) -> dict[str, str]:
+    """Build a ``{gadm_gid_1: subdivision_code}`` lookup from country_subdivision.
+
+    Lets slice 3c attach the ISO ``subdivision_code`` to each ADM2 row via its
+    parent ADM1 ``GID_1``, reusing 3b's match (ADR 0022/0023) instead of
+    re-deriving it. Only rows that actually matched a GADM ADM_1 polygon
+    (``gadm_gid_1`` populated) contribute, so an ADM2 whose parent ADM1 didn't
+    resolve to ISO gets ``subdivision_code = NULL`` — the honest inherited gap.
+    First writer wins on the unlikely duplicate gid_1.
+    """
+    out: dict[str, str] = {}
+    for row in subdivision_rows:
+        gid1 = row.get("gadm_gid_1")
+        code = row.get("subdivision_code")
+        if isinstance(gid1, str) and gid1 and isinstance(code, str) and code:
+            out.setdefault(gid1, code)
+    return out
+
+
+def assemble_subnational_row(
+    *,
+    gadm_gid: str,
+    gadm_level: int,
+    subnational_name: str,
+    subnational_type_label: str,
+    parent_gid: str | None,
+    country_alpha3: str,
+    subdivision_code: str | None,
+    centroid_geo_lon: float | None,
+    centroid_geo_lat: float | None,
+    source_file: str,
+) -> dict[str, Any]:
+    """Assemble one ``geography.subnational`` row from validated inputs.
+
+    Parallel to :func:`assemble_subdivision_row`. ``gadm_gid`` keeps GADM's
+    native ``_N`` suffix (ADR 0022 storage guardrail — stripping it breaks the
+    polygon join). ``gadm_level`` must agree with the GID shape. The optional
+    ISO ``subdivision_code`` is shape-validated when present (it comes from the
+    3b reverse map, which is already country-consistent). The build adds
+    ``vintage`` and ``ingested_at`` (ADR 0024), so they are not set here.
+    Raises ``ValueError`` for malformed identifiers or inconsistent inputs.
+    """
+    if not isinstance(gadm_gid, str) or not gadm_gid.strip():
+        raise ValueError(f"gadm_gid must be a non-empty string, got {gadm_gid!r}")
+    gid = gadm_gid.strip()
+    a3 = normalize_alpha3(country_alpha3)
+
+    if gadm_level not in SUBNATIONAL_GADM_LEVELS:
+        raise ValueError(f"gadm_level {gadm_level!r} not in {sorted(SUBNATIONAL_GADM_LEVELS)}")
+    implied = gadm_level_from_gid(gid)
+    if implied != gadm_level:
+        raise ValueError(
+            f"gadm_level {gadm_level} disagrees with GID {gid!r} (implies level {implied})"
+        )
+
+    if (centroid_geo_lon is None) != (centroid_geo_lat is None):
+        raise ValueError(
+            f"centroid lon/lat must both be set or both None (got "
+            f"lon={centroid_geo_lon}, lat={centroid_geo_lat})"
+        )
+
+    sub_code: str | None = None
+    if subdivision_code is not None:
+        s_alpha2, s_local = parse_subdivision_code(subdivision_code)
+        sub_code = f"{s_alpha2}-{s_local}"
+
+    parent = parent_gid.strip() if isinstance(parent_gid, str) and parent_gid.strip() else None
+
+    return {
+        "gadm_gid": gid,
+        "gadm_level": gadm_level,
+        "subnational_name": subnational_name,
+        "subnational_type_label": subnational_type_label,
+        "parent_gid": parent,
+        "country_alpha3": a3,
+        "subdivision_code": sub_code,
+        "centroid_geo_lon": centroid_geo_lon,
+        "centroid_geo_lat": centroid_geo_lat,
+        "source_file": source_file,
+    }
