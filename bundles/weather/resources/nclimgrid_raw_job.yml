@@ -1,0 +1,61 @@
+# Job that lands NOAA nClimGrid-Daily cty+ste area averages into
+# weather_raw.nclimgrid_daily (ADR 0025 slice 1: raw).
+#
+# Discovers the monthly CSVs under access/averages/<year>/, downloads them
+# (throttled, politely), parses faithfully (NCEI region codes preserved), and
+# merge_upserts on (region_type, region_code, variable, obs_date). No NCEI->FIPS
+# conformance here — that's the processed layer.
+#
+# Default parameters pull a recent review window (2024-2026). For the full
+# 1951-present backfill or a routine recent-month refresh, override
+# --start-year / --end-year at run time (Run now with different parameters);
+# the full backfill is long-running (~7k small files) so consider running it in
+# decade chunks. No secret scope (public HTTPS). Pure-Python parse, so the env
+# needs only the shared wheel.
+#
+# See bundles/weather/src/build_nclimgrid_raw.py and ADR 0025.
+
+resources:
+  jobs:
+    build_nclimgrid_raw_weather:
+      name: "[weather] build_nclimgrid_raw"
+      description: |
+        Lands NOAA nClimGrid-Daily county + state daily area averages into
+        weather_raw.nclimgrid_daily, faithful to source (NCEI codes preserved).
+        merge_upsert on the natural key. CONUS-only. ADR 0025 slice 1 (raw).
+
+      tasks:
+        - task_key: build_nclimgrid_raw
+          spark_python_task:
+            python_file: ../src/build_nclimgrid_raw.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--start-year"
+              - "2024"
+              - "--end-year"
+              - "2026"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+          environment_key: weather_raw_env
+
+      environments:
+        - environment_key: weather_raw_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      # ~7k small file downloads on a full backfill; generous ceiling. A recent
+      # window runs in minutes. Backfill can be chunked via the year params.
+      timeout_seconds: 21600
+
+      # Alerting (ADR 0010): Teams primary, email secondary. Same pattern as the
+      # _reference jobs.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

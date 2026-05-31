@@ -1,0 +1,93 @@
+# Deploy the weather subject bundle (ADR 0025).
+#
+# Triggered by:
+#   - Merge to main: deploys to dev (via ecdh-deploy-dev SP)
+#   - Tag push (v*): deploys to prod, gated by GitHub Environment approval
+#
+# Path-filtered to changes in bundles/weather/** or the shared package.
+#
+# Deploy order: _platform (catalogs/_ops) and _reference (geography/time) must
+# already be deployed for the target. Unlike deploy-reference, this workflow
+# does NOT auto-run the ingest job: the nClimGrid backfill is long-running,
+# network-heavy, and parameterized by year range, so it is triggered manually
+# from the Databricks UI (recent-window review first, then a chunked backfill).
+
+name: deploy-weather
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - "bundles/weather/**"
+      - "src/cidmath_datahub/**"
+      - "databricks-common.yml"
+      - "pyproject.toml"
+      - ".github/workflows/deploy-weather.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-dev:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Build wheel
+        run: python -m build --wheel --outdir dist
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+      - name: Deploy weather to dev
+        working-directory: bundles/weather
+        run: databricks bundle deploy --target dev
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+
+  deploy-prod:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Build wheel
+        run: python -m build --wheel --outdir dist
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+      - name: Deploy weather to prod
+        working-directory: bundles/weather
+        run: databricks bundle deploy --target prod
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}

@@ -1,0 +1,21 @@
+# Weather subject bundle — first source-aligned subject (ADR 0025).
+#
+# Writes to the source-aligned catalog ecdh_<env> (NOT the integrated
+# ecdh_model_<env>): schemas weather_raw, weather_processed, weather. v1 lands
+# raw + (later) processed conformed to geography + time.
+#
+# Deploy order: after _platform (catalogs/_ops) and _reference (geography/time,
+# which the processed layer FKs against). Source: NOAA nClimGrid-Daily
+# (public domain). See ADR 0025.
+
+include:
+  - ../../databricks-common.yml
+  - resources/*.yml
+
+bundle:
+  name: cidmath-datahub-weather
+
+sync:
+  paths:
+    - ../../src
+    - ./src
