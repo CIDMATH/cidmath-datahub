@@ -188,6 +188,11 @@ class TestConformRegion:
     def test_bad_county_suffix_returns_none(self):
         assert ncl.conform_region("cty", "0200X", self.M) is None
 
+    def test_dc_filed_under_maryland_override(self):
+        # NCEI files DC under Maryland (state 18) as county 511; real geoid 11001.
+        # Override fires before the state cross-reference (empty map still maps it).
+        assert ncl.conform_region("cty", "18511", {}) == "11001"
+
     def test_unknown_region_type_returns_none(self):
         assert ncl.conform_region("div", "02001", self.M) is None
 

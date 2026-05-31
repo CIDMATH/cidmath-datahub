@@ -172,6 +172,18 @@ def parse_ncei_fips_crosswalk(lines: Iterable[str]) -> dict[str, str]:
     return out
 
 
+# NCEI files a few regions under a different state than their FIPS state, so the
+# state cross-reference alone mis-conforms them. Data-derived fixup (keyed on the
+# raw NCEI region_code, verified against the published region_name), NOT a guess:
+#   - "18511" -> region_name "DC: District of Columbia": filed under Maryland
+#     (NCEI state 18 -> FIPS 24), but DC is its own FIPS state; geoid is 11001.
+# A new entry is added only when the blocking geoid-FK DQ surfaces an absent geoid
+# and the data's region_name identifies the true entity.
+_NCEI_COUNTY_FIPS_OVERRIDES: dict[str, str] = {
+    "18511": "11001",  # DC: District of Columbia
+}
+
+
 def conform_region(region_type: str, region_code: str, ncei_to_fips: dict[str, str]) -> str | None:
     """Translate an nClimGrid NCEI region code to its FIPS ``geoid``, or ``None``.
 
@@ -187,6 +199,8 @@ def conform_region(region_type: str, region_code: str, ncei_to_fips: dict[str, s
     if not isinstance(region_code, str):
         return None
     code = region_code.strip()
+    if region_type == "cty" and code in _NCEI_COUNTY_FIPS_OVERRIDES:
+        return _NCEI_COUNTY_FIPS_OVERRIDES[code]
     fips_state = ncei_to_fips.get(code[:2])
     if fips_state is None:
         return None
