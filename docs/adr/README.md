@@ -90,6 +90,7 @@ both positive and negative consequences honestly.
 | [0022](0022-geography-international-scope.md) | Geography reference: international scope (ISO 3166-1/2 codes + GADM boundaries; new country, country_subdivision, subnational tables) | Accepted |
 | [0023](0023-shared-pipeline-helpers-and-gadm-matching.md) | Shared pipeline helpers (GADM IO module) and multi-tier ISO↔GADM subdivision matching (code → name → fixup) | Accepted |
 | [0024](0024-international-geography-vintaging.md) | International geography vintaging — align country/country_subdivision/subnational with the US vintage model (amends ADR 0022 temporal sub-decision) | Accepted |
+| [0025](0025-weather-subject-bundle-nclimgrid.md) | Weather subject bundle: NOAA nClimGrid-Daily county+state area-averages (first source-aligned subject; NCEI→FIPS conformance to geography + time) | Accepted |
 
 ## Future ADRs (backlog)
 
