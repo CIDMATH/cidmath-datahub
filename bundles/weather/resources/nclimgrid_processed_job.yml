@@ -1,0 +1,68 @@
+# Job that conforms weather_raw.nclimgrid_daily into
+# weather_processed.nclimgrid_daily (ADR 0025 slice 2: processed).
+#
+# Pulls NOAA's NCEI->FIPS cross-reference at runtime (docs-first), translates
+# the NCEI region codes to FIPS geoids, attaches units (mm / degC), and
+# merge_upserts on (geo_level, geoid, variable, obs_date). DQ validates NCEI->FIPS
+# coverage and the geoid FK to geography (blocking), plus the obs_date -> time
+# FK (WARN — time covers 2015-2035, so full-history backfill rows fall outside
+# until time is extended).
+#
+# Reads/writes the source-aligned catalog (${var.source_catalog}); FKs
+# cross-catalog against the geography/time reference in ${var.model_catalog}.
+#
+# Default parameters process the recent review window (2024-2026), matching the
+# raw job's default. For the full 1951-present backfill, override
+# --start-year / --end-year at run time (Run now with different parameters), and
+# extend time.calendar_date first if the time-dim WARN matters for downstream
+# joins. Pure-Python conformance, so the env needs only the shared wheel.
+#
+# Deploy order: requires weather_raw (this bundle's raw job) and the _reference
+# geography/time tables to be built. See bundles/weather/src/build_nclimgrid_processed.py.
+
+resources:
+  jobs:
+    build_nclimgrid_processed_weather:
+      name: "[weather] build_nclimgrid_processed"
+      description: |
+        Conforms weather_raw.nclimgrid_daily to FIPS geography + time into
+        weather_processed.nclimgrid_daily (long-form, units mm/degC).
+        merge_upsert on the natural key. CONUS-only. ADR 0025 slice 2 (processed).
+
+      tasks:
+        - task_key: build_nclimgrid_processed
+          spark_python_task:
+            python_file: ../src/build_nclimgrid_processed.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
+              - "${var.model_catalog}"
+              - "--start-year"
+              - "2024"
+              - "--end-year"
+              - "2026"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+          environment_key: weather_processed_env
+
+      environments:
+        - environment_key: weather_processed_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      # Conformance is a join + merge over the raw window; a recent window runs
+      # in minutes. Generous ceiling for a chunked full backfill.
+      timeout_seconds: 21600
+
+      # Alerting (ADR 0010): Teams primary, email secondary. Same pattern as the
+      # raw job and the _reference jobs.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

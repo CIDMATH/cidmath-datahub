@@ -8,6 +8,8 @@ implementation to get right instead of six copies.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from cidmath_datahub.common import registration as reg
@@ -75,6 +77,26 @@ class TestDatasetCatalogEntry:
 
     def test_owner_overridable(self):
         assert _catalog_entry(owner="someone-else").owner == "someone-else"
+
+    def test_temporal_and_doc_fields_default_none(self):
+        # Spatial-only reference tables (geography) leave these unset (ADR 0025).
+        e = _catalog_entry()
+        assert e.source_data_dictionary_url is None
+        assert e.temporal_coverage_start is None
+        assert e.temporal_coverage_end is None
+        assert e.temporal_resolution is None
+
+    def test_temporal_and_doc_fields_populated(self):
+        e = _catalog_entry(
+            source_data_dictionary_url="https://example.org/readme.txt",
+            temporal_coverage_start=date(2024, 1, 1),
+            temporal_coverage_end=date(2026, 12, 31),
+            temporal_resolution="daily",
+        )
+        assert e.source_data_dictionary_url == "https://example.org/readme.txt"
+        assert e.temporal_coverage_start == date(2024, 1, 1)
+        assert e.temporal_coverage_end == date(2026, 12, 31)
+        assert e.temporal_resolution == "daily"
 
 
 @pytest.mark.unit

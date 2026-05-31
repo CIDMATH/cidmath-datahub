@@ -139,6 +139,60 @@ class TestExtractCsvLinks:
 
 
 @pytest.mark.unit
+class TestParseNceiFipsCrosswalk:
+    _CSV = [
+        "state_name,postal_code,NCEI_code,FIPS_code",
+        "Alabama,AL,01,01",
+        "Arizona,AZ,02,04",
+        "Indiana,IL,11,17",  # upstream name bug; numeric cols are correct (IL=11->17)
+        "Illinois,IN,12,18",
+        "Wyoming,WY,48,56",
+    ]
+
+    def test_maps_numeric_codes(self):
+        m = ncl.parse_ncei_fips_crosswalk(self._CSV)
+        assert m["01"] == "01"
+        assert m["02"] == "04"
+        assert m["48"] == "56"
+
+    def test_keyed_on_numeric_not_swapped_name(self):
+        # Despite the swapped state_name column, the numeric mapping is right.
+        m = ncl.parse_ncei_fips_crosswalk(self._CSV)
+        assert m["11"] == "17"
+        assert m["12"] == "18"
+
+    def test_zero_padded(self):
+        m = ncl.parse_ncei_fips_crosswalk(["state_name,postal_code,NCEI_code,FIPS_code", "X,X,1,1"])
+        assert m == {"01": "01"}
+
+
+@pytest.mark.unit
+class TestConformRegion:
+    M = {"01": "01", "02": "04", "06": "09", "44": "51"}
+
+    def test_state(self):
+        assert ncl.conform_region("ste", "02", self.M) == "04"
+
+    def test_county_arizona(self):
+        assert ncl.conform_region("cty", "02001", self.M) == "04001"
+
+    def test_county_alabama_coincides(self):
+        assert ncl.conform_region("cty", "01001", self.M) == "01001"
+
+    def test_county_va_independent_city(self):
+        assert ncl.conform_region("cty", "44510", self.M) == "51510"
+
+    def test_unknown_ncei_state_returns_none(self):
+        assert ncl.conform_region("cty", "99001", self.M) is None
+
+    def test_bad_county_suffix_returns_none(self):
+        assert ncl.conform_region("cty", "0200X", self.M) is None
+
+    def test_unknown_region_type_returns_none(self):
+        assert ncl.conform_region("div", "02001", self.M) is None
+
+
+@pytest.mark.unit
 class TestConstants:
     def test_region_types_and_variables(self):
         assert ncl.REGION_TYPES == frozenset({"cty", "ste"})

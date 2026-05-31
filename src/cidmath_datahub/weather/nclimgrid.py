@@ -139,3 +139,62 @@ def parse_average_csv(lines: Iterable[str], *, source_file: str) -> list[dict[st
                 }
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Conformance to the geography reference (ADR 0025 processed layer)
+# ---------------------------------------------------------------------------
+
+# Variable -> physical unit (nClimGrid v1 user guide): precipitation in mm,
+# temperatures in degrees Celsius.
+UNITS: dict[str, str] = {"prcp": "mm", "tavg": "degC", "tmax": "degC", "tmin": "degC"}
+
+# nClimGrid region type -> conformed geography level (FK target).
+GEO_LEVEL_BY_REGION_TYPE: dict[str, str] = {"cty": "us_county", "ste": "us_state"}
+
+
+def parse_ncei_fips_crosswalk(lines: Iterable[str]) -> dict[str, str]:
+    """Parse NOAA's ``us-state-codes_ncei-to-fips.csv`` into ``{NCEI_code: FIPS_code}``.
+
+    Keys on the **numeric** ``NCEI_code`` -> ``FIPS_code`` columns only. The
+    file's ``state_name`` column has a known upstream bug (Illinois/Indiana
+    swapped), so names are deliberately ignored; the numeric codes are
+    internally correct. Both codes are normalized to zero-padded 2-char strings
+    (leading zeros are significant — e.g. Alabama ``01``). Expects a header:
+    ``state_name, postal_code, NCEI_code, FIPS_code``.
+    """
+    out: dict[str, str] = {}
+    for row in csv.DictReader(lines):
+        ncei = (row.get("NCEI_code") or "").strip()
+        fips = (row.get("FIPS_code") or "").strip()
+        if ncei and fips:
+            out[ncei.zfill(2)] = fips.zfill(2)
+    return out
+
+
+def conform_region(region_type: str, region_code: str, ncei_to_fips: dict[str, str]) -> str | None:
+    """Translate an nClimGrid NCEI region code to its FIPS ``geoid``, or ``None``.
+
+    - ``ste``: geoid = FIPS state code (NCEI 2-digit mapped via ``ncei_to_fips``).
+    - ``cty``: geoid = FIPS state (2) + the 3-digit FIPS **county** suffix. Only
+      the state prefix is NCEI-coded; the county suffix is already the FIPS
+      county code (verified against the real data — e.g. ``02001`` Apache AZ ->
+      ``04`` + ``001`` = ``04001``).
+
+    Returns ``None`` when the NCEI state prefix isn't in the map or the county
+    suffix is malformed; the build's blocking DQ surfaces any such row.
+    """
+    if not isinstance(region_code, str):
+        return None
+    code = region_code.strip()
+    fips_state = ncei_to_fips.get(code[:2])
+    if fips_state is None:
+        return None
+    if region_type == "ste":
+        return fips_state
+    if region_type == "cty":
+        suffix = code[2:5]
+        if len(suffix) != 3 or not suffix.isdigit():
+            return None
+        return fips_state + suffix
+    return None

@@ -25,6 +25,7 @@ construction (belt-and-suspenders alongside the CI convention scan, ADR 0016).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from cidmath_datahub.common.logging import get_logger
@@ -60,6 +61,14 @@ class DatasetCatalogEntry:
     external_maintainer_name: str
     is_hosted: bool
     owner: str = "cidmath-data-team"
+    # Optional fields populated by sourced + temporal subjects (e.g. weather,
+    # ADR 0025): a data-dictionary/readme URL and the temporal coverage/grain.
+    # Spatial-only reference tables (geography) leave them None. Surfaced via
+    # discovery.datasets (ADR 0019).
+    source_data_dictionary_url: str | None = None
+    temporal_coverage_start: date | None = None
+    temporal_coverage_end: date | None = None
+    temporal_resolution: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +140,10 @@ def register_dataset(
             T.StructField("external_maintainer_name", T.StringType()),
             T.StructField("is_hosted", T.BooleanType()),
             T.StructField("owner", T.StringType()),
+            T.StructField("source_data_dictionary_url", T.StringType()),
+            T.StructField("temporal_coverage_start", T.DateType()),
+            T.StructField("temporal_coverage_end", T.DateType()),
+            T.StructField("temporal_resolution", T.StringType()),
         ]
     )
     cat_row: list[tuple[Any, ...]] = [
@@ -152,6 +165,10 @@ def register_dataset(
             catalog_entry.external_maintainer_name,
             catalog_entry.is_hosted,
             catalog_entry.owner,
+            catalog_entry.source_data_dictionary_url,
+            catalog_entry.temporal_coverage_start,
+            catalog_entry.temporal_coverage_end,
+            catalog_entry.temporal_resolution,
         )
     ]
     cat_view = _safe_view_name("_tmp_reg_cat", full)
@@ -169,17 +186,24 @@ def register_dataset(
             source_documentation_url = s.source_documentation_url, license = s.license,
             dua_required = s.dua_required, dua_reference = s.dua_reference,
             access_tier = s.access_tier, external_maintainer_name = s.external_maintainer_name,
-            is_hosted = s.is_hosted, owner = s.owner, last_validated = CURRENT_DATE()
+            is_hosted = s.is_hosted, owner = s.owner,
+            source_data_dictionary_url = s.source_data_dictionary_url,
+            temporal_coverage_start = s.temporal_coverage_start,
+            temporal_coverage_end = s.temporal_coverage_end,
+            temporal_resolution = s.temporal_resolution, last_validated = CURRENT_DATE()
         WHEN NOT MATCHED THEN INSERT
             (full_table_name, subject, layer, description, public_health_relevance,
              spatial_resolution, spatial_coverage, source_provider_code, source_url,
              source_documentation_url, license, dua_required, dua_reference, access_tier,
-             external_maintainer_name, is_hosted, owner, last_validated)
+             external_maintainer_name, is_hosted, owner, source_data_dictionary_url,
+             temporal_coverage_start, temporal_coverage_end, temporal_resolution, last_validated)
             VALUES
             (s.full_table_name, s.subject, s.layer, s.description, s.public_health_relevance,
              s.spatial_resolution, s.spatial_coverage, s.source_provider_code, s.source_url,
              s.source_documentation_url, s.license, s.dua_required, s.dua_reference, s.access_tier,
-             s.external_maintainer_name, s.is_hosted, s.owner, CURRENT_DATE())
+             s.external_maintainer_name, s.is_hosted, s.owner, s.source_data_dictionary_url,
+             s.temporal_coverage_start, s.temporal_coverage_end, s.temporal_resolution,
+             CURRENT_DATE())
         """
     )
 
