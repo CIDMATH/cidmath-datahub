@@ -86,6 +86,7 @@ class TestDatasetCatalogEntry:
         assert e.temporal_coverage_end is None
         assert e.temporal_resolution is None
         assert e.known_limitations is None
+        assert e.derived_from is None
 
     def test_temporal_and_doc_fields_populated(self):
         e = _catalog_entry(
@@ -94,12 +95,14 @@ class TestDatasetCatalogEntry:
             temporal_coverage_end=date(2026, 12, 31),
             temporal_resolution="daily",
             known_limitations="CONUS-only",
+            derived_from=["ecdh_dev.weather_raw.noaa_nclimgrid_daily"],
         )
         assert e.source_data_dictionary_url == "https://example.org/readme.txt"
         assert e.temporal_coverage_start == date(2024, 1, 1)
         assert e.temporal_coverage_end == date(2026, 12, 31)
         assert e.temporal_resolution == "daily"
         assert e.known_limitations == "CONUS-only"
+        assert e.derived_from == ["ecdh_dev.weather_raw.noaa_nclimgrid_daily"]
 
 
 @pytest.mark.unit

@@ -457,6 +457,9 @@ def _register_dataset(
                 "CONUS-only: excludes Alaska, Hawaii, and US territories "
                 "(nClimGrid-Daily area-averages cover the contiguous US only)."
             ),
+            # Catalog-level lineage: derived from the raw landing. geography/time
+            # are referenced (FK) dimensions, not derivation sources, so excluded.
+            derived_from=[f"{catalog}.{SOURCE_SCHEMA}.{SOURCE_TABLE}"],
         ),
         registration.DatasetEngineeringEntry(
             full_table_name=full,
