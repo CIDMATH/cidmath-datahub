@@ -1,7 +1,8 @@
 """Register a materialized table in the ``_ops`` catalog metadata (ADR 0008).
 
-Every materialized analysis/reference table records two rows: one in
-``_ops.dataset_catalog`` (universal provenance — source, license, DUA, access
+Every materialized table that should be discoverable — analysis, reference,
+or a sourced processed table (e.g. weather, ADR 0025) — records two rows: one
+in ``_ops.dataset_catalog`` (universal provenance — source, license, DUA, access
 tier, public-health relevance) and one in ``_ops.dataset_engineering``
 (engineering state — update semantics, materialization type, cluster columns,
 pipeline reference). The MERGE that writes them is identical across every build
@@ -69,6 +70,7 @@ class DatasetCatalogEntry:
     temporal_coverage_start: date | None = None
     temporal_coverage_end: date | None = None
     temporal_resolution: str | None = None
+    known_limitations: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,7 @@ def register_dataset(
             T.StructField("temporal_coverage_start", T.DateType()),
             T.StructField("temporal_coverage_end", T.DateType()),
             T.StructField("temporal_resolution", T.StringType()),
+            T.StructField("known_limitations", T.StringType()),
         ]
     )
     cat_row: list[tuple[Any, ...]] = [
@@ -169,6 +172,7 @@ def register_dataset(
             catalog_entry.temporal_coverage_start,
             catalog_entry.temporal_coverage_end,
             catalog_entry.temporal_resolution,
+            catalog_entry.known_limitations,
         )
     ]
     cat_view = _safe_view_name("_tmp_reg_cat", full)
@@ -190,20 +194,22 @@ def register_dataset(
             source_data_dictionary_url = s.source_data_dictionary_url,
             temporal_coverage_start = s.temporal_coverage_start,
             temporal_coverage_end = s.temporal_coverage_end,
-            temporal_resolution = s.temporal_resolution, last_validated = CURRENT_DATE()
+            temporal_resolution = s.temporal_resolution,
+            known_limitations = s.known_limitations, last_validated = CURRENT_DATE()
         WHEN NOT MATCHED THEN INSERT
             (full_table_name, subject, layer, description, public_health_relevance,
              spatial_resolution, spatial_coverage, source_provider_code, source_url,
              source_documentation_url, license, dua_required, dua_reference, access_tier,
              external_maintainer_name, is_hosted, owner, source_data_dictionary_url,
-             temporal_coverage_start, temporal_coverage_end, temporal_resolution, last_validated)
+             temporal_coverage_start, temporal_coverage_end, temporal_resolution,
+             known_limitations, last_validated)
             VALUES
             (s.full_table_name, s.subject, s.layer, s.description, s.public_health_relevance,
              s.spatial_resolution, s.spatial_coverage, s.source_provider_code, s.source_url,
              s.source_documentation_url, s.license, s.dua_required, s.dua_reference, s.access_tier,
              s.external_maintainer_name, s.is_hosted, s.owner, s.source_data_dictionary_url,
              s.temporal_coverage_start, s.temporal_coverage_end, s.temporal_resolution,
-             CURRENT_DATE())
+             s.known_limitations, CURRENT_DATE())
         """
     )
 

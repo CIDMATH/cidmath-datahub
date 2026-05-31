@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import argparse
 import urllib.request
-from datetime import UTC, datetime
 from typing import Any
 
 from pyspark.sql import SparkSession
@@ -79,21 +78,6 @@ HTTP_TIMEOUT = 120
 # data is authoritative NOAA, so this flags conformance/unit regressions, not
 # real weather.
 TEMP_MIN_C, TEMP_MAX_C = -90.0, 60.0
-
-PROCESSED_SPARK_SCHEMA = T.StructType(
-    [
-        T.StructField("geo_level", T.StringType(), False),  # us_county | us_state
-        T.StructField("geoid", T.StringType(), False),  # conformed FIPS geoid
-        T.StructField("region_name", T.StringType(), False),  # source label, informational
-        T.StructField("variable", T.StringType(), False),  # prcp/tavg/tmax/tmin
-        T.StructField("unit", T.StringType(), False),  # mm | degC
-        T.StructField("obs_date", T.DateType(), False),
-        T.StructField("value", T.DoubleType(), True),
-        T.StructField("status", T.StringType(), False),  # scaled | prelim
-        T.StructField("source_file", T.StringType(), False),
-        T.StructField("processed_at", T.TimestampType(), False),
-    ]
-)
 
 # Conform-map DF: distinct (region_type, region_code) -> (geo_level, geoid).
 _CONFORM_SCHEMA = T.StructType(
@@ -187,7 +171,6 @@ def _write_processed(
     """
     src = f"{catalog}.{SOURCE_SCHEMA}.{SOURCE_TABLE}"
     full = f"{catalog}.{FULL_TABLE_REL}"
-    now = datetime.now(tz=UTC)
 
     spark.createDataFrame(conformed, _CONFORM_SCHEMA).createOrReplaceTempView("_tmp_conform_map")
     spark.sql(
@@ -203,7 +186,7 @@ def _write_processed(
             r.value                           AS value,
             r.status                          AS status,
             r.source_file                     AS source_file,
-            TIMESTAMP('{now.isoformat()}')    AS processed_at
+            current_timestamp()               AS processed_at
         FROM {src} r
         JOIN _tmp_conform_map c
           ON r.region_type = c.region_type AND r.region_code = c.region_code
@@ -434,6 +417,10 @@ def _register_dataset(
             temporal_coverage_start=cov_start,
             temporal_coverage_end=cov_end,
             temporal_resolution="daily",
+            known_limitations=(
+                "CONUS-only: excludes Alaska, Hawaii, and US territories "
+                "(nClimGrid-Daily area-averages cover the contiguous US only)."
+            ),
         ),
         registration.DatasetEngineeringEntry(
             full_table_name=full,
