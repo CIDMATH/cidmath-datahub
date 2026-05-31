@@ -17,6 +17,12 @@
 # already covers 1900-2099 so no time extension is needed. Pure-Python
 # conformance, so the env needs only the shared wheel.
 #
+# Conformance changes (e.g. a new NCEI->FIPS geoid override) leave stale rows
+# under the old geoid — merge_upsert never deletes. The non-blocking
+# nclimgrid_processed_stale_geoids DQ check WARNs on them; remediate with a
+# targeted DELETE of the stale (geo_level, geoid) then re-run, rather than
+# dropping the whole table (cheap for the full-history table).
+#
 # Deploy order: requires weather_raw (this bundle's raw job) and the _reference
 # geography/time tables to be built. See bundles/weather/src/build_nclimgrid_processed.py.
 

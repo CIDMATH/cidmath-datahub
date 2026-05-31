@@ -215,6 +215,7 @@ def _dq_checks(
     start_year: int,
     end_year: int,
     unconformed: list[dict[str, Any]],
+    conformed: list[dict[str, Any]],
 ) -> None:
     """Post-conformance DQ on weather_processed.noaa_nclimgrid_daily (ADR 0009).
 
@@ -229,10 +230,45 @@ def _dq_checks(
     4. value ranges — WARN: prcp >= 0 mm; temps within [-90, 60] degC. Flags a
        conformance/unit regression, not real weather.
     5. natural-key uniqueness over the window — FAIL.
+    6. stale geoids — WARN: (geo_level, geoid) present in the window that the
+       current conformance run did not produce — leftovers from a changed
+       conformance mapping, since merge_upsert never deletes. Recorded before
+       the blocking checks so it survives a later raise. Remediation: a
+       targeted DELETE of the stale keys, then re-run.
     """
     full = f"{catalog}.{FULL_TABLE_REL}"
     where = f"year(obs_date) BETWEEN {start_year} AND {end_year}"
     total = spark.sql(f"SELECT COUNT(*) AS n FROM {full} WHERE {where}").collect()[0]["n"]
+
+    # 6. Stale-geoid guard (WARN, recorded first so it survives a later blocking
+    # raise). merge_upsert keys on (geo_level, geoid, variable, obs_date) and
+    # never deletes, so if a conformance change remaps a code to a different
+    # geoid, the old geoid's rows linger. The blocking FK check (2) catches stale
+    # *invalid* geoids; this catches stale *valid* ones, which would otherwise
+    # double-count silently. Remediation: targeted DELETE of the stale keys then
+    # re-run (cheaper than a full drop+rebuild on the full-history table).
+    expected_pairs = {(c["geo_level"], c["geoid"]) for c in conformed}
+    in_table = spark.sql(f"SELECT DISTINCT geo_level, geoid FROM {full} WHERE {where}").collect()
+    stale = sorted(
+        (r["geo_level"], r["geoid"])
+        for r in in_table
+        if (r["geo_level"], r["geoid"]) not in expected_pairs
+    )
+    recorder.record(
+        table_name=FULL_TABLE_REL,
+        check_name="nclimgrid_processed_stale_geoids",
+        category=DQCategory.BUSINESS_RULE,
+        severity=DQSeverity.WARN,
+        passed=not stale,
+        failing_row_count=len(stale),
+        total_row_count=total,
+        details={
+            "sample_stale": stale[:10],
+            "remediation": "targeted DELETE of the stale (geo_level, geoid), then re-run",
+        }
+        if stale
+        else None,
+    )
 
     # 1. NCEI->FIPS coverage (blocking).
     recorder.record(
@@ -469,7 +505,9 @@ def run(
     with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
         if conformed:
             _write_processed(spark, catalog, start_year, end_year, conformed)
-        _dq_checks(recorder, spark, catalog, model_catalog, start_year, end_year, unconformed)
+        _dq_checks(
+            recorder, spark, catalog, model_catalog, start_year, end_year, unconformed, conformed
+        )
 
     _comment_table(spark, catalog)
 
