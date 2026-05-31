@@ -38,6 +38,7 @@ The subject is already in the schema name. Never repeat it in the table name (`w
 | `hrsa` | Health Resources and Services Administration |
 | `hhs` | US Department of Health and Human Services |
 | `nih` | National Institutes of Health |
+| `noaa` | US National Oceanic and Atmospheric Administration (incl. NCEI) |
 | `who` | World Health Organization |
 | `ga_dph` | Georgia Department of Public Health |
 | `ga_eip` | Georgia Emerging Infections Program |

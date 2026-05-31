@@ -1,5 +1,5 @@
 # Job that lands NOAA nClimGrid-Daily cty+ste area averages into
-# weather_raw.nclimgrid_daily (ADR 0025 slice 1: raw).
+# weather_raw.noaa_nclimgrid_daily (ADR 0025 slice 1: raw).
 #
 # Discovers the monthly CSVs under access/averages/<year>/, downloads them
 # (throttled, politely), parses faithfully (NCEI region codes preserved), and
@@ -21,7 +21,7 @@ resources:
       name: "[weather] build_nclimgrid_raw"
       description: |
         Lands NOAA nClimGrid-Daily county + state daily area averages into
-        weather_raw.nclimgrid_daily, faithful to source (NCEI codes preserved).
+        weather_raw.noaa_nclimgrid_daily, faithful to source (NCEI codes preserved).
         merge_upsert on the natural key. CONUS-only. ADR 0025 slice 1 (raw).
 
       tasks:

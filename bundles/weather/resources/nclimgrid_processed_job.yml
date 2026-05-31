@@ -1,21 +1,21 @@
-# Job that conforms weather_raw.nclimgrid_daily into
-# weather_processed.nclimgrid_daily (ADR 0025 slice 2: processed).
+# Job that conforms weather_raw.noaa_nclimgrid_daily into
+# weather_processed.noaa_nclimgrid_daily (ADR 0025 slice 2: processed).
 #
 # Pulls NOAA's NCEI->FIPS cross-reference at runtime (docs-first), translates
 # the NCEI region codes to FIPS geoids, attaches units (mm / degC), and
 # merge_upserts on (geo_level, geoid, variable, obs_date). DQ validates NCEI->FIPS
 # coverage and the geoid FK to geography (blocking), plus the obs_date -> time
-# FK (WARN — time covers 2015-2035, so full-history backfill rows fall outside
-# until time is extended).
+# FK (WARN — time covers 1900-2099, so the full 1951-present history resolves
+# cleanly; the WARN only guards against an unexpected out-of-range obs_date).
 #
 # Reads/writes the source-aligned catalog (${var.source_catalog}); FKs
 # cross-catalog against the geography/time reference in ${var.model_catalog}.
 #
 # Default parameters process the recent review window (2024-2026), matching the
 # raw job's default. For the full 1951-present backfill, override
-# --start-year / --end-year at run time (Run now with different parameters), and
-# extend time.calendar_date first if the time-dim WARN matters for downstream
-# joins. Pure-Python conformance, so the env needs only the shared wheel.
+# --start-year / --end-year at run time (Run now with different parameters); time
+# already covers 1900-2099 so no time extension is needed. Pure-Python
+# conformance, so the env needs only the shared wheel.
 #
 # Deploy order: requires weather_raw (this bundle's raw job) and the _reference
 # geography/time tables to be built. See bundles/weather/src/build_nclimgrid_processed.py.
@@ -25,8 +25,8 @@ resources:
     build_nclimgrid_processed_weather:
       name: "[weather] build_nclimgrid_processed"
       description: |
-        Conforms weather_raw.nclimgrid_daily to FIPS geography + time into
-        weather_processed.nclimgrid_daily (long-form, units mm/degC).
+        Conforms weather_raw.noaa_nclimgrid_daily to FIPS geography + time into
+        weather_processed.noaa_nclimgrid_daily (long-form, units mm/degC).
         merge_upsert on the natural key. CONUS-only. ADR 0025 slice 2 (processed).
 
       tasks:

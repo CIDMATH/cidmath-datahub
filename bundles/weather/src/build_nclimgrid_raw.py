@@ -1,9 +1,9 @@
-"""Land NOAA nClimGrid-Daily area averages into weather_raw.nclimgrid_daily.
+"""Land NOAA nClimGrid-Daily area averages into weather_raw.noaa_nclimgrid_daily.
 
 ADR 0025 slice 1 (raw only). Faithful ingest: discover the cty + ste monthly
 CSVs under ``access/averages/<year>/``, download them politely, parse via
 ``cidmath_datahub.weather.nclimgrid`` (NCEI region codes preserved exactly as
-published), and ``merge_upsert`` into ``weather_raw.nclimgrid_daily`` keyed on
+published), and ``merge_upsert`` into ``weather_raw.noaa_nclimgrid_daily`` keyed on
 (region_type, region_code, variable, obs_date). There is **no** NCEI->FIPS
 conformance here — that is the processed layer (a later slice); raw stays
 faithful to the source so it can be reviewed before processing is designed.
@@ -46,7 +46,7 @@ from cidmath_datahub.weather import nclimgrid as ncl
 log = get_logger(__name__)
 
 SCHEMA = "weather_raw"
-TABLE = "nclimgrid_daily"
+TABLE = "noaa_nclimgrid_daily"
 FULL_TABLE_REL = f"{SCHEMA}.{TABLE}"
 
 BASE_URL = "https://www.ncei.noaa.gov/data/nclimgrid-daily/access/averages"
@@ -139,7 +139,7 @@ def _dq_checks(
     end_year: int,
     files_loaded: int,
 ) -> None:
-    """Post-load DQ on weather_raw.nclimgrid_daily for the loaded year range (ADR 0009).
+    """Post-load DQ on weather_raw.noaa_nclimgrid_daily for the loaded year range (ADR 0009).
 
     Query-based (not in-memory) so it scales to the full backfill:
       1. natural-key uniqueness over the loaded range — FAIL.
@@ -230,9 +230,13 @@ def run(
     region_types = region_types or {"cty", "ste"}
     pipeline_ref = "bundles/weather/src/build_nclimgrid_raw.py"
     log.info(
-        "Building weather_raw.nclimgrid_daily",
-        extra={"catalog": catalog, "start_year": start_year, "end_year": end_year,
-               "region_types": sorted(region_types)},
+        "Building weather_raw.noaa_nclimgrid_daily",
+        extra={
+            "catalog": catalog,
+            "start_year": start_year,
+            "end_year": end_year,
+            "region_types": sorted(region_types),
+        },
     )
 
     _ensure_table(spark, catalog)
@@ -261,7 +265,7 @@ def run(
     grants.grant_schema_engineer(spark, catalog, SCHEMA, data_engineers_group)
 
     log.info(
-        "weather_raw.nclimgrid_daily build complete",
+        "weather_raw.noaa_nclimgrid_daily build complete",
         extra={"catalog": catalog, "files_loaded": files_loaded},
     )
 

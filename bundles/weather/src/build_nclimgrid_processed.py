@@ -1,4 +1,4 @@
-"""Conform weather_raw.nclimgrid_daily into weather_processed.nclimgrid_daily.
+"""Conform weather_raw.noaa_nclimgrid_daily into weather_processed.noaa_nclimgrid_daily.
 
 ADR 0025 slice 2 (processed). Reads the faithful raw landing (NCEI region codes,
 sentinel-cleared values) and conforms it to the shared reference dimensions:
@@ -53,9 +53,9 @@ log = get_logger(__name__)
 
 # Raw (faithful) and processed (conformed) both live in the source-aligned catalog.
 SOURCE_SCHEMA = "weather_raw"
-SOURCE_TABLE = "nclimgrid_daily"
+SOURCE_TABLE = "noaa_nclimgrid_daily"
 SCHEMA = "weather_processed"
-TABLE = "nclimgrid_daily"
+TABLE = "noaa_nclimgrid_daily"
 FULL_TABLE_REL = f"{SCHEMA}.{TABLE}"
 
 # Reference dimensions (integrated catalog) this layer FKs against, cross-catalog.
@@ -91,7 +91,7 @@ PROCESSED_SPARK_SCHEMA = T.StructType(
         T.StructField("value", T.DoubleType(), True),
         T.StructField("status", T.StringType(), False),  # scaled | prelim
         T.StructField("source_file", T.StringType(), False),
-        T.StructField("conformed_at", T.TimestampType(), False),
+        T.StructField("processed_at", T.TimestampType(), False),
     ]
 )
 
@@ -125,7 +125,7 @@ def _ensure_table(spark: SparkSession, catalog: str) -> None:
         CREATE TABLE IF NOT EXISTS {catalog}.{FULL_TABLE_REL} (
             geo_level STRING, geoid STRING, region_name STRING,
             variable STRING, unit STRING, obs_date DATE, value DOUBLE,
-            status STRING, source_file STRING, conformed_at TIMESTAMP
+            status STRING, source_file STRING, processed_at TIMESTAMP
         ) USING delta
         CLUSTER BY (variable, geo_level, obs_date)
         """
@@ -203,7 +203,7 @@ def _write_processed(
             r.value                           AS value,
             r.status                          AS status,
             r.source_file                     AS source_file,
-            TIMESTAMP('{now.isoformat()}')    AS conformed_at
+            TIMESTAMP('{now.isoformat()}')    AS processed_at
         FROM {src} r
         JOIN _tmp_conform_map c
           ON r.region_type = c.region_type AND r.region_code = c.region_code
@@ -218,7 +218,7 @@ def _write_processed(
            AND t.variable = s.variable AND t.obs_date = s.obs_date
         WHEN MATCHED THEN UPDATE SET
             region_name = s.region_name, unit = s.unit, value = s.value,
-            status = s.status, source_file = s.source_file, conformed_at = s.conformed_at
+            status = s.status, source_file = s.source_file, processed_at = s.processed_at
         WHEN NOT MATCHED THEN INSERT *
         """
     )
@@ -233,16 +233,16 @@ def _dq_checks(
     end_year: int,
     unconformed: list[dict[str, Any]],
 ) -> None:
-    """Post-conformance DQ on weather_processed.nclimgrid_daily (ADR 0009).
+    """Post-conformance DQ on weather_processed.noaa_nclimgrid_daily (ADR 0009).
 
     1. NCEI->FIPS coverage — FAIL (blocking): any raw region code that didn't
        conform to a geoid. A new/renamed NCEI code must be mapped, not dropped.
     2. geoid FK to geography.us_county / us_state (vintage 2020, cross-catalog)
        — FAIL (blocking, ADR 0023 P0-3): conformed geoids must exist in the
        reference.
-    3. obs_date FK to time.calendar_date — WARN: the time dimension currently
-       covers 2015-2035; full-history (1951-) rows fall outside until time is
-       extended. WARN, not blocking, so backfill isn't gated on it (ADR 0025).
+    3. obs_date FK to time.calendar_date — WARN: time covers 1900-2099, so
+       nClimGrid's 1951-present history resolves cleanly; the WARN guards
+       against an unexpected out-of-range obs_date, not an expected gap.
     4. value ranges — WARN: prcp >= 0 mm; temps within [-90, 60] degC. Flags a
        conformance/unit regression, not real weather.
     5. natural-key uniqueness over the window — FAIL.
@@ -301,7 +301,7 @@ def _dq_checks(
             f"Conformed geoids absent from geography vintage {US_VINTAGE}: {fk_samples}"
         )
 
-    # 3. obs_date FK to time.calendar_date (WARN — time covers 2015-2035 only).
+    # 3. obs_date FK to time.calendar_date (WARN — time covers 1900-2099; guard).
     cal = f"{model_catalog}.{TIME_SCHEMA}.calendar_date"
     try:
         out_of_time = spark.sql(
@@ -322,7 +322,7 @@ def _dq_checks(
         passed=out_of_time == 0,
         failing_row_count=int(out_of_time),
         total_row_count=total,
-        details={"note": "time.calendar_date covers 2015-2035; extend for full backfill"}
+        details={"note": "obs_date outside time.calendar_date (covers 1900-2099)"}
         if out_of_time
         else None,
     )
@@ -393,7 +393,7 @@ def _register_dataset(
     cov_start: Any,
     cov_end: Any,
 ) -> None:
-    """Register weather_processed.nclimgrid_daily metadata (ADR 0008).
+    """Register weather_processed.noaa_nclimgrid_daily metadata (ADR 0008).
 
     The first weather table to register: spatial + temporal + externally sourced,
     so it exercises the registration temporal/doc-URL extension (ADR 0025).
@@ -418,7 +418,7 @@ def _register_dataset(
             ),
             spatial_resolution="us_state, us_county",
             spatial_coverage="conus",
-            source_provider_code="noaa_ncei",
+            source_provider_code="noaa",
             source_url=SOURCE_URL,
             source_documentation_url=DOC_BASE,
             license="public domain (U.S. Government work, 17 U.S.C. 105)",
@@ -456,7 +456,7 @@ def run(
     spark = SparkSession.builder.getOrCreate()
     pipeline_ref = "bundles/weather/src/build_nclimgrid_processed.py"
     log.info(
-        "Building weather_processed.nclimgrid_daily",
+        "Building weather_processed.noaa_nclimgrid_daily",
         extra={
             "catalog": catalog,
             "model_catalog": model_catalog,
@@ -496,7 +496,7 @@ def run(
     grants.grant_schema_engineer(spark, catalog, SCHEMA, data_engineers_group)
 
     log.info(
-        "weather_processed.nclimgrid_daily build complete",
+        "weather_processed.noaa_nclimgrid_daily build complete",
         extra={"catalog": catalog, "coverage": [str(cov["lo"]), str(cov["hi"])]},
     )
 
