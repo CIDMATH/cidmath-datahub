@@ -92,6 +92,7 @@ both positive and negative consequences honestly.
 | [0024](0024-international-geography-vintaging.md) | International geography vintaging — align country/country_subdivision/subnational with the US vintage model (amends ADR 0022 temporal sub-decision) | Accepted |
 | [0025](0025-weather-subject-bundle-nclimgrid.md) | Weather subject bundle: NOAA nClimGrid-Daily county+state area-averages (first source-aligned subject; NCEI→FIPS conformance to geography + time) | Accepted |
 | [0026](0026-job-vs-ldp-pipeline-selection.md) | Job vs Lakeflow Declarative Pipeline selection — consolidated criterion (when to use a Job vs LDP), DQ implications, analysis-layer LDP pilot | Accepted |
+| [0027](0027-bundle-authoring-and-pipeline-standardization.md) | Bundle authoring + pipeline standardization — `common/pipeline.run_build` orchestration seam, thin-entrypoint contract, DAB template + authoring-guide plan (closes the pipeline-standardization backlog item) | Accepted |
 
 ## Future ADRs (backlog)
 
@@ -99,7 +100,7 @@ The following are known gaps to be addressed when the need is concrete. Captured
 
 | Anticipated # | Topic | Likely trigger |
 |---|---|---|
-| TBD | **Pipeline standardization and modular composition** | Partially addressed by ADR 0023 (shared GADM IO module) and ADR 0026 (job-vs-LDP selection criterion). Remaining: codify the full reference-pipeline pattern and how to compose source ingestion + processing + analysis steps consistently, once the analysis layer exists to generalize from. |
+| ~~TBD~~ | ~~**Pipeline standardization and modular composition**~~ | **Resolved by ADR 0027** (`run_build` seam + thin-entrypoint contract + DAB template/authoring-guide plan), building on ADR 0023 (shared GADM IO) and ADR 0026 (job-vs-LDP). Remaining follow-ons (template, authoring guide, CI guardrails) are tracked in ADR 0027's consequences, not as a separate backlog item. |
 | TBD | Schema evolution and breaking-change policy | First time a source adds a column or we need to rename one |
 | TBD | Data retention and VACUUM policy | When storage cost or commercial-data contract expiry forces the question |
 | TBD | Notebook-to-pipeline graduation policy | First exploratory notebook that becomes a candidate for productionization |
