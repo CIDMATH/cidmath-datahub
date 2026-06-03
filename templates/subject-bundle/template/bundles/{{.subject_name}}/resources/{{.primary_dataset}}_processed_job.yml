@@ -1,0 +1,42 @@
+# Processed/conformance job for {{.subject_name}} ({{.provider_code}}_{{.primary_dataset}}).
+# Conforms {{.subject_name}}_raw -> {{.subject_name}}_processed, FK to geography/time in
+# the integrated catalog. Deploy-only (no auto-run): trigger from the Databricks UI.
+# Deploy order: requires the raw job and the _reference geography/time tables.
+
+resources:
+  jobs:
+    build_{{.primary_dataset}}_processed_{{.subject_name}}:
+      name: "[{{.subject_name}}] build_{{.primary_dataset}}_processed"
+      description: |
+        Conforms {{.subject_name}}_raw.{{.provider_code}}_{{.primary_dataset}} to FIPS
+        geography + time into {{.subject_name}}_processed.{{.provider_code}}_{{.primary_dataset}}.
+        Update semantics: {{.update_semantics}}. ADR 0025 / 0027.
+
+      tasks:
+        - task_key: build_{{.primary_dataset}}_processed
+          spark_python_task:
+            python_file: ../src/build_{{.primary_dataset}}_processed.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
+              - "${var.model_catalog}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+          environment_key: {{.subject_name}}_processed_env
+
+      environments:
+        - environment_key: {{.subject_name}}_processed_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 21600
+
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

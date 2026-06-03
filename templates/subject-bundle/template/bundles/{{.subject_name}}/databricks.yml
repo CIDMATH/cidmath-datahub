@@ -1,0 +1,19 @@
+# {{.subject_name}} subject bundle (ADR 0004 bundle-per-subject; ADR 0027 authoring pattern).
+#
+# Writes to the source-aligned catalog ecdh_<env>: schemas {{.subject_name}}_raw,
+# {{.subject_name}}_processed, and the bare {{.subject_name}} (analysis layer, added
+# when a real cross-source use case warrants it). Deploys after _platform
+# (catalogs/_ops) and _reference (geography/time, which the processed layer FKs
+# against). See ADR 0001/0002/0003.
+
+include:
+  - ../../databricks-common.yml
+  - resources/*.yml
+
+bundle:
+  name: cidmath-datahub-{{.subject_name}}
+
+sync:
+  paths:
+    - ../../src
+    - ./src

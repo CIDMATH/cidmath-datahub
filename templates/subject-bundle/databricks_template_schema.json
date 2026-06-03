@@ -1,0 +1,28 @@
+{
+  "welcome_message": "CIDMATH Data Hub - new subject bundle (ADR 0027). Scaffolds a job-based raw+processed bundle wired to the run_build seam. You fill the TODO hooks; transform logic goes in src/cidmath_datahub/<subject>/.",
+  "properties": {
+    "subject_name": {
+      "type": "string",
+      "description": "Subject area in snake_case (the schema + bundle name), e.g. wastewater",
+      "order": 1
+    },
+    "provider_code": {
+      "type": "string",
+      "description": "Primary source provider code per ADR 0006 (e.g. cdc, noaa, census). If new, add it to ADR 0006's registry in the same PR.",
+      "order": 2
+    },
+    "primary_dataset": {
+      "type": "string",
+      "description": "Dataset identifier in snake_case; the table name becomes <provider_code>_<primary_dataset> (e.g. nwss -> cdc_nwss)",
+      "order": 3
+    },
+    "update_semantics": {
+      "type": "string",
+      "description": "Update semantics for the processed table (ADR 0007 controlled vocabulary)",
+      "enum": ["merge_upsert", "append_only", "snapshot_replace", "merge_scd2", "full_refresh"],
+      "default": "merge_upsert",
+      "order": 4
+    }
+  },
+  "success_message": "Scaffolded bundles/{{.subject_name}}. Next: (1) implement the TODO hooks in bundles/{{.subject_name}}/src/build_{{.primary_dataset}}_*.py and the logic in src/cidmath_datahub/{{.subject_name}}/{{.primary_dataset}}.py; (2) copy .github/workflows/deploy-weather.yml to deploy-{{.subject_name}}.yml and swap the subject name; (3) run ruff + pytest. See docs/authoring-a-bundle.md. Deploy order: _platform -> _reference -> this bundle."
+}

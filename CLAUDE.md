@@ -48,6 +48,7 @@ Reference data build-out. The `_platform` bundle, the shared Python package, and
 - `_reference` for canonical reference data: geography, time, code systems, pathogen taxonomy. The legitimate exception to "no data movement in platform-like bundles." (ADR 0014)
 - `<subject>` for each subject area (one bundle per subject). One bundle per subject; do not fragment by source.
 - Deploy order: `_platform` → `_reference` → subject bundles.
+- **New subject bundle:** scaffold with `databricks bundle init templates/subject-bundle` (generates a job-based raw+processed bundle wired to the `run_build` seam); then follow `docs/authoring-a-bundle.md`. Entrypoints stay thin and call `cidmath_datahub.common.pipeline.run_build` (ADR 0011, 0027).
 
 ### Language and style
 
@@ -115,6 +116,9 @@ Everything else is documented and review-driven. Lint-style warnings surface dri
 - ADR index: `docs/adr/README.md`
 - Operations: `docs/operations.md`
 - Onboarding: `docs/onboarding.md`
+- Authoring a subject bundle: `docs/authoring-a-bundle.md`
+- Subject-bundle template: `templates/subject-bundle/` (`databricks bundle init`)
+- Orchestration seam: `src/cidmath_datahub/common/pipeline.py` (`run_build`)
 
 ## Contact
 

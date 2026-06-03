@@ -1,0 +1,39 @@
+# Raw ingest job for {{.subject_name}} ({{.provider_code}}_{{.primary_dataset}}).
+# Lands the source faithfully into {{.subject_name}}_raw.{{.provider_code}}_{{.primary_dataset}}.
+# Deploy-only (no auto-run): trigger from the Databricks UI. See ADR 0025 / 0027.
+
+resources:
+  jobs:
+    build_{{.primary_dataset}}_raw_{{.subject_name}}:
+      name: "[{{.subject_name}}] build_{{.primary_dataset}}_raw"
+      description: |
+        Lands {{.provider_code}} {{.primary_dataset}} into
+        {{.subject_name}}_raw.{{.provider_code}}_{{.primary_dataset}}, faithful to source.
+
+      tasks:
+        - task_key: build_{{.primary_dataset}}_raw
+          spark_python_task:
+            python_file: ../src/build_{{.primary_dataset}}_raw.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+          environment_key: {{.subject_name}}_raw_env
+
+      environments:
+        - environment_key: {{.subject_name}}_raw_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 21600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

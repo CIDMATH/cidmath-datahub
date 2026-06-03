@@ -40,6 +40,10 @@ repos:
       - id: check-yaml
         # DAB YAML uses ${var.x} interpolation and custom tags; don't fail on
         # unknown constructs. check-yaml still catches genuine syntax errors.
+        # Exclude templates/: those are Go-template (databricks bundle init)
+        # sources containing {{.var}} placeholders — not valid YAML until
+        # rendered, so check-yaml can't (and shouldn't) parse them.
+        exclude: '^templates/'
       - id: check-added-large-files
         args: [--maxkb=1024]
       - id: check-merge-conflict
