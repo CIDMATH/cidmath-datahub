@@ -146,6 +146,8 @@ def _dq_checks(
       2. region_type / variable vocabulary — FAIL (faithful-landing guard).
       3. value null rate — INFO (sentinel-derived missingness, expected).
       4. files-discovered sanity — WARN (zero files for a non-empty range is wrong).
+      5. cell completeness/density over the loaded window — WARN (each elapsed
+         year x variable x region_type should be days_in_year x full region set).
     """
     full = f"{catalog}.{FULL_TABLE_REL}"
     where = f"year(obs_date) BETWEEN {start_year} AND {end_year}"
@@ -215,6 +217,63 @@ def _dq_checks(
         failing_row_count=0 if files_loaded > 0 else 1,
         total_row_count=files_loaded,
         details={"files_loaded": files_loaded, "year_range": [start_year, end_year]},
+    )
+
+    # 5. Cell completeness / density (WARN, CARDINALITY). Each fully-elapsed
+    # (year, variable, region_type) cell in the loaded window should be dense:
+    # every calendar day of the year x the full region set. Catches missing
+    # months / days / regions that a month-count check misses. The current
+    # calendar year is exempt (legitimately partial). Expected region cardinality
+    # is the union across the whole table (the fixed nClimGrid county/state set),
+    # so even a single-year run compares against the canonical set, not itself.
+    # WARN, not FAIL: a genuine early-source gap should surface, not abort a
+    # long backfill chunk; re-run the chunk if it's an ingest gap.
+    incomplete = spark.sql(
+        f"""
+        WITH full_set AS (
+            SELECT region_type, COUNT(DISTINCT region_code) AS n_regions
+            FROM {full}
+            GROUP BY region_type
+        ),
+        cell AS (
+            SELECT year(obs_date) AS yr, variable, region_type,
+                   COUNT(*) AS actual_rows,
+                   COUNT(DISTINCT obs_date) AS distinct_days,
+                   COUNT(DISTINCT region_code) AS distinct_regions
+            FROM {full}
+            WHERE {where} AND year(obs_date) < year(current_date())
+            GROUP BY year(obs_date), variable, region_type
+        )
+        SELECT c.yr, c.variable, c.region_type, c.actual_rows, c.distinct_days,
+               datediff(make_date(c.yr + 1, 1, 1), make_date(c.yr, 1, 1)) AS days_in_year,
+               c.distinct_regions, f.n_regions AS expected_regions
+        FROM cell c JOIN full_set f ON c.region_type = f.region_type
+        WHERE c.distinct_days <> datediff(make_date(c.yr + 1, 1, 1), make_date(c.yr, 1, 1))
+           OR c.distinct_regions <> f.n_regions
+           OR c.actual_rows
+              <> datediff(make_date(c.yr + 1, 1, 1), make_date(c.yr, 1, 1)) * f.n_regions
+        ORDER BY c.yr, c.variable, c.region_type
+        """
+    ).collect()
+    incomplete_cells = [
+        {
+            "year": r["yr"],
+            "variable": r["variable"],
+            "region_type": r["region_type"],
+            "actual_rows": int(r["actual_rows"]),
+            "expected_rows": int(r["days_in_year"]) * int(r["expected_regions"]),
+        }
+        for r in incomplete
+    ]
+    recorder.record(
+        table_name=FULL_TABLE_REL,
+        check_name="nclimgrid_raw_cell_completeness",
+        category=DQCategory.CARDINALITY,
+        severity=DQSeverity.WARN,
+        passed=not incomplete_cells,
+        failing_row_count=len(incomplete_cells),
+        total_row_count=int(total),
+        details={"sample_incomplete_cells": incomplete_cells[:10]} if incomplete_cells else None,
     )
 
 
