@@ -588,3 +588,53 @@ def normalize_crosswalk_rows(
                 }
             )
     return rows
+
+
+# --- User-facing hierarchical-filter views (ADR 0028) -----------------------
+# Convenience views that denormalize stable parent *display* attributes (state
+# name/USPS/HHS region; county name) onto child levels, so analysts can filter
+# by the human-readable parent ("counties in Georgia", "tracts in Fulton
+# County") without hand-writing the hierarchy joins. The parent *geoids* are
+# already on the child tables (us_county.state_geoid; us_tract.state_geoid +
+# county_geoid), so code-based filtering needs no view; these add the labels.
+# Views (not denormalized base columns) keep the canonical entity tables
+# normalized at zero storage/refresh cost. Joins are vintage-keyed and INNER --
+# every child has a valid parent (FK integrity, ADR 0023 P0-3) -- and the build
+# asserts each view's rowcount equals its base table's to catch any orphan.
+
+
+def us_enriched_view_definitions(catalog: str) -> dict[str, str]:
+    """Return ``{fully_qualified_view_name: CREATE OR REPLACE VIEW sql}`` (ADR 0028).
+
+    - ``us_county_enriched`` = ``us_county`` + state name / USPS / HHS region.
+    - ``us_tract_enriched``  = ``us_tract`` + county name + state name / USPS / HHS region.
+
+    ZCTAs are intentionally excluded: they cross county/state lines and have no
+    single nesting parent. ``<child>.*`` keeps every base column (the county's
+    own ``name`` stays ``name``; the parent's is aliased ``state_name`` etc.).
+    """
+    g = f"{catalog}.geography"
+    county = (
+        f"CREATE OR REPLACE VIEW {g}.us_county_enriched AS\n"
+        "SELECT c.*,\n"
+        "       s.name AS state_name,\n"
+        "       s.stusps AS state_stusps,\n"
+        "       s.hhs_region AS state_hhs_region\n"
+        f"FROM {g}.us_county c\n"
+        f"JOIN {g}.us_state s ON c.state_geoid = s.geoid AND c.vintage = s.vintage"
+    )
+    tract = (
+        f"CREATE OR REPLACE VIEW {g}.us_tract_enriched AS\n"
+        "SELECT t.*,\n"
+        "       co.name AS county_name,\n"
+        "       s.name AS state_name,\n"
+        "       s.stusps AS state_stusps,\n"
+        "       s.hhs_region AS state_hhs_region\n"
+        f"FROM {g}.us_tract t\n"
+        f"JOIN {g}.us_county co ON t.county_geoid = co.geoid AND t.vintage = co.vintage\n"
+        f"JOIN {g}.us_state s ON t.state_geoid = s.geoid AND t.vintage = s.vintage"
+    )
+    return {
+        f"{g}.us_county_enriched": county,
+        f"{g}.us_tract_enriched": tract,
+    }

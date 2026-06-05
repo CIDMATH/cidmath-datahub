@@ -352,3 +352,34 @@ class TestNormalizeCrosswalkRows:
 
     def test_weight_kinds_vocabulary(self):
         assert set(geo.NHGIS_WEIGHT_COLUMNS.values()) <= set(geo.CROSSWALK_WEIGHT_KINDS)
+
+
+@pytest.mark.unit
+class TestUsEnrichedViewDefinitions:
+    CAT = "ecdh_model_dev"
+
+    def test_returns_county_and_tract_views(self):
+        defs = geo.us_enriched_view_definitions(self.CAT)
+        assert set(defs) == {
+            f"{self.CAT}.geography.us_county_enriched",
+            f"{self.CAT}.geography.us_tract_enriched",
+        }
+
+    def test_county_view_joins_state_on_geoid_and_vintage(self):
+        sql = geo.us_enriched_view_definitions(self.CAT)[f"{self.CAT}.geography.us_county_enriched"]
+        assert f"CREATE OR REPLACE VIEW {self.CAT}.geography.us_county_enriched AS" in sql
+        assert f"FROM {self.CAT}.geography.us_county c" in sql
+        assert f"JOIN {self.CAT}.geography.us_state s ON " in sql
+        assert "c.state_geoid = s.geoid AND c.vintage = s.vintage" in sql
+        assert "s.stusps AS state_stusps" in sql
+        assert "s.name AS state_name" in sql
+
+    def test_tract_view_joins_county_then_state_vintage_keyed(self):
+        sql = geo.us_enriched_view_definitions(self.CAT)[f"{self.CAT}.geography.us_tract_enriched"]
+        assert "co.name AS county_name" in sql
+        assert "t.county_geoid = co.geoid AND t.vintage = co.vintage" in sql
+        assert "t.state_geoid = s.geoid AND t.vintage = s.vintage" in sql
+
+    def test_zcta_is_not_enriched(self):
+        defs = geo.us_enriched_view_definitions(self.CAT)
+        assert not any("zcta" in name for name in defs)

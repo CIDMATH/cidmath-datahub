@@ -93,6 +93,7 @@ both positive and negative consequences honestly.
 | [0025](0025-weather-subject-bundle-nclimgrid.md) | Weather subject bundle: NOAA nClimGrid-Daily county+state area-averages (first source-aligned subject; NCEI→FIPS conformance to geography + time) | Accepted |
 | [0026](0026-job-vs-ldp-pipeline-selection.md) | Job vs Lakeflow Declarative Pipeline selection — consolidated criterion (when to use a Job vs LDP), DQ implications, analysis-layer LDP pilot | Accepted |
 | [0027](0027-bundle-authoring-and-pipeline-standardization.md) | Bundle authoring + pipeline standardization — `common/pipeline.run_build` orchestration seam, thin-entrypoint contract, DAB template + authoring-guide plan (closes the pipeline-standardization backlog item) | Accepted |
+| [0028](0028-geography-hierarchical-filter-views.md) | Geography hierarchical-filter views — `us_county_enriched`/`us_tract_enriched` denormalize parent labels via vintage-keyed joins for filtering child geographies by readable parent; views over denormalized columns (first `run_build` adopter) | Accepted |
 
 ## Future ADRs (backlog)
 
@@ -111,6 +112,7 @@ The following are known gaps to be addressed when the need is concrete. Captured
 | TBD | Delta Sharing for external consumers | First external partner request |
 | TBD | Cost management and budget alerts | Once meaningful spend accrues |
 | TBD | Logging conventions | Stub now; formalize when patterns diverge |
+| ~~TBD~~ | ~~**Geography parent-attribute ergonomics (hierarchical filtering)**~~ | **Resolved by ADR 0028** — convenience views (`geography.us_county_enriched`, `us_tract_enriched`) denormalize parent labels via vintage-keyed joins; the chosen views-over-denormalized-columns approach keeps base tables normalized. |
 
 ## Further reading
 

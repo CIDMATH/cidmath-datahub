@@ -1,0 +1,54 @@
+# Job that builds the geography hierarchical-filter views (ADR 0028):
+# geography.us_county_enriched and geography.us_tract_enriched.
+#
+# Convenience views denormalizing stable parent display attributes (state
+# name/USPS/HHS region; county name) onto the child levels so analysts can
+# filter by the human-readable parent without hierarchy joins. The parent
+# geoids already live on the child tables; these add the labels. No
+# base-table denormalization (canonical entity tables stay normalized).
+#
+# Thin entrypoint over the run_build seam (ADR 0027). Pure SQL over existing
+# tables, so the env needs only the shared wheel (no geospatial deps). Deploy
+# order: after build_geography (the us_state/us_county/us_tract entity tables).
+#
+# See bundles/_reference/src/build_geography_views.py and ADR 0028.
+
+resources:
+  jobs:
+    build_geography_views_reference:
+      name: "[_reference] build_geography_views_reference"
+      description: |
+        Builds geography.us_county_enriched + us_tract_enriched (parent
+        name/USPS/HHS region denormalized via vintage-keyed joins) for
+        hierarchical filtering. Views; blocking rowcount-parity DQ. ADR 0028.
+
+      tasks:
+        - task_key: build_geography_views
+          spark_python_task:
+            python_file: ../src/build_geography_views.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_views_env
+
+      environments:
+        - environment_key: geography_views_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 3600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

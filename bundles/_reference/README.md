@@ -48,6 +48,17 @@ In CI, `deploy-reference.yml` (added when this bundle is wired into the deploy m
 
 The default coverage is **1900 through 2099** (calendar dates and epi-weeks) — `calendar_date` runs 1900-01-01 to 2099-12-31. That's ~73k calendar rows, trivial for Delta, and wide enough for any historical or forward-looking analysis. The range is a job parameter, adjustable without code changes. Both tables are written sorted ascending (by `date` / `start_date`).
 
+## Hierarchical-filter views (ADR 0028)
+
+`build_geography_views.py` (job `build_geography_views_reference`) creates convenience views that denormalize stable parent display attributes onto child levels, so analysts can filter by the human-readable parent without hierarchy joins:
+
+| View | Adds | Example |
+|---|---|---|
+| `geography.us_county_enriched` | `state_name`, `state_stusps`, `state_hhs_region` | `WHERE vintage=2020 AND state_stusps='GA'` |
+| `geography.us_tract_enriched` | `county_name` + state name/USPS/HHS region | `WHERE vintage=2020 AND county_name='Fulton County'` |
+
+Views (not denormalized base columns) — the canonical entity tables stay normalized; joins are vintage-keyed and INNER, with a blocking rowcount-parity DQ check. Deploy order: after `build_geography`. First entrypoint on the `run_build` seam (ADR 0027). ZCTAs are excluded (no single nesting parent). Code-based filtering on the base tables (`state_geoid`/`county_geoid`) is unchanged and needs no view.
+
 ## Contact
 
 - **Owner:** Connor Van Meter (connor.vanmeter@emory.edu)
