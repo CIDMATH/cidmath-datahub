@@ -113,6 +113,20 @@ git push -u origin add-taxonomy-value
 # Get one approving review, then merge. Merge to main auto-deploys to dev.
 ```
 
+### Working an issue with Claude Code
+
+Work is tracked as GitHub issues. Open one from a template (Issues → New issue → **New subject bundle** or **Data Hub task**); blank issues are disabled so every task starts structured. Each template embeds the goal/spec/scope/acceptance-criteria shape and points at the conventions.
+
+If you use Claude Code (or another AI assistant), the most reliable workflow is:
+
+1. **Branch off the issue**, then point your assistant at the **issue body** as the spec.
+2. It will read `CLAUDE.md` and the ADRs the issue references automatically — that's where the conventions live, so the issue stays task-specific rather than re-explaining them.
+3. For a new subject bundle: have it **scaffold from `templates/subject-bundle`** (`databricks bundle init`) and fill the `run_build` hooks, rather than copy-pasting an existing bundle — this is what keeps new work consistent with what's already there. Follow `docs/authoring-a-bundle.md`.
+4. Work the **acceptance-criteria checklist** in the issue; don't expand scope beyond it (open a follow-up issue instead).
+5. Before the PR: `ruff format . && ruff check .`, `pytest -q`, and `databricks bundle validate --target dev` for bundle changes. The pre-commit hooks and CI enforce the same.
+
+The issue + the standing docs (CLAUDE.md, ADRs, authoring guide) together give the assistant enough context to produce code that matches the existing patterns. When in doubt, mirror the worked example: the `weather` bundle (`bundles/weather/`, ADR 0025) and `build_geography_views.py` (ADR 0028, the `run_build` exemplar).
+
 ## 8. How deploys work
 
 - **Personal dev iteration:** `databricks bundle deploy --target dev` from a bundle directory deploys to your personal namespace (resources prefixed `[dev <you>]`). Use sparingly against the shared dev catalog — prefer letting CI deploy (ADR 0017 explains the ownership reason).

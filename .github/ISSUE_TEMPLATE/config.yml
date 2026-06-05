@@ -1,0 +1,11 @@
+# GitHub issue template chooser config.
+# Blank issues are disabled so contributors start from a structured template;
+# this keeps work standardized and gives Claude Code the right context up front.
+blank_issues_enabled: false
+contact_links:
+  - name: Conventions & architecture
+    url: https://github.com/cidmath/cidmath-datahub/blob/main/CLAUDE.md
+    about: Read CLAUDE.md and the relevant ADRs (docs/adr/) before starting any work.
+  - name: Authoring a subject bundle
+    url: https://github.com/cidmath/cidmath-datahub/blob/main/docs/authoring-a-bundle.md
+    about: Step-by-step for adding a new source-aligned subject bundle.
