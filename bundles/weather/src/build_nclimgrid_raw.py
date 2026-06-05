@@ -38,8 +38,9 @@ from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
 from cidmath_datahub.common import grants
-from cidmath_datahub.common.dq import DQRecorder, new_run_id
+from cidmath_datahub.common.dq import DQRecorder
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.weather import nclimgrid as ncl
 
@@ -48,6 +49,7 @@ log = get_logger(__name__)
 SCHEMA = "weather_raw"
 TABLE = "noaa_nclimgrid_daily"
 FULL_TABLE_REL = f"{SCHEMA}.{TABLE}"
+PIPELINE_REF = "bundles/weather/src/build_nclimgrid_raw.py"
 
 BASE_URL = "https://www.ncei.noaa.gov/data/nclimgrid-daily/access/averages"
 # geodata/NCEI 403 default Python user-agents on some endpoints; send a real one.
@@ -285,11 +287,9 @@ def run(
     region_types: set[str] | None = None,
     request_delay: float = DEFAULT_REQUEST_DELAY,
 ) -> None:
-    spark = SparkSession.builder.getOrCreate()
     region_types = region_types or {"cty", "ste"}
-    pipeline_ref = "bundles/weather/src/build_nclimgrid_raw.py"
     log.info(
-        "Building weather_raw.noaa_nclimgrid_daily",
+        "Ingesting nClimGrid raw",
         extra={
             "catalog": catalog,
             "start_year": start_year,
@@ -298,13 +298,12 @@ def run(
         },
     )
 
-    _ensure_table(spark, catalog)
+    def _ensure(spark: SparkSession) -> None:
+        _ensure_table(spark, catalog)
 
-    run_id = new_run_id()
-    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
-    files_loaded = 0
-
-    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
+    def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
+        files_loaded = 0
         for year in range(start_year, end_year + 1):
             for name, meta in _discover_year_files(year, region_types):
                 text = _http_text(f"{BASE_URL}/{year}/{name}")
@@ -317,15 +316,18 @@ def run(
                 files_loaded += 1
                 time.sleep(request_delay)
             log.info("Year complete", extra={"year": year, "files_loaded_so_far": files_loaded})
+        _dq_checks(ctx.recorder, spark, catalog, start_year, end_year, files_loaded)
 
-        _dq_checks(recorder, spark, catalog, start_year, end_year, files_loaded)
-
-    # Raw is engineer-tier internal staging (ADR 0018): no analyst grant.
-    grants.grant_schema_engineer(spark, catalog, SCHEMA, data_engineers_group)
-
-    log.info(
-        "weather_raw.noaa_nclimgrid_daily build complete",
-        extra={"catalog": catalog, "files_loaded": files_loaded},
+    run_build(
+        catalog=catalog,
+        pipeline_reference=PIPELINE_REF,
+        ensure=_ensure,
+        work=_work,
+        # Raw is engineer-tier internal staging (ADR 0018): not catalogued, no analyst grant.
+        register=None,
+        grant=lambda spark: grants.grant_schema_engineer(
+            spark, catalog, SCHEMA, data_engineers_group
+        ),
     )
 
 

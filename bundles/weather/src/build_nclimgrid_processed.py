@@ -43,8 +43,9 @@ from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
 from cidmath_datahub.common import grants, registration
-from cidmath_datahub.common.dq import DQRecorder, new_run_id
+from cidmath_datahub.common.dq import DQRecorder
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.weather import nclimgrid as ncl
 
@@ -56,6 +57,7 @@ SOURCE_TABLE = "noaa_nclimgrid_daily"
 SCHEMA = "weather_processed"
 TABLE = "noaa_nclimgrid_daily"
 FULL_TABLE_REL = f"{SCHEMA}.{TABLE}"
+PIPELINE_REF = "bundles/weather/src/build_nclimgrid_processed.py"
 
 # Reference dimensions (integrated catalog) this layer FKs against, cross-catalog.
 GEOGRAPHY_SCHEMA = "geography"
@@ -479,10 +481,8 @@ def run(
     data_engineers_group: str,
     crosswalk_url: str = DEFAULT_CROSSWALK_URL,
 ) -> None:
-    spark = SparkSession.builder.getOrCreate()
-    pipeline_ref = "bundles/weather/src/build_nclimgrid_processed.py"
     log.info(
-        "Building weather_processed.noaa_nclimgrid_daily",
+        "Conforming nClimGrid processed",
         extra={
             "catalog": catalog,
             "model_catalog": model_catalog,
@@ -491,41 +491,52 @@ def run(
         },
     )
 
-    _ensure_table(spark, catalog)
+    def _ensure(spark: SparkSession) -> None:
+        _ensure_table(spark, catalog)
 
-    # Docs-first: pull NOAA's published NCEI->FIPS cross-reference at runtime.
-    log.info("Fetching NCEI->FIPS cross-reference", extra={"url": crosswalk_url})
-    ncei_to_fips = ncl.parse_ncei_fips_crosswalk(_http_text(crosswalk_url).splitlines())
-    if not ncei_to_fips:
-        raise ValueError(f"Empty NCEI->FIPS cross-reference from {crosswalk_url}")
-    log.info("Loaded cross-reference", extra={"states": len(ncei_to_fips)})
+    def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
+        # Docs-first: pull NOAA's published NCEI->FIPS cross-reference at runtime.
+        log.info("Fetching NCEI->FIPS cross-reference", extra={"url": crosswalk_url})
+        ncei_to_fips = ncl.parse_ncei_fips_crosswalk(_http_text(crosswalk_url).splitlines())
+        if not ncei_to_fips:
+            raise ValueError(f"Empty NCEI->FIPS cross-reference from {crosswalk_url}")
+        log.info("Loaded cross-reference", extra={"states": len(ncei_to_fips)})
 
-    conformed, unconformed = _build_conform_map(spark, catalog, start_year, end_year, ncei_to_fips)
-
-    run_id = new_run_id()
-    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
-
-    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
+        conformed, unconformed = _build_conform_map(
+            spark, catalog, start_year, end_year, ncei_to_fips
+        )
         if conformed:
             _write_processed(spark, catalog, start_year, end_year, conformed)
         _dq_checks(
-            recorder, spark, catalog, model_catalog, start_year, end_year, unconformed, conformed
+            ctx.recorder,
+            spark,
+            catalog,
+            model_catalog,
+            start_year,
+            end_year,
+            unconformed,
+            conformed,
         )
 
-    _comment_table(spark, catalog)
+    def _register(spark: SparkSession) -> None:
+        _comment_table(spark, catalog)
+        # Materialized temporal coverage for the catalog (what actually landed).
+        cov = spark.sql(
+            f"SELECT MIN(obs_date) AS lo, MAX(obs_date) AS hi FROM {catalog}.{FULL_TABLE_REL}"
+        ).collect()[0]
+        _register_dataset(spark, catalog, PIPELINE_REF, crosswalk_url, cov["lo"], cov["hi"])
 
-    # Materialized temporal coverage for the catalog (what actually landed).
-    cov = spark.sql(
-        f"SELECT MIN(obs_date) AS lo, MAX(obs_date) AS hi FROM {catalog}.{FULL_TABLE_REL}"
-    ).collect()[0]
-    _register_dataset(spark, catalog, pipeline_ref, crosswalk_url, cov["lo"], cov["hi"])
-
-    # Processed is engineer-tier internal staging (ADR 0018): no analyst grant.
-    grants.grant_schema_engineer(spark, catalog, SCHEMA, data_engineers_group)
-
-    log.info(
-        "weather_processed.noaa_nclimgrid_daily build complete",
-        extra={"catalog": catalog, "coverage": [str(cov["lo"]), str(cov["hi"])]},
+    run_build(
+        catalog=catalog,
+        pipeline_reference=PIPELINE_REF,
+        ensure=_ensure,
+        work=_work,
+        register=_register,
+        # Processed is engineer-tier internal staging (ADR 0018): no analyst grant.
+        grant=lambda spark: grants.grant_schema_engineer(
+            spark, catalog, SCHEMA, data_engineers_group
+        ),
     )
 
 
