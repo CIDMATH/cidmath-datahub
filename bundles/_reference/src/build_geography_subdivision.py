@@ -41,10 +41,10 @@ from typing import Any
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
-from cidmath_datahub.common import grants
-from cidmath_datahub.common import registration
-from cidmath_datahub.common.dq import DQRecorder, new_run_id
+from cidmath_datahub.common import grants, registration
+from cidmath_datahub.common.dq import DQRecorder
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import gadm
 from cidmath_datahub.reference import geography_intl as gi
@@ -53,6 +53,7 @@ log = get_logger(__name__)
 
 SCHEMA = "geography"
 TABLE = "country_subdivision"
+PIPELINE_REF = "bundles/_reference/src/build_geography_subdivision.py"
 COUNTRY_TABLE = "country"
 BOUNDARY_TABLE = "boundary"
 GEO_LEVEL = "country_subdivision"
@@ -418,7 +419,9 @@ def _dq_checks(
     # sample so a human can spot-check the heuristic matches rather than trusting
     # a coverage number alone.
     method_counts = Counter(r["gadm_match_method"] for r in rows)
-    ambiguous = sorted(r["subdivision_code"] for r in rows if r["gadm_match_method"] == "name_ambiguous")
+    ambiguous = sorted(
+        r["subdivision_code"] for r in rows if r["gadm_match_method"] == "name_ambiguous"
+    )
     name_review_sample = [
         {
             "subdivision_code": r["subdivision_code"],
@@ -488,63 +491,73 @@ def run(
     data_engineers_group: str,
     analysts_group: str,
 ) -> None:
-    spark = SparkSession.builder.getOrCreate()
-    pipeline_ref = "bundles/_reference/src/build_geography_subdivision.py"
-
     log.info("Building geography.country_subdivision", extra={"catalog": catalog})
 
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
+    def _ensure(spark: SparkSession) -> None:
+        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
 
-    workdir = Path(tempfile.mkdtemp(prefix="gadm_"))
-    zip_path = gadm.download_gadm_zip(workdir)
-    gpkg = gadm.extract_gpkg(zip_path, workdir)
-    gdf = _read_adm1(gpkg)
-    gadm_rows = gadm.gdf_to_dict_rows(gdf)
+    def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
+        workdir = Path(tempfile.mkdtemp(prefix="gadm_"))
+        zip_path = gadm.download_gadm_zip(workdir)
+        gpkg = gadm.extract_gpkg(zip_path, workdir)
+        gdf = _read_adm1(gpkg)
+        gadm_rows = gadm.gdf_to_dict_rows(gdf)
 
-    subdivisions = _collect_subdivisions()
-    resolved, methods, unmatched_gid_1s = gi.resolve_subdivision_polygons(
-        gadm_rows, subdivisions, fixups=gi.GADM_ADM1_ISO_FIXUPS
-    )
-    log.info(
-        "Resolved ISO 3166-2 subdivisions to GADM ADM_1 polygons",
-        extra={
-            "subdivisions": len(subdivisions),
-            "matched": len(resolved),
-            "unmatched_gadm_rows": len(unmatched_gid_1s),
-            "sample_unmatched_gid_1": unmatched_gid_1s[:10],
-        },
-    )
+        subdivisions = _collect_subdivisions()
+        resolved, methods, unmatched_gid_1s = gi.resolve_subdivision_polygons(
+            gadm_rows, subdivisions, fixups=gi.GADM_ADM1_ISO_FIXUPS
+        )
+        log.info(
+            "Resolved ISO 3166-2 subdivisions to GADM ADM_1 polygons",
+            extra={
+                "subdivisions": len(subdivisions),
+                "matched": len(resolved),
+                "unmatched_gadm_rows": len(unmatched_gid_1s),
+                "sample_unmatched_gid_1": unmatched_gid_1s[:10],
+            },
+        )
 
-    # Stamp the data-defining versions on every row for reproducibility (ADR
-    # 0023 review P0-4): the row set is determined by the pycountry release and
-    # the GADM 4.1 download. GADM is pinned by URL; pycountry is captured here.
-    import pycountry
+        # Stamp the data-defining versions on every row for reproducibility (ADR
+        # 0023 review P0-4): the row set is determined by the pycountry release and
+        # the GADM 4.1 download. GADM is pinned by URL; pycountry is captured here.
+        import pycountry
 
-    source_file = f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE}); pycountry {pycountry.__version__}"
-    attr_rows, boundary_rows = _build_subdivision_rows(
-        subdivisions, resolved, methods, source_file=source_file
-    )
-    log.info(
-        "Assembled subdivision rows",
-        extra={"attribute_rows": len(attr_rows), "boundary_rows": len(boundary_rows)},
-    )
+        source_file = (
+            f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE}); pycountry {pycountry.__version__}"
+        )
+        attr_rows, boundary_rows = _build_subdivision_rows(
+            subdivisions, resolved, methods, source_file=source_file
+        )
+        log.info(
+            "Assembled subdivision rows",
+            extra={"attribute_rows": len(attr_rows), "boundary_rows": len(boundary_rows)},
+        )
 
-    run_id = new_run_id()
-    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
-
-    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
-        _dq_checks(recorder, spark, catalog, attr_rows, unmatched_gid_1s)
+        # Bespoke in-memory DQ (uniqueness, country FK via set arithmetic, join
+        # coverage, cardinality, match precision, US reconciliation): validated on
+        # the assembled rows before write, so they stay inline (ADR 0029).
+        _dq_checks(ctx.recorder, spark, catalog, attr_rows, unmatched_gid_1s)
         _write_subdivision_table(spark, catalog, attr_rows)
         if boundary_rows:
             _write_subdivision_boundaries(spark, catalog, boundary_rows)
 
-    _comment_table(spark, catalog)
+    def _register(spark: SparkSession) -> None:
+        _comment_table(spark, catalog)
+        _register_dataset(spark, catalog, PIPELINE_REF)
 
-    grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-    grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
+    def _grant(spark: SparkSession) -> None:
+        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
 
-    _register_dataset(spark, catalog, pipeline_ref)
-
+    run_build(
+        catalog=catalog,
+        pipeline_reference=PIPELINE_REF,
+        ensure=_ensure,
+        work=_work,
+        register=_register,
+        grant=_grant,
+    )
     log.info("geography.country_subdivision build complete", extra={"catalog": catalog})
 
 

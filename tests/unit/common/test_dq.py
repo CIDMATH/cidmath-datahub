@@ -298,3 +298,212 @@ class TestFlushAndContextManager:
                     passed=False,
                 )
                 raise RuntimeError("original")
+
+
+# ---------------------------------------------------------------------------
+# Reusable DQ check helpers (ADR 0029)
+# ---------------------------------------------------------------------------
+from cidmath_datahub.common.dq import (  # noqa: E402
+    TableDQ,
+    count_sql,
+    duplicate_count_sql,
+    null_count_sql,
+    orphan_count_sql,
+)
+
+
+@pytest.mark.unit
+class TestSqlBuilders:
+    """The query builders are pure -- assert exact SQL so a refactor that
+    changes generated SQL is caught without a Spark session."""
+
+    def test_count_sql_no_filter(self):
+        assert count_sql("c.s.t") == "SELECT COUNT(*) AS n FROM c.s.t"
+
+    def test_count_sql_with_filter(self):
+        assert count_sql("c.s.t", "year = 2020") == (
+            "SELECT COUNT(*) AS n FROM c.s.t WHERE year = 2020"
+        )
+
+    def test_duplicate_count_sql(self):
+        sql = duplicate_count_sql("c.s.t", ["geoid", "date"])
+        assert sql == (
+            "SELECT COUNT(*) AS n FROM ("
+            "SELECT geoid, date FROM c.s.t "
+            "GROUP BY geoid, date HAVING COUNT(*) > 1)"
+        )
+
+    def test_duplicate_count_sql_with_filter(self):
+        sql = duplicate_count_sql("c.s.t", ["geoid"], "year = 2020")
+        assert "FROM c.s.t WHERE year = 2020 GROUP BY geoid" in sql
+
+    def test_null_count_sql_single_column(self):
+        assert null_count_sql("c.s.t", ["geoid"]) == (
+            "SELECT COUNT(*) AS n FROM c.s.t WHERE geoid IS NULL"
+        )
+
+    def test_null_count_sql_multi_column_ors(self):
+        sql = null_count_sql("c.s.t", ["a", "b"])
+        assert sql == "SELECT COUNT(*) AS n FROM c.s.t WHERE a IS NULL OR b IS NULL"
+
+    def test_null_count_sql_combines_filter_with_and(self):
+        sql = null_count_sql("c.s.t", ["a"], "year = 2020")
+        assert sql == "SELECT COUNT(*) AS n FROM c.s.t WHERE (year = 2020) AND (a IS NULL)"
+
+    def test_orphan_count_sql_anti_join(self):
+        sql = orphan_count_sql("c.s.child", "geoid", "c.s.parent", "geoid")
+        assert sql == (
+            "SELECT COUNT(*) AS n FROM "
+            "(SELECT DISTINCT geoid FROM c.s.child) c "
+            "LEFT ANTI JOIN "
+            "(SELECT geoid FROM c.s.parent) p "
+            "ON c.geoid = p.geoid"
+        )
+
+    def test_orphan_count_sql_with_parent_where(self):
+        sql = orphan_count_sql(
+            "c.s.child", "geoid", "c.s.parent", "geoid", parent_where="vintage = 2020"
+        )
+        assert "FROM c.s.parent WHERE vintage = 2020) p" in sql
+
+
+class _FakeSpark:
+    """Returns pre-seeded scalar counts for successive ``sql().collect()[0]["n"]``."""
+
+    def __init__(self, *counts: int):
+        self._counts = list(counts)
+        self.queries: list[str] = []
+
+    def sql(self, query: str):
+        self.queries.append(query)
+        df = MagicMock()
+        df.collect.return_value = [{"n": self._counts.pop(0)}]
+        return df
+
+
+def _table_dq(spark, where=None):
+    return TableDQ(
+        recorder=_recorder(),
+        spark=spark,
+        query_table="ecdh_dev.weather_processed.noaa_nclimgrid_daily",
+        record_table="weather_processed.noaa_nclimgrid_daily",
+        where=where,
+    )
+
+
+@pytest.mark.unit
+class TestTableDQUnique:
+    def test_pass_records_uniqueness_and_no_raise(self):
+        spark = _FakeSpark(0, 100)  # dups, total
+        dq = _table_dq(spark)
+        assert dq.unique(keys=["geoid", "date"], check_name="nk_unique") is True
+        row = dq.recorder._buffer[0]
+        assert row["category"] == "uniqueness"
+        assert row["severity"] == "fail"
+        assert row["passed"] is True
+        assert row["table_name"] == "weather_processed.noaa_nclimgrid_daily"
+        assert row["total_row_count"] == 100
+        assert row["failing_row_count"] == 0
+        assert row["details"] is None  # details suppressed on pass
+
+    def test_fail_raises_on_blocking_severity(self):
+        spark = _FakeSpark(2, 100)
+        dq = _table_dq(spark)
+        with pytest.raises(ValueError, match="nk_unique"):
+            dq.unique(keys=["geoid"], check_name="nk_unique")
+        row = dq.recorder._buffer[0]
+        assert row["passed"] is False
+        assert row["failing_row_count"] == 2
+        assert json.loads(row["details"])["duplicate_key_groups"] == 2
+
+    def test_fail_without_raise_returns_false(self):
+        spark = _FakeSpark(2, 100)
+        dq = _table_dq(spark)
+        assert dq.unique(keys=["geoid"], check_name="nk", raise_on_fail=False) is False
+
+    def test_query_uses_catalog_qualified_table(self):
+        spark = _FakeSpark(0, 10)
+        _table_dq(spark).unique(keys=["geoid"], check_name="nk")
+        assert all("ecdh_dev.weather_processed" in q for q in spark.queries)
+
+
+@pytest.mark.unit
+class TestTableDQNotNull:
+    def test_records_nullability(self):
+        spark = _FakeSpark(0, 50)
+        dq = _table_dq(spark)
+        assert dq.not_null(columns=["geoid"], check_name="geoid_present") is True
+        assert dq.recorder._buffer[0]["category"] == "nullability"
+
+    def test_nulls_raise(self):
+        spark = _FakeSpark(3, 50)
+        dq = _table_dq(spark)
+        with pytest.raises(ValueError):
+            dq.not_null(columns=["geoid"], check_name="geoid_present")
+        assert dq.recorder._buffer[0]["failing_row_count"] == 3
+
+
+@pytest.mark.unit
+class TestTableDQFk:
+    def test_records_referential_and_passes(self):
+        spark = _FakeSpark(0, 80)  # orphans, total
+        dq = _table_dq(spark)
+        ok = dq.fk(
+            key="geoid",
+            parent_table="ecdh_model_dev.geography.us_county",
+            parent_key="geoid",
+            parent_where="vintage = 2020",
+            check_name="geoid_fk",
+        )
+        assert ok is True
+        assert dq.recorder._buffer[0]["category"] == "referential"
+        assert any("vintage = 2020" in q for q in spark.queries)
+
+    def test_orphans_raise(self):
+        spark = _FakeSpark(4, 80)
+        dq = _table_dq(spark)
+        with pytest.raises(ValueError):
+            dq.fk(key="g", parent_table="p", parent_key="g", check_name="fk")
+        assert dq.recorder._buffer[0]["failing_row_count"] == 4
+
+
+@pytest.mark.unit
+class TestTableDQCardinality:
+    def test_warn_out_of_range_does_not_raise(self):
+        spark = _FakeSpark(5)  # total below min
+        dq = _table_dq(spark)
+        assert dq.cardinality(check_name="rowcount", min_rows=10) is False
+        row = dq.recorder._buffer[0]
+        assert row["category"] == "cardinality"
+        assert row["severity"] == "warn"
+        assert row["passed"] is False
+
+    def test_within_range_passes(self):
+        spark = _FakeSpark(50)
+        dq = _table_dq(spark)
+        assert dq.cardinality(check_name="rc", min_rows=10, max_rows=100) is True
+
+    def test_blocking_severity_raises_when_out_of_range(self):
+        spark = _FakeSpark(5)
+        dq = _table_dq(spark)
+        with pytest.raises(ValueError):
+            dq.cardinality(
+                check_name="rc", min_rows=10, severity=DQSeverity.FAIL, raise_on_fail=True
+            )
+
+
+@pytest.mark.unit
+class TestTableDQRowcountEquals:
+    def test_parity_passes(self):
+        spark = _FakeSpark(100, 100)  # this, other
+        dq = _table_dq(spark, where="year = 2020")
+        assert dq.rowcount_equals(other_table="ecdh_dev.weather_raw.x", check_name="parity") is True
+        # the same where applies to both sides
+        assert all("year = 2020" in q for q in spark.queries)
+
+    def test_mismatch_raises_with_abs_diff(self):
+        spark = _FakeSpark(100, 97)
+        dq = _table_dq(spark)
+        with pytest.raises(ValueError):
+            dq.rowcount_equals(other_table="other", check_name="parity")
+        assert dq.recorder._buffer[0]["failing_row_count"] == 3

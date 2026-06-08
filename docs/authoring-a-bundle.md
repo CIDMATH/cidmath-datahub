@@ -57,7 +57,7 @@ Then edit: the workflow `name`, the `paths:` filter (`bundles/<subject>/**`), th
 ## 6. Verify and ship
 
 ```bash
-ruff format . && ruff check .
+ruff format src tests && ruff check src tests   # plus: ruff on the bundle files you added (bundles/ is outside CI's scope)
 pytest -q
 databricks bundle validate --target dev   # from bundles/<subject>/
 ```

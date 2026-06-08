@@ -42,10 +42,10 @@ from typing import Any
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
-from cidmath_datahub.common import grants
-from cidmath_datahub.common import registration
-from cidmath_datahub.common.dq import DQRecorder, new_run_id
+from cidmath_datahub.common import grants, registration
+from cidmath_datahub.common.dq import DQRecorder
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import gadm
 from cidmath_datahub.reference import geography as geo
@@ -53,6 +53,7 @@ from cidmath_datahub.reference import geography as geo
 log = get_logger(__name__)
 
 SCHEMA = "geography"
+PIPELINE_REF = "bundles/_reference/src/build_geography.py"
 
 # Levels built from NHGIS polygon shapefiles, in dependency order (parents first
 # so tract FK checks can run against already-loaded state/county).
@@ -695,64 +696,61 @@ def run(
     simplify_tolerance: float = 0.005,
     full_resolution: bool = False,
 ) -> None:
-    spark = SparkSession.builder.getOrCreate()
-    pipeline_ref = "bundles/_reference/src/build_geography.py"
-
     log.info(
         "Building geography reference tables",
         extra={"catalog": catalog, "vintages": vintages, "full_resolution": full_resolution},
     )
 
-    spark.sql(
-        f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
-        f"COMMENT 'Canonical US geography reference: states, counties, tracts, "
-        f"ZCTAs, HHS regions, and companion boundaries. Owned by the _reference "
-        f"bundle. Source: IPUMS NHGIS. See ADR 0020.'"
-    )
+    def _ensure(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
+            f"COMMENT 'Canonical US geography reference: states, counties, tracts, "
+            f"ZCTAs, HHS regions, and companion boundaries. Owned by the _reference "
+            f"bundle. Source: IPUMS NHGIS. See ADR 0020.'"
+        )
 
-    _build_hhs_region(spark, catalog)
+    def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
+        _build_hhs_region(spark, catalog)
 
-    if not ipums_secret_scope:
-        raise ValueError("--ipums-secret-scope is required to pull NHGIS shapefiles")
-    api_key = _get_secret(ipums_secret_scope, ipums_secret_key or "nhgis_api_key")
+        if not ipums_secret_scope:
+            raise ValueError("--ipums-secret-scope is required to pull NHGIS shapefiles")
+        api_key = _get_secret(ipums_secret_scope, ipums_secret_key or "nhgis_api_key")
 
-    missing = [(lvl, v) for v in vintages for lvl in LEVELS if (lvl, v) not in SHAPEFILE_NAMES]
-    if missing:
-        raise ValueError(f"no known NHGIS shapefile code for {missing}; extend SHAPEFILE_NAMES")
-    boundary_names = [SHAPEFILE_NAMES[(lvl, v)] for v in vintages for lvl in LEVELS]
-    cenpop_names = [
-        CENPOP_SHAPEFILE_NAMES[(lvl, v)]
-        for v in vintages
-        for lvl in LEVELS
-        if (lvl, v) in CENPOP_SHAPEFILE_NAMES
-    ]
-    shapefile_names = boundary_names + cenpop_names
+        missing = [(lvl, v) for v in vintages for lvl in LEVELS if (lvl, v) not in SHAPEFILE_NAMES]
+        if missing:
+            raise ValueError(f"no known NHGIS shapefile code for {missing}; extend SHAPEFILE_NAMES")
+        boundary_names = [SHAPEFILE_NAMES[(lvl, v)] for v in vintages for lvl in LEVELS]
+        cenpop_names = [
+            CENPOP_SHAPEFILE_NAMES[(lvl, v)]
+            for v in vintages
+            for lvl in LEVELS
+            if (lvl, v) in CENPOP_SHAPEFILE_NAMES
+        ]
+        shapefile_names = boundary_names + cenpop_names
 
-    resolution = "full" if full_resolution else "generalized"
-    tolerance = 0.0 if full_resolution else simplify_tolerance
+        resolution = "full" if full_resolution else "generalized"
+        tolerance = 0.0 if full_resolution else simplify_tolerance
 
-    workdir = Path(tempfile.mkdtemp(prefix="nhgis_"))
-    _download_shapefiles(api_key, shapefile_names, workdir)
-    _extract_all_zips(workdir)
+        workdir = Path(tempfile.mkdtemp(prefix="nhgis_"))
+        _download_shapefiles(api_key, shapefile_names, workdir)
+        _extract_all_zips(workdir)
 
-    # Process and write per (level, vintage) chunk to bound driver memory. Levels
-    # run parents-first so tract FK checks see already-loaded state/county geoids.
-    # DQ outcomes (uniqueness + FK) are persisted to _ops.dq_results via the
-    # recorder; flushed at context-manager exit even if a write raises (ADR 0009).
-    written: set[str] = set()
-    state_geoids: dict[int, set[str]] = {}
-    county_geoids: dict[int, set[str]] = {}
-    run_id = new_run_id()
-    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
+        # Process and write per (level, vintage) chunk to bound driver memory.
+        # Levels run parents-first so tract FK checks see already-loaded
+        # state/county geoids. DQ outcomes (uniqueness + FK) are recorded via
+        # ctx.recorder and flushed by the run_build seam even on failure (ADR 0009).
+        written: set[str] = set()
+        state_geoids: dict[int, set[str]] = {}
+        county_geoids: dict[int, set[str]] = {}
 
-    # boundary is shared/polymorphic: refresh only this build's geo_levels and
-    # always append, so we never overwrite the country / country_subdivision
-    # rows. Pre-marking it "written" forces _write_chunk into append mode from
-    # the first chunk (ADR 0023 review — boundary-overwrite landmine fix).
-    _reset_us_boundaries(spark, catalog)
-    written.add("boundary")
+        # boundary is shared/polymorphic: refresh only this build's geo_levels and
+        # always append, so we never overwrite the country / country_subdivision
+        # rows. Pre-marking it "written" forces _write_chunk into append mode from
+        # the first chunk (ADR 0023 review -- boundary-overwrite landmine fix).
+        _reset_us_boundaries(spark, catalog)
+        written.add("boundary")
 
-    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
         for lvl in LEVELS:
             for v in vintages:
                 gdf = _read_gdf(_find_shapefile(workdir, lvl, v))
@@ -764,7 +762,7 @@ def run(
                 rows, boundary = BUILDERS[lvl](gdf, v, tolerance, resolution, cenpop)
 
                 table_name = f"{SCHEMA}.{lvl}"
-                _check_unique(lvl, v, rows, recorder=recorder, table_name=table_name)
+                _check_unique(lvl, v, rows, recorder=ctx.recorder, table_name=table_name)
                 if lvl == "us_state":
                     state_geoids[v] = {r["geoid"] for r in rows}
                 elif lvl == "us_county":
@@ -775,7 +773,7 @@ def run(
                         "state_geoid",
                         state_geoids.get(v, set()),
                         v,
-                        recorder=recorder,
+                        recorder=ctx.recorder,
                         table_name=table_name,
                     )
                 elif lvl == "us_tract":
@@ -785,7 +783,7 @@ def run(
                         "state_geoid",
                         state_geoids.get(v, set()),
                         v,
-                        recorder=recorder,
+                        recorder=ctx.recorder,
                         table_name=table_name,
                     )
                     _check_fk(
@@ -794,105 +792,116 @@ def run(
                         "county_geoid",
                         county_geoids.get(v, set()),
                         v,
-                        recorder=recorder,
+                        recorder=ctx.recorder,
                         table_name=table_name,
                     )
 
                 _write_chunk(spark, catalog, lvl, rows, ENTITY_SCHEMAS[lvl], written)
-                _write_chunk(spark, catalog, "boundary", boundary, gadm.boundary_spark_schema(), written)
+                _write_chunk(
+                    spark, catalog, "boundary", boundary, gadm.boundary_spark_schema(), written
+                )
                 log.info(
                     "Processed",
                     extra={"level": lvl, "vintage": v, "rows": len(rows), "cenpop": len(cenpop)},
                 )
 
-    _comment_tables(spark, catalog)
-    _set_clustering(spark, catalog)
+    def _register(spark: SparkSession) -> None:
+        _comment_tables(spark, catalog)
+        _set_clustering(spark, catalog)
+        _register_dataset(
+            spark,
+            catalog=catalog,
+            table="us_state",
+            description="US states and DC (plus territories), one row per state per vintage.",
+            public_health_relevance=(
+                "Canonical state spatial unit that surveillance and modeling data conform "
+                "to; carries HHS region for federal regional rollups."
+            ),
+            spatial_resolution="us_state",
+            cluster_columns=None,
+            pipeline_reference=PIPELINE_REF,
+        )
+        _register_dataset(
+            spark,
+            catalog=catalog,
+            table="us_county",
+            description="US counties, one row per county per vintage, with state FK.",
+            public_health_relevance=(
+                "Canonical county spatial unit; the standard grain for U.S. infectious "
+                "disease surveillance and the spatial backbone other subjects join to."
+            ),
+            spatial_resolution="us_county",
+            cluster_columns=None,
+            pipeline_reference=PIPELINE_REF,
+        )
+        _register_dataset(
+            spark,
+            catalog=catalog,
+            table="us_tract",
+            description="US census tracts, one row per tract per vintage, with county + state FKs.",
+            public_health_relevance=(
+                "Fine-grained spatial unit for neighborhood-level surveillance and "
+                "modeling; redrawn each decade, so vintage matters."
+            ),
+            spatial_resolution="us_tract",
+            cluster_columns=["vintage"],
+            pipeline_reference=PIPELINE_REF,
+        )
+        _register_dataset(
+            spark,
+            catalog=catalog,
+            table="us_zcta",
+            description="US ZIP Code Tabulation Areas, one row per ZCTA per vintage (non-nesting).",
+            public_health_relevance=(
+                "Approximate ZIP-code geography for joining address- or ZIP-coded health "
+                "data; non-nesting, so used directly rather than via county/state."
+            ),
+            spatial_resolution="us_zcta",
+            cluster_columns=["vintage"],
+            pipeline_reference=PIPELINE_REF,
+        )
+        _register_dataset(
+            spark,
+            catalog=catalog,
+            table="us_hhs_region",
+            description="The ten HHS regions (static federal grouping of states).",
+            public_health_relevance=(
+                "Federal regional grouping used for HHS/CDC regional reporting and rollups."
+            ),
+            spatial_resolution="hhs_region",
+            cluster_columns=None,
+            pipeline_reference=PIPELINE_REF,
+        )
+        _register_dataset(
+            spark,
+            catalog=catalog,
+            table="boundary",
+            description="Companion boundary polygons (WKB) for all levels by vintage.",
+            public_health_relevance=(
+                "Geometry for choropleth mapping and spatial-adjacency models; kept off "
+                "the lean attribute tables so attribute joins stay cheap."
+            ),
+            spatial_resolution="multi",
+            cluster_columns=["geo_level", "vintage"],
+            pipeline_reference=PIPELINE_REF,
+        )
 
-    # Grants: reader-tier for both groups, same posture as time (ADR 0018/0020).
-    grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-    grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
-    grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-    grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
-    log.info("Access model verified", extra={"schema": f"{catalog}.{SCHEMA}"})
+    def _grant(spark: SparkSession) -> None:
+        # Grants: reader-tier for both groups, same posture as time (ADR 0018/0020).
+        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
+        grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+        grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
+        log.info("Access model verified", extra={"schema": f"{catalog}.{SCHEMA}"})
 
-    _register_dataset(
-        spark,
+    run_build(
         catalog=catalog,
-        table="us_state",
-        description="US states and DC (plus territories), one row per state per vintage.",
-        public_health_relevance=(
-            "Canonical state spatial unit that surveillance and modeling data conform "
-            "to; carries HHS region for federal regional rollups."
-        ),
-        spatial_resolution="us_state",
-        cluster_columns=None,
-        pipeline_reference=pipeline_ref,
+        pipeline_reference=PIPELINE_REF,
+        ensure=_ensure,
+        work=_work,
+        register=_register,
+        grant=_grant,
     )
-    _register_dataset(
-        spark,
-        catalog=catalog,
-        table="us_county",
-        description="US counties, one row per county per vintage, with state FK.",
-        public_health_relevance=(
-            "Canonical county spatial unit; the standard grain for U.S. infectious "
-            "disease surveillance and the spatial backbone other subjects join to."
-        ),
-        spatial_resolution="us_county",
-        cluster_columns=None,
-        pipeline_reference=pipeline_ref,
-    )
-    _register_dataset(
-        spark,
-        catalog=catalog,
-        table="us_tract",
-        description="US census tracts, one row per tract per vintage, with county + state FKs.",
-        public_health_relevance=(
-            "Fine-grained spatial unit for neighborhood-level surveillance and "
-            "modeling; redrawn each decade, so vintage matters."
-        ),
-        spatial_resolution="us_tract",
-        cluster_columns=["vintage"],
-        pipeline_reference=pipeline_ref,
-    )
-    _register_dataset(
-        spark,
-        catalog=catalog,
-        table="us_zcta",
-        description="US ZIP Code Tabulation Areas, one row per ZCTA per vintage (non-nesting).",
-        public_health_relevance=(
-            "Approximate ZIP-code geography for joining address- or ZIP-coded health "
-            "data; non-nesting, so used directly rather than via county/state."
-        ),
-        spatial_resolution="us_zcta",
-        cluster_columns=["vintage"],
-        pipeline_reference=pipeline_ref,
-    )
-    _register_dataset(
-        spark,
-        catalog=catalog,
-        table="us_hhs_region",
-        description="The ten HHS regions (static federal grouping of states).",
-        public_health_relevance=(
-            "Federal regional grouping used for HHS/CDC regional reporting and rollups."
-        ),
-        spatial_resolution="hhs_region",
-        cluster_columns=None,
-        pipeline_reference=pipeline_ref,
-    )
-    _register_dataset(
-        spark,
-        catalog=catalog,
-        table="boundary",
-        description="Companion boundary polygons (WKB) for all levels by vintage.",
-        public_health_relevance=(
-            "Geometry for choropleth mapping and spatial-adjacency models; kept off "
-            "the lean attribute tables so attribute joins stay cheap."
-        ),
-        spatial_resolution="multi",
-        cluster_columns=["geo_level", "vintage"],
-        pipeline_reference=pipeline_ref,
-    )
-
     log.info("Geography reference build complete", extra={"catalog": catalog})
 
 

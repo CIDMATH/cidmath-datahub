@@ -52,7 +52,7 @@ databricks bundle init templates/subject-bundle
 - [ ] Naming follows ADR 0006 (`<provider>_<dataset>`, `<subject>_raw`/`_processed`); new provider added to ADR 0006's registry.
 - [ ] Deploy workflow added (`cp .github/workflows/deploy-weather.yml deploy-<subject>.yml`, edit subject + paths).
 - [ ] An ADR added/updated if a non-obvious decision was made.
-- [ ] `ruff format . && ruff check .` clean; `pytest -q` green; `databricks bundle validate --target dev` passes.
+- [ ] `ruff format src tests && ruff check src tests` clean (also `ruff` the new bundle files); `pytest -q` green; `databricks bundle validate --target dev` passes.
 
 ## Verification (after dev deploy + run)
 <!-- The queries/checks to confirm correctness — e.g. raw cell-completeness, raw↔processed row parity, _ops.dq_results blocking checks passed, discovery.datasets row present. Mirror the weather verification pattern. -->

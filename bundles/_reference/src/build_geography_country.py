@@ -43,10 +43,10 @@ from typing import Any
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
-from cidmath_datahub.common import grants
-from cidmath_datahub.common import registration
-from cidmath_datahub.common.dq import DQRecorder, new_run_id
+from cidmath_datahub.common import grants, registration
+from cidmath_datahub.common.dq import DQRecorder
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import country_classifications as cclass
 from cidmath_datahub.reference import gadm
@@ -57,6 +57,7 @@ log = get_logger(__name__)
 SCHEMA = "geography"
 TABLE = "country"
 BOUNDARY_TABLE = "boundary"
+PIPELINE_REF = "bundles/_reference/src/build_geography_country.py"
 
 # GADM ADM_0 layer in the shared GADM 4.1 GeoPackage. Download / extract /
 # read helpers, the GADM constants (URL, vintage, license, generalization
@@ -247,7 +248,8 @@ def _write_country_boundaries(
 def _comment_table(spark: SparkSession, catalog: str) -> None:
     spark.sql(
         f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TABLE} IS "
-        f"'ISO 3166-1 countries (PK country_alpha3, vintage) with WHO and UN M49 region attributes; "
+        f"'ISO 3166-1 countries (PK country_alpha3, vintage) with WHO and UN "
+        f"M49 region attributes; "
         f"centroids from GADM ADM_0 representative points. Source: pycountry "
         f"+ in-repo WHO/UN classifications + GADM 4.1. ADR 0022.'"
     )
@@ -362,46 +364,56 @@ def run(
     data_engineers_group: str,
     analysts_group: str,
 ) -> None:
-    spark = SparkSession.builder.getOrCreate()
-    pipeline_ref = "bundles/_reference/src/build_geography_country.py"
-
     log.info("Building geography.country", extra={"catalog": catalog})
 
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
+    def _ensure(spark: SparkSession) -> None:
+        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
 
-    workdir = Path(tempfile.mkdtemp(prefix="gadm_"))
-    zip_path = gadm.download_gadm_zip(workdir)
-    gpkg = gadm.extract_gpkg(zip_path, workdir)
-    gdf = _read_adm0(gpkg)
-    gadm_by_alpha3 = _gadm_alpha3_to_geometry(gdf)
+    def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
+        workdir = Path(tempfile.mkdtemp(prefix="gadm_"))
+        zip_path = gadm.download_gadm_zip(workdir)
+        gpkg = gadm.extract_gpkg(zip_path, workdir)
+        gdf = _read_adm0(gpkg)
+        gadm_by_alpha3 = _gadm_alpha3_to_geometry(gdf)
 
-    # Stamp data-defining versions for reproducibility (ADR 0023 review P1-7):
-    # the row set comes from pycountry; the boundaries from GADM 4.1.
-    import pycountry
+        # Stamp data-defining versions for reproducibility (ADR 0023 review P1-7):
+        # the row set comes from pycountry; the boundaries from GADM 4.1.
+        import pycountry
 
-    source_file = f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE}); pycountry {pycountry.__version__}"
-    attr_rows, boundary_rows = _build_country_rows(gadm_by_alpha3, source_file=source_file)
-    log.info(
-        "Assembled country rows",
-        extra={"attribute_rows": len(attr_rows), "boundary_rows": len(boundary_rows)},
-    )
+        source_file = (
+            f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE}); pycountry {pycountry.__version__}"
+        )
+        attr_rows, boundary_rows = _build_country_rows(gadm_by_alpha3, source_file=source_file)
+        log.info(
+            "Assembled country rows",
+            extra={"attribute_rows": len(attr_rows), "boundary_rows": len(boundary_rows)},
+        )
 
-    run_id = new_run_id()
-    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
-
-    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
-        _dq_checks(recorder, attr_rows, set(gadm_by_alpha3.keys()))
+        # DQ runs pre-write on the assembled in-memory rows (uniqueness via Counter,
+        # ISO->GADM join coverage, ISO 3166-1 cardinality) -- bespoke checks over
+        # Python data, not table queries, so they stay inline (ADR 0029).
+        _dq_checks(ctx.recorder, attr_rows, set(gadm_by_alpha3.keys()))
         _write_country_table(spark, catalog, attr_rows)
         if boundary_rows:
             _write_country_boundaries(spark, catalog, boundary_rows)
 
-    _comment_table(spark, catalog)
+    def _register(spark: SparkSession) -> None:
+        _comment_table(spark, catalog)
+        _register_dataset(spark, catalog, PIPELINE_REF)
 
-    grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-    grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
+    def _grant(spark: SparkSession) -> None:
+        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
 
-    _register_dataset(spark, catalog, pipeline_ref)
-
+    run_build(
+        catalog=catalog,
+        pipeline_reference=PIPELINE_REF,
+        ensure=_ensure,
+        work=_work,
+        register=_register,
+        grant=_grant,
+    )
     log.info("geography.country build complete", extra={"catalog": catalog})
 
 
