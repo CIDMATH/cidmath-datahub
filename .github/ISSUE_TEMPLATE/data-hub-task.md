@@ -33,7 +33,7 @@ via run_build where a table is built (ADR 0011/0027). Note any new ADR if a real
 - [ ] Controlled-vocabulary values (DQ severity/category, update_semantics, materialization_type) used correctly (CI-enforced, ADR 0016).
 - [ ] If it builds/changes a table: DQ recorded; `_ops` registration updated (`derived_from` where derived); grants correct (ADR 0008/0009/0018).
 - [ ] If a decision was made: an ADR added/updated (`docs/adr/NNNN-*.md`) and the index updated.
-- [ ] `ruff format . && ruff check .` clean; `pytest -q` green; bundle changes pass `databricks bundle validate --target dev`.
+- [ ] `ruff format src tests && ruff check src tests` clean (also `ruff` any changed bundle files); `pytest -q` green; bundle changes pass `databricks bundle validate --target dev`.
 
 ## Verification
 <!-- How to confirm it works (queries, expected DQ results, test coverage, etc.). -->

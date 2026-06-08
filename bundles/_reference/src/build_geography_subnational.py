@@ -48,10 +48,10 @@ from typing import Any
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
-from cidmath_datahub.common import grants
-from cidmath_datahub.common import registration
-from cidmath_datahub.common.dq import DQRecorder, new_run_id
+from cidmath_datahub.common import grants, registration
+from cidmath_datahub.common.dq import DQRecorder
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import gadm
 from cidmath_datahub.reference import geography_intl as gi
@@ -60,6 +60,7 @@ log = get_logger(__name__)
 
 SCHEMA = "geography"
 TABLE = "subnational"
+PIPELINE_REF = "bundles/_reference/src/build_geography_subnational.py"
 COUNTRY_TABLE = "country"
 SUBDIVISION_TABLE = "country_subdivision"
 BOUNDARY_TABLE = "boundary"
@@ -116,8 +117,10 @@ def _load_gid1_to_subdivision_code(spark: SparkSession, catalog: str) -> dict[st
             f"SELECT gadm_gid_1, subdivision_code FROM {full} WHERE gadm_gid_1 IS NOT NULL"
         ).collect()
     except Exception as e:  # noqa: BLE001 — subdivision table may not exist yet
-        log.warning("country_subdivision not available; subdivision_code will be NULL",
-                    extra={"error": str(e)})
+        log.warning(
+            "country_subdivision not available; subdivision_code will be NULL",
+            extra={"error": str(e)},
+        )
         return {}
     mapping = gi.build_gid1_to_subdivision_code(
         {"gadm_gid_1": r["gadm_gid_1"], "subdivision_code": r["subdivision_code"]} for r in rows
@@ -282,12 +285,12 @@ def _dq_checks(
 ) -> None:
     """Run DQ on the assembled rows (ADR 0009).
 
-      1. gadm_gid uniqueness within the vintage — FAIL.
-      2. country_alpha3 FK to geography.country — FAIL (blocking, ADR 0023 P0-3).
-      3. subdivision_code link coverage — INFO (inherits 3b's ~72%; not gated).
-      4. ADM_2 cardinality sanity range — WARN.
-      5. rows dropped during assembly (non-ISO / malformed) — WARN if >5%, with
-         a reviewable sample so silent drops are auditable (not just logged).
+    1. gadm_gid uniqueness within the vintage — FAIL.
+    2. country_alpha3 FK to geography.country — FAIL (blocking, ADR 0023 P0-3).
+    3. subdivision_code link coverage — INFO (inherits 3b's ~72%; not gated).
+    4. ADM_2 cardinality sanity range — WARN.
+    5. rows dropped during assembly (non-ISO / malformed) — WARN if >5%, with
+       a reviewable sample so silent drops are auditable (not just logged).
     """
     gid_counts = Counter(r["gadm_gid"] for r in rows)
     dups = sorted(g for g, n in gid_counts.items() if n > 1)
@@ -437,9 +440,7 @@ def _set_clustering(spark: SparkSession, catalog: str) -> None:
     Non-fatal if the runtime doesn't support ALTER ... CLUSTER BY.
     """
     try:
-        spark.sql(
-            f"ALTER TABLE {catalog}.{SCHEMA}.{TABLE} CLUSTER BY (country_alpha3, vintage)"
-        )
+        spark.sql(f"ALTER TABLE {catalog}.{SCHEMA}.{TABLE} CLUSTER BY (country_alpha3, vintage)")
     except Exception as exc:  # pragma: no cover - runtime-dependent
         log.warning("Could not set clustering", extra={"table": TABLE, "error": str(exc)})
 
@@ -449,42 +450,51 @@ def run(
     data_engineers_group: str,
     analysts_group: str,
 ) -> None:
-    spark = SparkSession.builder.getOrCreate()
-    pipeline_ref = "bundles/_reference/src/build_geography_subnational.py"
-
     log.info("Building geography.subnational", extra={"catalog": catalog})
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
 
-    workdir = Path(tempfile.mkdtemp(prefix="gadm_"))
-    zip_path = gadm.download_gadm_zip(workdir)
-    gpkg = gadm.extract_gpkg(zip_path, workdir)
-    gdf = _read_adm2(gpkg)
-    gadm_rows = gadm.gdf_to_dict_rows(gdf)
+    def _ensure(spark: SparkSession) -> None:
+        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
 
-    gid1_to_subcode = _load_gid1_to_subdivision_code(spark, catalog)
+    def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
+        workdir = Path(tempfile.mkdtemp(prefix="gadm_"))
+        zip_path = gadm.download_gadm_zip(workdir)
+        gpkg = gadm.extract_gpkg(zip_path, workdir)
+        gdf = _read_adm2(gpkg)
+        gadm_rows = gadm.gdf_to_dict_rows(gdf)
 
-    source_file = f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE})"
-    attr_rows, boundary_rows, drops = _build_subnational_rows(
-        gadm_rows, gid1_to_subcode, source_file
-    )
+        gid1_to_subcode = _load_gid1_to_subdivision_code(spark, catalog)
 
-    run_id = new_run_id()
-    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
+        source_file = f"{gadm.GADM_GPKG_NAME} (GADM {gadm.GADM_RELEASE})"
+        attr_rows, boundary_rows, drops = _build_subnational_rows(
+            gadm_rows, gid1_to_subcode, source_file
+        )
 
-    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
-        _dq_checks(recorder, spark, catalog, attr_rows, drops)
+        # Bespoke in-memory DQ (gid uniqueness, country FK via set arithmetic,
+        # subdivision-link coverage, cardinality, drop rate): validated on the
+        # assembled rows before write, so they stay inline (ADR 0029).
+        _dq_checks(ctx.recorder, spark, catalog, attr_rows, drops)
         _write_subnational_table(spark, catalog, attr_rows)
         if boundary_rows:
             _write_subnational_boundaries(spark, catalog, boundary_rows)
 
-    _comment_table(spark, catalog)
-    _set_clustering(spark, catalog)
+    def _register(spark: SparkSession) -> None:
+        _comment_table(spark, catalog)
+        _set_clustering(spark, catalog)
+        _register_dataset(spark, catalog, PIPELINE_REF)
 
-    grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-    grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
+    def _grant(spark: SparkSession) -> None:
+        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
 
-    _register_dataset(spark, catalog, pipeline_ref)
-
+    run_build(
+        catalog=catalog,
+        pipeline_reference=PIPELINE_REF,
+        ensure=_ensure,
+        work=_work,
+        register=_register,
+        grant=_grant,
+    )
     log.info("geography.subnational build complete", extra={"catalog": catalog})
 
 

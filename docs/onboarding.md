@@ -123,7 +123,7 @@ If you use Claude Code (or another AI assistant), the most reliable workflow is:
 2. It will read `CLAUDE.md` and the ADRs the issue references automatically — that's where the conventions live, so the issue stays task-specific rather than re-explaining them.
 3. For a new subject bundle: have it **scaffold from `templates/subject-bundle`** (`databricks bundle init`) and fill the `run_build` hooks, rather than copy-pasting an existing bundle — this is what keeps new work consistent with what's already there. Follow `docs/authoring-a-bundle.md`.
 4. Work the **acceptance-criteria checklist** in the issue; don't expand scope beyond it (open a follow-up issue instead).
-5. Before the PR: `ruff format . && ruff check .`, `pytest -q`, and `databricks bundle validate --target dev` for bundle changes. The pre-commit hooks and CI enforce the same.
+5. Before the PR: `ruff format src tests && ruff check src tests` (CI's lint scope — also run `ruff` on any bundle files you changed, since `bundles/` is outside the automated scope), `pytest -q`, and `databricks bundle validate --target dev` for bundle changes. The pre-commit hooks and CI enforce the same.
 
 The issue + the standing docs (CLAUDE.md, ADRs, authoring guide) together give the assistant enough context to produce code that matches the existing patterns. When in doubt, mirror the worked example: the `weather` bundle (`bundles/weather/`, ADR 0025) and `build_geography_views.py` (ADR 0028, the `run_build` exemplar).
 

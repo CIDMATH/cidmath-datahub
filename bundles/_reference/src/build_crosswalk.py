@@ -33,8 +33,9 @@ from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
 from cidmath_datahub.common import registration
-from cidmath_datahub.common.dq import DQRecorder, new_run_id
+from cidmath_datahub.common.dq import DQRecorder
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import geography as geo
 
@@ -42,6 +43,7 @@ log = get_logger(__name__)
 
 SCHEMA = "geography"
 TABLE = "us_crosswalk"
+PIPELINE_REF = "bundles/_reference/src/build_crosswalk.py"
 
 # The six bg-sourced 2010<->2020 NHGIS crosswalk file sets to ship (ADR 0021).
 # NHGIS national crosswalk files live directly under ``/crosswalks/{filename}``
@@ -455,31 +457,47 @@ def _process_one(
 
 
 def run(catalog: str, ipums_secret_scope: str | None, ipums_secret_key: str | None) -> None:
-    spark = SparkSession.builder.getOrCreate()
-    pipeline_ref = "bundles/_reference/src/build_crosswalk.py"
-
     if not ipums_secret_scope:
         raise ValueError("--ipums-secret-scope is required to pull NHGIS crosswalks")
-    api_key = _get_secret(ipums_secret_scope, ipums_secret_key or "nhgis_api_key")
 
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
+    def _ensure(spark: SparkSession) -> None:
+        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
 
-    base_url, ipums = _ipums_base_url(api_key)
-    workdir = Path(tempfile.mkdtemp(prefix="nhgis_xw_"))
-    log.info("Crosswalk build starting", extra={"catalog": catalog, "files": len(CROSSWALK_FILES)})
-
-    written: set[str] = set()
-    run_id = new_run_id()
-    log.info("DQ run id assigned", extra={"run_id": run_id, "pipeline_reference": pipeline_ref})
-
-    with DQRecorder(spark, catalog, run_id, pipeline_ref) as recorder:
+    def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
+        api_key = _get_secret(ipums_secret_scope, ipums_secret_key or "nhgis_api_key")
+        base_url, ipums = _ipums_base_url(api_key)
+        workdir = Path(tempfile.mkdtemp(prefix="nhgis_xw_"))
+        log.info(
+            "Crosswalk build starting",
+            extra={"catalog": catalog, "files": len(CROSSWALK_FILES)},
+        )
+        written: set[str] = set()
+        # Streaming weight-conservation DQ runs per file inside _process_one via
+        # ctx.recorder (bespoke running-sum check); stays inline (ADR 0029).
         for spec in CROSSWALK_FILES:
-            _process_one(spark, catalog, spec, ipums, base_url, workdir, written, recorder)
+            _process_one(spark, catalog, spec, ipums, base_url, workdir, written, ctx.recorder)
 
-    _comment_table(spark, catalog)
-    _set_clustering(spark, catalog)
-    _register_dataset(spark, catalog, pipeline_ref)
+    def _register(spark: SparkSession) -> None:
+        _comment_table(spark, catalog)
+        _set_clustering(spark, catalog)
+        _register_dataset(spark, catalog, PIPELINE_REF)
 
+    def _grant(spark: SparkSession) -> None:
+        # The geography schema-level reader grants are applied by the sibling
+        # geography builds (build_geography / _country / _subdivision); the
+        # us_crosswalk table is covered by those. No crosswalk-specific grant
+        # (behavior preserved -- run() takes no group args).
+        return
+
+    run_build(
+        catalog=catalog,
+        pipeline_reference=PIPELINE_REF,
+        ensure=_ensure,
+        work=_work,
+        register=_register,
+        grant=_grant,
+    )
     log.info("Crosswalk build complete", extra={"catalog": catalog})
 
 
