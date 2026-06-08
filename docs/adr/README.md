@@ -95,6 +95,7 @@ both positive and negative consequences honestly.
 | [0027](0027-bundle-authoring-and-pipeline-standardization.md) | Bundle authoring + pipeline standardization — `common/pipeline.run_build` orchestration seam, thin-entrypoint contract, DAB template + authoring-guide plan (closes the pipeline-standardization backlog item) | Accepted |
 | [0028](0028-geography-hierarchical-filter-views.md) | Geography hierarchical-filter views — `us_county_enriched`/`us_tract_enriched` denormalize parent labels via vintage-keyed joins for filtering child geographies by readable parent; views over denormalized columns (first `run_build` adopter) | Accepted |
 | [0029](0029-dq-check-helper-library.md) | Reusable DQ-check helper library — pure SQL builders + bound `TableDQ` (`unique`/`not_null`/`fk`/`cardinality`/`rowcount_equals`) single-source the recurring check+record+raise; bespoke checks stay inline (extends 0009 within the 0027 seam) | Accepted |
+| [0030](0030-icd10-hierarchy.md) | ICD-10-CM hierarchy — adjacency list + materialized path + denormalized chapter/block on `codes.icd10`, sourced from the tabular XML's chapter→section→diag nesting (prefix-rule fallback for 7th-char codes); additive, edition-scoped | Accepted |
 
 ## Future ADRs (backlog)
 
