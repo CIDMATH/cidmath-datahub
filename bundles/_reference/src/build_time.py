@@ -24,12 +24,15 @@ from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
 from cidmath_datahub.common import grants
+from cidmath_datahub.common.dq import TableDQ
 from cidmath_datahub.common.logging import get_logger
+from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.reference import time as rt
 
 log = get_logger(__name__)
 
 SCHEMA = "time"
+PIPELINE_REF = "bundles/_reference/src/build_time.py"
 
 CALENDAR_SPARK_SCHEMA = T.StructType(
     [
@@ -176,104 +179,131 @@ def run(
     data_engineers_group: str,
     analysts_group: str,
 ) -> None:
-    spark = SparkSession.builder.getOrCreate()
-    pipeline_ref = "bundles/_reference/src/build_time.py"
-
     log.info(
         "Building time reference tables",
         extra={"catalog": catalog, "start_year": start_year, "end_year": end_year},
     )
 
-    spark.sql(
-        f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
-        f"COMMENT 'Canonical time reference: calendar dates and MMWR epi-weeks. "
-        f"Owned by the _reference bundle. See ADR 0014.'"
-    )
+    def _ensure(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
+            f"COMMENT 'Canonical time reference: calendar dates and MMWR epi-weeks. "
+            f"Owned by the _reference bundle. See ADR 0014.'"
+        )
 
-    # --- calendar_date ---
-    # Sort ascending and write as a single file so the table is physically
-    # ordered by date. Consumers should still ORDER BY date for a guaranteed
-    # order, but the on-disk layout makes the common case sorted.
-    cal_rows = rt.generate_calendar(date(start_year, 1, 1), date(end_year, 12, 31))
-    cal_df = (
-        spark.createDataFrame(cal_rows, schema=CALENDAR_SPARK_SCHEMA)
-        .repartition(1)
-        .sortWithinPartitions("date")
-    )
-    cal_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        f"{catalog}.{SCHEMA}.calendar_date"
-    )
-    log.info("Wrote calendar_date", extra={"rows": len(cal_rows)})
+    def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
 
-    # --- epi_week ---
-    wk_rows = rt.generate_epi_weeks(start_year, end_year)
-    wk_df = (
-        spark.createDataFrame(wk_rows, schema=EPI_WEEK_SPARK_SCHEMA)
-        .repartition(1)
-        .sortWithinPartitions("start_date")
-    )
-    wk_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        f"{catalog}.{SCHEMA}.epi_week"
-    )
-    log.info("Wrote epi_week", extra={"rows": len(wk_rows)})
+        # --- calendar_date ---
+        # Sort ascending and write as a single file so the table is physically
+        # ordered by date. Consumers should still ORDER BY date for a guaranteed
+        # order, but the on-disk layout makes the common case sorted.
+        cal_rows = rt.generate_calendar(date(start_year, 1, 1), date(end_year, 12, 31))
+        cal_df = (
+            spark.createDataFrame(cal_rows, schema=CALENDAR_SPARK_SCHEMA)
+            .repartition(1)
+            .sortWithinPartitions("date")
+        )
+        cal_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+            f"{catalog}.{SCHEMA}.calendar_date"
+        )
+        log.info("Wrote calendar_date", extra={"rows": len(cal_rows)})
 
-    # --- table comments ---
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.calendar_date IS "
-        f"'One row per calendar date with ISO and MMWR epi-week attributes. "
-        f"Reference table; full_refresh. ADR 0014.'"
-    )
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.epi_week IS "
-        f"'One row per MMWR epidemiological week (Sunday-Saturday). "
-        f"Reference table; full_refresh. ADR 0014.'"
-    )
+        # --- epi_week ---
+        wk_rows = rt.generate_epi_weeks(start_year, end_year)
+        wk_df = (
+            spark.createDataFrame(wk_rows, schema=EPI_WEEK_SPARK_SCHEMA)
+            .repartition(1)
+            .sortWithinPartitions("start_date")
+        )
+        wk_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+            f"{catalog}.{SCHEMA}.epi_week"
+        )
+        log.info("Wrote epi_week", extra={"rows": len(wk_rows)})
 
-    # --- grants: reader-tier (USE SCHEMA + SELECT) on the time schema ---
-    # The time schema is canonical reference data, owned and written by this
-    # bundle's deploy SP. Human groups — both engineers and analysts — consume
-    # it read-only; neither hand-edits generated reference data (ADR 0018).
-    # Both groups also need USE CATALOG on the catalog to traverse here; that
-    # is granted by an admin in scripts/setup/grant_catalog_permissions.sql
-    # (the deploy SP can't grant catalog-level privileges). See ADR 0018.
-    grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-    grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
+        # Natural-key uniqueness on the canonical PKs (ADR 0029). Generated
+        # deterministically, so a duplicate is a generator regression -- FAIL +
+        # raise. These are this build's first DQ records (previously none).
+        TableDQ(
+            recorder=ctx.recorder,
+            spark=spark,
+            query_table=f"{catalog}.{SCHEMA}.calendar_date",
+            record_table=f"{SCHEMA}.calendar_date",
+        ).unique(keys=["date"], check_name="calendar_date_pk_uniqueness")
+        TableDQ(
+            recorder=ctx.recorder,
+            spark=spark,
+            query_table=f"{catalog}.{SCHEMA}.epi_week",
+            record_table=f"{SCHEMA}.epi_week",
+        ).unique(keys=["epi_week_id"], check_name="epi_week_pk_uniqueness")
 
-    # Verify the applied grants (deploy-time access gate; ADR 0018). Both groups
-    # must hold exactly reader-tier on the time schema — confirms the reads work
-    # and that neither group was accidentally over-granted write access.
-    grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-    grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
-    log.info("Access model verified", extra={"schema": f"{catalog}.{SCHEMA}"})
+    def _register(spark: SparkSession) -> None:
+        # --- table comments ---
+        spark.sql(
+            f"COMMENT ON TABLE {catalog}.{SCHEMA}.calendar_date IS "
+            f"'One row per calendar date with ISO and MMWR epi-week attributes. "
+            f"Reference table; full_refresh. ADR 0014.'"
+        )
+        spark.sql(
+            f"COMMENT ON TABLE {catalog}.{SCHEMA}.epi_week IS "
+            f"'One row per MMWR epidemiological week (Sunday-Saturday). "
+            f"Reference table; full_refresh. ADR 0014.'"
+        )
 
-    # --- metadata registration ---
-    _register_dataset(
-        spark,
+        # --- metadata registration ---
+        _register_dataset(
+            spark,
+            catalog=catalog,
+            table="calendar_date",
+            description="One row per calendar date with ISO week and MMWR epi-week attributes.",
+            public_health_relevance=(
+                "Canonical date dimension for joining and aligning time series across "
+                "all subjects; provides epi-week mapping used throughout surveillance."
+            ),
+            temporal_coverage_start=date(start_year, 1, 1),
+            temporal_coverage_end=date(end_year, 12, 31),
+            pipeline_reference=PIPELINE_REF,
+        )
+        _register_dataset(
+            spark,
+            catalog=catalog,
+            table="epi_week",
+            description="One row per MMWR epidemiological week with Sunday start and Saturday end.",
+            public_health_relevance=(
+                "Canonical epi-week dimension; the standard temporal grain for U.S. "
+                "infectious disease surveillance reporting."
+            ),
+            temporal_coverage_start=date(start_year, 1, 1),
+            temporal_coverage_end=date(end_year, 12, 31),
+            pipeline_reference=PIPELINE_REF,
+        )
+
+    def _grant(spark: SparkSession) -> None:
+        # --- grants: reader-tier (USE SCHEMA + SELECT) on the time schema ---
+        # The time schema is canonical reference data, owned and written by this
+        # bundle's deploy SP. Human groups -- both engineers and analysts -- consume
+        # it read-only; neither hand-edits generated reference data (ADR 0018).
+        # Both groups also need USE CATALOG on the catalog to traverse here; that
+        # is granted by an admin in scripts/setup/grant_catalog_permissions.sql
+        # (the deploy SP can't grant catalog-level privileges). See ADR 0018.
+        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
+
+        # Verify the applied grants (deploy-time access gate; ADR 0018). Both groups
+        # must hold exactly reader-tier on the time schema -- confirms the reads work
+        # and that neither group was accidentally over-granted write access.
+        grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
+        grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
+        log.info("Access model verified", extra={"schema": f"{catalog}.{SCHEMA}"})
+
+    run_build(
         catalog=catalog,
-        table="calendar_date",
-        description="One row per calendar date with ISO week and MMWR epi-week attributes.",
-        public_health_relevance=(
-            "Canonical date dimension for joining and aligning time series across "
-            "all subjects; provides epi-week mapping used throughout surveillance."
-        ),
-        temporal_coverage_start=date(start_year, 1, 1),
-        temporal_coverage_end=date(end_year, 12, 31),
-        pipeline_reference=pipeline_ref,
+        pipeline_reference=PIPELINE_REF,
+        ensure=_ensure,
+        work=_work,
+        register=_register,
+        grant=_grant,
     )
-    _register_dataset(
-        spark,
-        catalog=catalog,
-        table="epi_week",
-        description="One row per MMWR epidemiological week with Sunday start and Saturday end.",
-        public_health_relevance=(
-            "Canonical epi-week dimension; the standard temporal grain for U.S. "
-            "infectious disease surveillance reporting."
-        ),
-        temporal_coverage_start=date(start_year, 1, 1),
-        temporal_coverage_end=date(end_year, 12, 31),
-        pipeline_reference=pipeline_ref,
-    )
-
     log.info("Time reference build complete", extra={"catalog": catalog})
 
 
