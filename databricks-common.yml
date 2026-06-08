@@ -116,6 +116,16 @@ targets:
   dev:
     mode: development
     default: true
+    # Let the engineer-tier group view and trigger the CI-deployed dev jobs.
+    # Dev-scoped (not top-level) so this run access does NOT extend to prod,
+    # where runs are reviewer-gated. DAB reapplies declared ACLs on every deploy,
+    # so this survives redeploys — unlike a manual UI grant, which DAB resets.
+    # Bundle-permission `CAN_RUN` maps to a job's "Can Manage Run" (view + run +
+    # manage runs); runs still execute as the job owner (the deploy SP), so
+    # catalog grants are unaffected.
+    permissions:
+      - level: CAN_RUN
+        group_name: ${var.data_engineers_group}
     workspace:
       host: https://dbc-926acb48-1c75.cloud.databricks.com
     variables:
