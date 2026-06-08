@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import tempfile
+import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable
@@ -117,9 +118,13 @@ def _fetch_zip_member(
     name list; ``encoding`` is ``latin-1`` for the fixed-width order file (so a
     rare non-ASCII byte never aborts the parse) and ``utf-8`` for the tabular XML.
     """
+    # CDC filenames contain spaces (e.g. "Code Descriptions"); percent-encode the
+    # path so urllib doesn't reject the URL for containing a literal space.
+    parts = urllib.parse.urlsplit(url)
+    safe_url = urllib.parse.urlunsplit(parts._replace(path=urllib.parse.quote(parts.path)))
     with tempfile.TemporaryDirectory(prefix="icd10cm_") as tmp:
         zip_path = Path(tmp) / "icd10cm.zip"
-        with urllib.request.urlopen(url) as resp:  # nosec B310 - trusted CDC NCHS host
+        with urllib.request.urlopen(safe_url) as resp:  # nosec B310 - trusted CDC NCHS host
             zip_path.write_bytes(resp.read())
         with zipfile.ZipFile(zip_path) as zf:
             member = selector(zf.namelist())
