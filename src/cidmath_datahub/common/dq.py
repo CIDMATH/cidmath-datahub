@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -251,3 +253,229 @@ class DQRecorder:
             self.flush()
         except Exception:
             log.exception("DQ flush failed; original exception (if any) takes precedence")
+
+
+# ---------------------------------------------------------------------------
+# Reusable DQ checks (ADR 0029)
+# ---------------------------------------------------------------------------
+# Query-based checks that recur in nearly every build -- uniqueness, null,
+# foreign-key integrity, cardinality, rowcount parity -- were re-implemented by
+# hand (fresh SQL + record() + raise) in each entrypoint. These helpers single-
+# source the standard query + record + raise so an entrypoint *declares* its
+# checks. The SQL builders are pure (unit-tested); ``TableDQ`` binds the per-
+# table context and runs them. Bespoke checks (coverage against an in-memory
+# set, density/completeness) stay inline -- these cover the common cases only.
+
+_BLOCKING_SEVERITIES = frozenset({DQSeverity.FAIL, DQSeverity.QUARANTINE})
+
+
+def _where_suffix(where: str | None) -> str:
+    return f" WHERE {where}" if where else ""
+
+
+def count_sql(table: str, where: str | None = None) -> str:
+    """Row count over ``table`` (optionally filtered by ``where``)."""
+    return f"SELECT COUNT(*) AS n FROM {table}{_where_suffix(where)}"
+
+
+def duplicate_count_sql(table: str, keys: Sequence[str], where: str | None = None) -> str:
+    """Count of key-groups that violate uniqueness on ``keys``."""
+    cols = ", ".join(keys)
+    return (
+        f"SELECT COUNT(*) AS n FROM ("
+        f"SELECT {cols} FROM {table}{_where_suffix(where)} "
+        f"GROUP BY {cols} HAVING COUNT(*) > 1)"
+    )
+
+
+def null_count_sql(table: str, columns: Sequence[str], where: str | None = None) -> str:
+    """Count of rows where any of ``columns`` is NULL (within ``where``)."""
+    null_pred = " OR ".join(f"{c} IS NULL" for c in columns)
+    clause = f" WHERE ({where}) AND ({null_pred})" if where else f" WHERE {null_pred}"
+    return f"SELECT COUNT(*) AS n FROM {table}{clause}"
+
+
+def orphan_count_sql(
+    table: str,
+    key: str,
+    parent_table: str,
+    parent_key: str,
+    parent_where: str | None = None,
+    where: str | None = None,
+) -> str:
+    """Count of distinct ``key`` values in ``table`` with no match in the parent."""
+    return (
+        f"SELECT COUNT(*) AS n FROM "
+        f"(SELECT DISTINCT {key} FROM {table}{_where_suffix(where)}) c "
+        f"LEFT ANTI JOIN "
+        f"(SELECT {parent_key} FROM {parent_table}{_where_suffix(parent_where)}) p "
+        f"ON c.{key} = p.{parent_key}"
+    )
+
+
+@dataclass(frozen=True)
+class TableDQ:
+    """Run the recurring DQ checks against one table and record them (ADR 0029).
+
+    Binds the per-table context once: the DQ recorder, the Spark session, the
+    fully-qualified table to query, the (schema-qualified) name to record under
+    in ``_ops.dq_results`` (the ADR 0019 discovery join expects schema.table,
+    not catalog-qualified), and an optional row filter applied to every check.
+    Each method runs its query, records the outcome, and -- for a blocking
+    severity -- raises ``ValueError`` on failure unless ``raise_on_fail=False``.
+    Returns ``True`` if the check passed.
+    """
+
+    recorder: DQRecorder
+    spark: SparkSession
+    query_table: str  # catalog.schema.table -- used in the SQL
+    record_table: str  # schema.table -- recorded in _ops.dq_results
+    where: str | None = None
+
+    def _scalar(self, sql: str) -> int:
+        return int(self.spark.sql(sql).collect()[0]["n"])
+
+    def _emit(
+        self,
+        *,
+        check_name: str,
+        category: DQCategory,
+        severity: DQSeverity,
+        passed: bool,
+        failing_row_count: int,
+        total_row_count: int,
+        details: dict[str, Any],
+        raise_on_fail: bool,
+    ) -> bool:
+        self.recorder.record(
+            table_name=self.record_table,
+            check_name=check_name,
+            category=category,
+            severity=severity,
+            passed=passed,
+            failing_row_count=failing_row_count,
+            total_row_count=total_row_count,
+            details=details if not passed else None,
+        )
+        if raise_on_fail and not passed and severity in _BLOCKING_SEVERITIES:
+            raise ValueError(f"DQ check {check_name!r} failed on {self.record_table}: {details}")
+        return passed
+
+    def unique(
+        self,
+        *,
+        keys: Sequence[str],
+        check_name: str,
+        severity: DQSeverity = DQSeverity.FAIL,
+        raise_on_fail: bool = True,
+    ) -> bool:
+        """Natural-key uniqueness over ``keys``."""
+        dups = self._scalar(duplicate_count_sql(self.query_table, keys, self.where))
+        total = self._scalar(count_sql(self.query_table, self.where))
+        return self._emit(
+            check_name=check_name,
+            category=DQCategory.UNIQUENESS,
+            severity=severity,
+            passed=dups == 0,
+            failing_row_count=dups,
+            total_row_count=total,
+            details={"keys": list(keys), "duplicate_key_groups": dups},
+            raise_on_fail=raise_on_fail,
+        )
+
+    def not_null(
+        self,
+        *,
+        columns: Sequence[str],
+        check_name: str,
+        severity: DQSeverity = DQSeverity.FAIL,
+        raise_on_fail: bool = True,
+    ) -> bool:
+        """No NULLs in ``columns``."""
+        nulls = self._scalar(null_count_sql(self.query_table, columns, self.where))
+        total = self._scalar(count_sql(self.query_table, self.where))
+        return self._emit(
+            check_name=check_name,
+            category=DQCategory.NULLABILITY,
+            severity=severity,
+            passed=nulls == 0,
+            failing_row_count=nulls,
+            total_row_count=total,
+            details={"columns": list(columns), "null_rows": nulls},
+            raise_on_fail=raise_on_fail,
+        )
+
+    def fk(
+        self,
+        *,
+        key: str,
+        parent_table: str,
+        parent_key: str,
+        check_name: str,
+        parent_where: str | None = None,
+        severity: DQSeverity = DQSeverity.FAIL,
+        raise_on_fail: bool = True,
+    ) -> bool:
+        """Every ``key`` value resolves to a row in ``parent_table.parent_key``."""
+        orphans = self._scalar(
+            orphan_count_sql(
+                self.query_table, key, parent_table, parent_key, parent_where, self.where
+            )
+        )
+        total = self._scalar(count_sql(self.query_table, self.where))
+        return self._emit(
+            check_name=check_name,
+            category=DQCategory.REFERENTIAL,
+            severity=severity,
+            passed=orphans == 0,
+            failing_row_count=orphans,
+            total_row_count=total,
+            details={"key": key, "parent": parent_table, "orphan_key_values": orphans},
+            raise_on_fail=raise_on_fail,
+        )
+
+    def cardinality(
+        self,
+        *,
+        check_name: str,
+        min_rows: int | None = None,
+        max_rows: int | None = None,
+        severity: DQSeverity = DQSeverity.WARN,
+        raise_on_fail: bool = False,
+    ) -> bool:
+        """Row count within ``[min_rows, max_rows]`` (either bound optional)."""
+        total = self._scalar(count_sql(self.query_table, self.where))
+        passed = (min_rows is None or total >= min_rows) and (max_rows is None or total <= max_rows)
+        return self._emit(
+            check_name=check_name,
+            category=DQCategory.CARDINALITY,
+            severity=severity,
+            passed=passed,
+            failing_row_count=0 if passed else total,
+            total_row_count=total,
+            details={"expected_min": min_rows, "expected_max": max_rows, "actual": total},
+            raise_on_fail=raise_on_fail,
+        )
+
+    def rowcount_equals(
+        self,
+        *,
+        other_table: str,
+        check_name: str,
+        category: DQCategory = DQCategory.REFERENTIAL,
+        severity: DQSeverity = DQSeverity.FAIL,
+        raise_on_fail: bool = True,
+    ) -> bool:
+        """This table's row count (under ``where``) equals ``other_table``'s."""
+        this_n = self._scalar(count_sql(self.query_table, self.where))
+        other_n = self._scalar(count_sql(other_table, self.where))
+        return self._emit(
+            check_name=check_name,
+            category=category,
+            severity=severity,
+            passed=this_n == other_n,
+            failing_row_count=abs(this_n - other_n),
+            total_row_count=this_n,
+            details={"this_rows": this_n, "other_rows": other_n, "other_table": other_table},
+            raise_on_fail=raise_on_fail,
+        )

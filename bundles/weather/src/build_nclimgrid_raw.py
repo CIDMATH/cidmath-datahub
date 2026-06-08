@@ -38,7 +38,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
 from cidmath_datahub.common import grants
-from cidmath_datahub.common.dq import DQRecorder
+from cidmath_datahub.common.dq import DQRecorder, TableDQ
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
@@ -153,29 +153,19 @@ def _dq_checks(
     """
     full = f"{catalog}.{FULL_TABLE_REL}"
     where = f"year(obs_date) BETWEEN {start_year} AND {end_year}"
-
-    dup = spark.sql(
-        f"""
-        SELECT COUNT(*) AS dups FROM (
-            SELECT region_type, region_code, variable, obs_date, COUNT(*) c
-            FROM {full} WHERE {where}
-            GROUP BY region_type, region_code, variable, obs_date HAVING COUNT(*) > 1
-        )
-        """
-    ).collect()[0]["dups"]
-    total = spark.sql(f"SELECT COUNT(*) AS n FROM {full} WHERE {where}").collect()[0]["n"]
-    recorder.record(
-        table_name=FULL_TABLE_REL,
-        check_name="nclimgrid_raw_key_uniqueness",
-        category=DQCategory.UNIQUENESS,
-        severity=DQSeverity.FAIL,
-        passed=dup == 0,
-        failing_row_count=int(dup),
-        total_row_count=int(total),
-        details={"key": "region_type, region_code, variable, obs_date"} if dup else None,
+    dq = TableDQ(
+        recorder=recorder, spark=spark, query_table=full, record_table=FULL_TABLE_REL, where=where
     )
-    if dup:
-        raise ValueError(f"Duplicate nClimGrid raw keys in {start_year}-{end_year}: {dup}")
+
+    # 1. Natural-key uniqueness (blocking) — shared helper (ADR 0029); records the
+    # UNIQUENESS check and raises on a duplicate key, replacing the hand-written
+    # dup-count + record + raise.
+    dq.unique(
+        keys=["region_type", "region_code", "variable", "obs_date"],
+        check_name="nclimgrid_raw_key_uniqueness",
+    )
+
+    total = spark.sql(f"SELECT COUNT(*) AS n FROM {full} WHERE {where}").collect()[0]["n"]
 
     bad_vocab = spark.sql(
         f"""

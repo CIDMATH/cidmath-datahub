@@ -43,7 +43,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
 from cidmath_datahub.common import grants, registration
-from cidmath_datahub.common.dq import DQRecorder
+from cidmath_datahub.common.dq import DQRecorder, TableDQ
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
@@ -372,28 +372,13 @@ def _dq_checks(
         details={"prcp_min": 0, "temp_range_c": [TEMP_MIN_C, TEMP_MAX_C]} if bad_values else None,
     )
 
-    # 5. natural-key uniqueness (blocking).
-    dup = spark.sql(
-        f"""
-        SELECT COUNT(*) AS dups FROM (
-            SELECT geo_level, geoid, variable, obs_date, COUNT(*) c
-            FROM {full} WHERE {where}
-            GROUP BY geo_level, geoid, variable, obs_date HAVING COUNT(*) > 1
-        )
-        """
-    ).collect()[0]["dups"]
-    recorder.record(
-        table_name=FULL_TABLE_REL,
+    # 5. natural-key uniqueness (blocking) — shared helper (ADR 0029).
+    TableDQ(
+        recorder=recorder, spark=spark, query_table=full, record_table=FULL_TABLE_REL, where=where
+    ).unique(
+        keys=["geo_level", "geoid", "variable", "obs_date"],
         check_name="nclimgrid_processed_key_uniqueness",
-        category=DQCategory.UNIQUENESS,
-        severity=DQSeverity.FAIL,
-        passed=dup == 0,
-        failing_row_count=int(dup),
-        total_row_count=total,
-        details={"key": "geo_level, geoid, variable, obs_date"} if dup else None,
     )
-    if dup:
-        raise ValueError(f"Duplicate processed keys in {start_year}-{end_year}: {dup}")
 
 
 def _comment_table(spark: SparkSession, catalog: str) -> None:
