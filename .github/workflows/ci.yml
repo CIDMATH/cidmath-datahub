@@ -70,7 +70,25 @@ jobs:
           coverage report --skip-empty
           coverage xml
 
+  discover-bundles:
+    # Emit the validate matrix from the filesystem so every bundle is checked
+    # automatically — no hand-maintained list to forget (the weather bundle was
+    # missed under the old hard-coded matrix).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      bundles: ${{ steps.find.outputs.bundles }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        name: Discover bundles (every bundles/* dir with a databricks.yml)
+        run: |
+          bundles=$(for d in bundles/*/; do [ -f "${d}databricks.yml" ] && basename "$d"; done | jq -R . | jq -s -c .)
+          echo "Discovered bundles: $bundles"
+          echo "bundles=$bundles" >> "$GITHUB_OUTPUT"
+
   bundle-validate:
+    needs: discover-bundles
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Use the dev environment so `DATABRICKS_CLIENT_ID` (the dev SP's
@@ -80,8 +98,7 @@ jobs:
     environment: dev
     strategy:
       matrix:
-        bundle: [_platform, _reference]
-        # Add bundles to this list as they land: wastewater, vaccine, etc.
+        bundle: ${{ fromJson(needs.discover-bundles.outputs.bundles) }}
 
     steps:
       - uses: actions/checkout@v4
