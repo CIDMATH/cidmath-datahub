@@ -108,9 +108,11 @@ ORDER_FILE_FORMAT_DOC_URL = (
 
 #: The order file inside either zip: ``icd10cm-order-2026.txt`` (base),
 #: ``icd10cm-order-April-1-2026.txt`` (update), or the older ``icd10cm_order_2024.txt``.
-#: Matched case-insensitively and separator-agnostically so we pick the order file
-#: -- which carries the billable flag and both descriptions -- and never the
-#: ``icd10cm-codes-*.txt`` (billable-only) file.
+#: Matched case-insensitively and separator-agnostically so we pick the full order
+#: file -- which carries the billable flag and both descriptions -- and never the
+#: ``icd10cm-codes-*.txt`` (billable-only) file. The zip also ships change-only
+#: ``icd10cm-order-addenda-*.txt`` deltas; :func:`select_order_file_member` drops
+#: those (they also match this pattern) so only the full order file remains.
 ORDER_FILE_MEMBER_RE = re.compile(r"icd10cm[-_ ]order[-_ ].*\.txt$", re.IGNORECASE)
 
 #: The tabular XML inside the "table and index" zip, e.g. ``icd10cm-tabular-2026.xml``
@@ -163,10 +165,13 @@ def select_order_file_member(names: Iterable[str]) -> str:
         ValueError: If zero or more than one member matches -- either is a sign
             the release layout changed and the entrypoint should be revisited.
     """
-    matches = sorted(n for n in names if ORDER_FILE_MEMBER_RE.search(n))
+    # Exclude the change-only *-addenda-* delta files; we want the full order file.
+    matches = sorted(
+        n for n in names if ORDER_FILE_MEMBER_RE.search(n) and "addenda" not in n.lower()
+    )
     if len(matches) != 1:
         raise ValueError(
-            f"Expected exactly one ICD-10-CM order file (icd10cm*order*.txt); "
+            f"Expected exactly one ICD-10-CM order file (icd10cm*order*.txt, non-addenda); "
             f"found {matches or 'none'} among {sorted(names)}"
         )
     return matches[0]
@@ -191,10 +196,13 @@ def select_tabular_xml_member(names: Iterable[str]) -> str:
         ValueError: If zero or more than one member matches
             :data:`TABULAR_XML_MEMBER_RE` -- a sign the release layout changed.
     """
-    matches = sorted(n for n in names if TABULAR_XML_MEMBER_RE.search(n))
+    # Exclude any *-addenda-* delta files; we want the full tabular XML.
+    matches = sorted(
+        n for n in names if TABULAR_XML_MEMBER_RE.search(n) and "addenda" not in n.lower()
+    )
     if len(matches) != 1:
         raise ValueError(
-            f"Expected exactly one ICD-10-CM tabular XML (icd10cm*tabular*.xml); "
+            f"Expected exactly one ICD-10-CM tabular XML (icd10cm*tabular*.xml, non-addenda); "
             f"found {matches or 'none'} among {sorted(names)}"
         )
     return matches[0]
