@@ -207,6 +207,19 @@ class TestSourceLocators:
         with pytest.raises(ValueError, match="exactly one"):
             icd10.select_order_file_member(["icd10cm-order-2025.txt", "icd10cm-order-2026.txt"])
 
+    def test_select_order_file_member_ignores_addenda(self):
+        # The real FY2026 "Code Descriptions" zip ships the full order file AND a
+        # change-only order-addenda file; pick the full one, drop the addenda.
+        members = [
+            "icd10OrderFiles.pdf",
+            "icd10cm-codes-2026.txt",
+            "icd10cm-codes-addenda-2026.txt",
+            "icd10cm-order-2026.txt",
+            "icd10cm-order-addenda-2026.txt",
+            "icd10cmCodesFile.pdf",
+        ]
+        assert icd10.select_order_file_member(members) == "icd10cm-order-2026.txt"
+
 
 @pytest.mark.unit
 class TestOverlayRecords:
