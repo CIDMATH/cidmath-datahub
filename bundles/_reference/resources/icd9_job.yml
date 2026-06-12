@@ -1,0 +1,61 @@
+# Job that builds the canonical codes.icd9 reference table (ADR 0014/0031).
+#
+# Downloads the NCHS ICD-9-CM DTAB (tabular list) and APPNDX (Appendix E) RTF
+# zips for the requested fiscal-year edition(s), converts RTF -> text (striprtf),
+# parses/normalizes/validates and builds the classification hierarchy via
+# cidmath_datahub.reference.icd9, and writes ecdh_model_<env>.codes.icd9 keyed by
+# (icd9_code, edition_year). Mirrors codes.icd10's shape (ADR 0031). Thin
+# entrypoint over the run_build seam (ADR 0027); full_refresh per edition
+# (ADR 0024). ICD-9-CM is frozen, so base annual editions only.
+#
+# Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**);
+# UI-triggered. Load multiple editions via --edition-year (e.g. "2014" "2013").
+#
+# See bundles/_reference/src/build_icd9.py and ADR 0014/0015/0031.
+
+resources:
+  jobs:
+    build_icd9_reference:
+      name: "[_reference] build_icd9_reference"
+      description: |
+        Builds codes.icd9 (ICD-9-CM diagnosis code system, NCHS) in the
+        integrated catalog. One row per code per fiscal-year edition (incl. V/E);
+        PK (icd9_code, edition_year). Blocking DQ: uniqueness, non-null
+        description, code-format, parent referential integrity. Frozen source;
+        full_refresh per edition.
+
+      tasks:
+        - task_key: build_icd9
+          spark_python_task:
+            python_file: ../src/build_icd9.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--edition-year"
+              - "2014"
+              - "--hierarchy"
+              - "build"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: icd9_env
+
+      environments:
+        - environment_key: icd9_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+              - striprtf>=0.0.26
+
+      timeout_seconds: 3600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}
