@@ -77,13 +77,18 @@ def edition_dir_year(edition_year: int) -> int:
 
 
 def dtab_zip_url(edition_year: int, base: str = SOURCE_FTP_BASE) -> str:
-    """URL of an edition's ``DTAB<NN>.ZIP`` (Tabular List of Diseases, Vol 1)."""
-    return f"{base}/{edition_dir_year(edition_year)}/DTAB{edition_suffix(edition_year)}.ZIP"
+    """URL of an edition's ``Dtab<NN>.zip`` (Tabular List of Diseases, Vol 1).
+
+    The FTP filenames are title-case with a lower-case extension (confirmed in the
+    ``/2011/`` listing: ``Dtab12.zip``); HTTP paths are case-sensitive. Older dirs
+    may differ -- override ``base`` (or extend) if a backfill edition 404s.
+    """
+    return f"{base}/{edition_dir_year(edition_year)}/Dtab{edition_suffix(edition_year)}.zip"
 
 
 def appendix_zip_url(edition_year: int, base: str = SOURCE_FTP_BASE) -> str:
-    """URL of an edition's ``APPNDX<NN>.ZIP`` (contains Appendix E, ``DC_3D``)."""
-    return f"{base}/{edition_dir_year(edition_year)}/APPNDX{edition_suffix(edition_year)}.ZIP"
+    """URL of an edition's ``Appndx<NN>.zip`` (contains Appendix E, ``DC_3D``)."""
+    return f"{base}/{edition_dir_year(edition_year)}/Appndx{edition_suffix(edition_year)}.zip"
 
 
 def readme_url(edition_year: int, base: str = SOURCE_FTP_BASE) -> str:

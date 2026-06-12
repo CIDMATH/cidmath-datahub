@@ -18,8 +18,12 @@ suffix). ICD-9-CM is frozen, so editions are pure annual base releases (no
 mid-year overlay). ``--hierarchy`` (``build`` / ``skip``) controls the Appendix-E
 download; adjacency is always computed from the code set.
 
+The NCHS FTP archive's latest full RTF release is FY2012 (directory ``2011``);
+FY2013/FY2014 were not redistributed there (the partial code freeze). Available
+editions run roughly FY1997-FY2012.
+
 Usage:
-    build_icd9.py --catalog ecdh_model_dev --edition-year 2014 2013 2012 \\
+    build_icd9.py --catalog ecdh_model_dev --edition-year 2012 2011 2010 \\
         --data-engineers-group ecdh-data-engineers --analysts-group ecdh-analysts
 """
 
@@ -422,8 +426,8 @@ def main() -> None:
         "--edition-year",
         type=int,
         nargs="+",
-        default=[2014],
-        help="ICD-9-CM fiscal-year edition(s) to load. Default: 2014 (the final edition).",
+        default=[2012],
+        help="ICD-9-CM fiscal-year edition(s). Default: 2012 (latest full RTF release; dir 2011).",
     )
     parser.add_argument(
         "--hierarchy",
