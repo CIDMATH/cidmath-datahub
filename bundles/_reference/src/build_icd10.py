@@ -136,17 +136,29 @@ def _fetch_zip_member(
 def _fetch_optional_zip_member(
     url: str, selector: Callable[[list[str]], str], *, encoding: str, required: bool
 ) -> tuple[str, str] | None:
-    """Fetch a zip member, returning ``None`` on a 404 unless ``required``.
+    """Fetch a zip member, returning ``None`` when an optional source is absent
+    or unusable (unless ``required``).
 
-    Pre-FY2025 editions have no mid-year ``{year}-update/`` directory, so a 404
-    is the expected "not published this edition" signal -- skipped with a WARN.
-    With ``required=True`` a 404 propagates. Non-404 errors always propagate.
+    Two "no update this edition" signals are tolerated for an optional source and
+    skipped with a WARN: a 404 (pre-FY2025 editions have no ``{year}-update/``
+    directory), and a zip that exists but carries no usable member -- e.g. a
+    code-neutral mid-year update that ships only PDFs (FY2026's Apr-1 update has
+    no new codes, so its zip has no order/tabular file). With ``required=True``
+    both propagate. Other errors always propagate.
     """
     try:
         return _fetch_zip_member(url, selector, encoding=encoding)
     except HTTPError as exc:
         if exc.code == 404 and not required:
             log.warning("Optional source not found (skipping)", extra={"url": url})
+            return None
+        raise
+    except ValueError as exc:
+        if not required:
+            log.warning(
+                "Optional source has no usable member (skipping)",
+                extra={"url": url, "error": str(exc)},
+            )
             return None
         raise
 
