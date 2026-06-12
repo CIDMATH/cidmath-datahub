@@ -183,22 +183,27 @@ class TestAssembleRecords:
         assert len(recs) == 1 and recs[0].description == "First"
 
 
-# A real-shaped slice of Appendix E (DC_3D, "List of Three-Digit Categories")
-# after RTF->text: numbered chapter headers, title-case block headers with ranges,
-# and category lines. (V/E supplementary classifications intentionally omitted to
-# exercise the unmapped-category WARN path -- ADR 0031 open question.)
-APPENDIX_E_SAMPLE = """\
-1. INFECTIOUS AND PARASITIC DISEASES (001-139)
-
-   Intestinal Infectious Diseases (001-009)
-   001  Cholera
-   002  Typhoid and paratyphoid fevers
-
-3. ENDOCRINE, NUTRITIONAL AND METABOLIC DISEASES (240-279)
-
-   Diseases Of Other Endocrine Glands (249-259)
-   250  Diabetes mellitus
-"""
+# A slice of Appendix E (DC_3D, "List of Three-Digit Categories") in the real
+# striprtf shape (verified against the 2012 edition): chapter headers are
+# "<n>.<TAB>ALL-CAPS NAME" with NO code range; block headers are sentence-case
+# "Name (low-high)"; category lines are "<code><TAB>Title". (V/E categories are
+# intentionally omitted to exercise the unmapped-block WARN path.)
+APPENDIX_E_SAMPLE = (
+    "\n".join(
+        [
+            "Appendix E",
+            "List of Three-Digit Categories",
+            "1.\tINFECTIOUS AND PARASITIC DISEASES",
+            "Intestinal infectious diseases (001-009)",
+            "001\tCholera",
+            "002\tTyphoid and paratyphoid fevers",
+            "3.\tENDOCRINE, NUTRITIONAL AND METABOLIC DISEASES",
+            "Diseases of other endocrine glands (249-259)",
+            "250\tDiabetes mellitus",
+        ]
+    )
+    + "\n"
+)
 
 
 @pytest.mark.unit
@@ -254,15 +259,13 @@ class TestChapterMap:
 
 @pytest.mark.unit
 class TestAppendixE:
-    def test_category_to_chapter_block(self):
+    def test_category_to_block(self):
         m = icd9.parse_appendix_e(APPENDIX_E_SAMPLE)
-        assert m["250"].chapter_code == "3"
-        assert m["250"].chapter_name == "ENDOCRINE, NUTRITIONAL AND METABOLIC DISEASES"
-        assert m["250"].block_code == "249-259"
-        assert m["250"].block_name == "Diseases Of Other Endocrine Glands"
-        assert m["001"].chapter_code == "1"
-        assert m["001"].block_code == "001-009"
+        assert m["250"] == ("249-259", "Diseases of other endocrine glands")
+        assert m["001"] == ("001-009", "Intestinal infectious diseases")
         assert "002" in m  # all categories under a block are mapped
+        # chapter headers (no range) and preamble lines don't leak in as blocks
+        assert "139" not in m and "240" not in m
 
 
 @pytest.mark.unit

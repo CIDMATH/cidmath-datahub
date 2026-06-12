@@ -364,7 +364,7 @@ def run(
         dtab_text, dtab_member = _fetch_rtf_text(dtab_url, icd9.select_dtab_member)
         edition_records = icd9.assemble_records(icd9.parse_dtab(dtab_text), year)
 
-        category_map: dict[str, icd9.CategoryGroup] = {}
+        category_map: dict[str, tuple[str, str]] = {}
         appendix_member: str | None = None
         if hierarchy != "skip":
             apx_url = icd9.appendix_zip_url(year)
