@@ -181,3 +181,121 @@ class TestAssembleRecords:
     def test_dedup_first_wins(self):
         recs = icd9.assemble_records([("250", "First"), ("250", "Second")], EDITION)
         assert len(recs) == 1 and recs[0].description == "First"
+
+
+# A real-shaped slice of Appendix E (DC_3D, "List of Three-Digit Categories")
+# after RTF->text: numbered chapter headers, title-case block headers with ranges,
+# and category lines. (V/E supplementary classifications intentionally omitted to
+# exercise the unmapped-category WARN path -- ADR 0031 open question.)
+APPENDIX_E_SAMPLE = """\
+1. INFECTIOUS AND PARASITIC DISEASES (001-139)
+
+   Intestinal Infectious Diseases (001-009)
+   001  Cholera
+   002  Typhoid and paratyphoid fevers
+
+3. ENDOCRINE, NUTRITIONAL AND METABOLIC DISEASES (240-279)
+
+   Diseases Of Other Endocrine Glands (249-259)
+   250  Diabetes mellitus
+"""
+
+
+@pytest.mark.unit
+class TestCodePrefixesAndAncestors:
+    @pytest.mark.parametrize(
+        "code,expected",
+        [
+            ("250.00", ["250", "250.0"]),
+            ("250.0", ["250"]),
+            ("250", []),  # a category has no proper prefix
+            ("V30.00", ["V30", "V30.0"]),
+            ("E812.0", ["E812"]),  # E category is 4 chars -> decimal after the 4th
+            ("E812", []),
+        ],
+    )
+    def test_code_prefixes(self, code, expected):
+        assert icd9.code_prefixes(code) == expected
+
+    def test_category_of(self):
+        assert icd9.category_of("250.00") == "250"
+        assert icd9.category_of("V30.0") == "V30"
+        assert icd9.category_of("E812.0") == "E812"
+
+    def test_ancestors_only_existing(self):
+        code_set = {"250", "250.0", "250.00"}
+        assert icd9.ancestors_for("250.00", code_set) == ["250", "250.0"]
+        # if an intermediate is missing, it's skipped
+        assert icd9.ancestors_for("250.00", {"250", "250.00"}) == ["250"]
+
+
+@pytest.mark.unit
+class TestAppendixE:
+    def test_category_to_chapter_block(self):
+        m = icd9.parse_appendix_e(APPENDIX_E_SAMPLE)
+        assert m["250"].chapter_code == "3"
+        assert m["250"].chapter_name == "ENDOCRINE, NUTRITIONAL AND METABOLIC DISEASES"
+        assert m["250"].block_code == "249-259"
+        assert m["250"].block_name == "Diseases Of Other Endocrine Glands"
+        assert m["001"].chapter_code == "1"
+        assert m["001"].block_code == "001-009"
+        assert "002" in m  # all categories under a block are mapped
+
+
+@pytest.mark.unit
+class TestBuildHierarchy:
+    def _nodes(self):
+        records = icd9.assemble_records(icd9.parse_dtab(DTAB_SAMPLE), EDITION)
+        category_map = icd9.parse_appendix_e(APPENDIX_E_SAMPLE)
+        return {n.icd9_code: n for n in icd9.build_hierarchy(records, category_map)}
+
+    def test_adjacency_and_path(self):
+        n = self._nodes()["250.00"]
+        assert n.parent_icd9_code == "250.0"
+        assert n.ancestor_codes == ("250", "250.0")
+        assert n.node_level == 2
+        assert n.chapter_code == "3"
+        assert n.block_code == "249-259"
+        assert n.is_billable is True
+
+    def test_category_root_has_null_parent(self):
+        nodes = self._nodes()
+        assert nodes["250"].parent_icd9_code is None
+        assert nodes["250"].node_level == 0
+        assert nodes["250.0"].ancestor_codes == ("250",)
+
+    def test_contract_node_level_equals_len_ancestors(self):
+        # the shared code-system contract (ADR 0031), identical to codes.icd10
+        for n in self._nodes().values():
+            assert n.node_level == len(n.ancestor_codes)
+
+    def test_subtree_semantics_match_icd10(self):
+        # WHERE array_contains(ancestor_codes, '250') selects the 250 subtree
+        nodes = self._nodes().values()
+        subtree = {n.icd9_code for n in nodes if "250" in n.ancestor_codes}
+        assert subtree == {"250.0", "250.00"}  # descendants, not 250 itself
+
+    def test_empty_category_map_leaves_chapter_block_null(self):
+        records = icd9.assemble_records(icd9.parse_dtab(DTAB_SAMPLE), EDITION)
+        nodes = {n.icd9_code: n for n in icd9.build_hierarchy(records, {})}
+        # adjacency still computed; chapter/block null
+        assert nodes["250.00"].parent_icd9_code == "250.0"
+        assert all(n.chapter_code is None for n in nodes.values())
+
+
+@pytest.mark.unit
+class TestHierarchyDQ:
+    def _nodes(self):
+        records = icd9.assemble_records(icd9.parse_dtab(DTAB_SAMPLE), EDITION)
+        category_map = icd9.parse_appendix_e(APPENDIX_E_SAMPLE)
+        return icd9.build_hierarchy(records, category_map)
+
+    def test_dangling_parents_empty_by_construction(self):
+        assert icd9.find_dangling_parents(self._nodes()) == []
+
+    def test_orphans_empty(self):
+        assert icd9.find_orphan_codes(self._nodes()) == []
+
+    def test_unmapped_categories_flag_ve(self):
+        # 001 and 250 are in Appendix E; the V/E categories are not -> flagged
+        assert icd9.find_unmapped_categories(self._nodes()) == ["E810", "E812", "V30"]

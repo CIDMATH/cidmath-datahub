@@ -290,6 +290,169 @@ def assemble_records(pairs: Iterable[tuple[str, str]], edition_year: int) -> lis
 
 
 # ---------------------------------------------------------------------------
+# Hierarchy (ADR 0031): prefix-rule adjacency + Appendix-E chapter/block. Mirrors
+# codes.icd10's contract (parent / ancestor_codes / node_level + chapter/block) so
+# the two tables share subtree / chapter-rollup semantics. All pure / no Spark.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CategoryGroup:
+    """Chapter + block a three-digit category belongs to (from Appendix E)."""
+
+    chapter_code: str
+    chapter_name: str
+    block_code: str
+    block_name: str
+
+
+@dataclass(frozen=True)
+class Icd9Node:
+    """An ICD-9-CM code enriched with its place in the classification tree.
+
+    Carries the shared code-system hierarchy contract (ADR 0031): adjacency
+    (``parent_icd9_code``), a materialized path (``ancestor_codes``, root->parent),
+    depth (``node_level`` == ``len(ancestor_codes)``), and denormalized chapter/
+    block. ``ancestor_codes`` is a tuple so the node is hashable; the entrypoint
+    passes it straight to a Spark ``ARRAY<STRING>`` column.
+    """
+
+    icd9_code: str
+    edition_year: int
+    description: str
+    is_billable: bool
+    parent_icd9_code: str | None
+    node_level: int
+    ancestor_codes: tuple[str, ...]
+    chapter_code: str | None
+    chapter_name: str | None
+    block_code: str | None
+    block_name: str | None
+
+
+def category_of(code: str) -> str:
+    """Return a code's category (the text before the decimal).
+
+    Numeric and V codes have a 3-character category (``250``, ``V30``); E codes a
+    4-character one (``E812``).
+    """
+    return code.split(".", 1)[0]
+
+
+def code_prefixes(code: str) -> list[str]:
+    """Return a code's proper dotted prefixes, shortest (category) first.
+
+    Respects ICD-9 decimal placement: numeric / V codes dot after the 3rd char, E
+    codes after the 4th. So ``250.00`` -> ``["250", "250.0"]`` and ``E812.0`` ->
+    ``["E812"]``. A category (``250`` / ``V30`` / ``E812``) has no proper prefix.
+    """
+    undotted = code.replace(".", "")
+    cat_len = 4 if undotted.startswith("E") else 3
+    prefixes: list[str] = []
+    for length in range(cat_len, len(undotted)):
+        stem = undotted[:length]
+        prefixes.append(stem if length <= cat_len else f"{stem[:cat_len]}.{stem[cat_len:]}")
+    return prefixes
+
+
+def ancestors_for(code: str, code_set: set[str]) -> list[str]:
+    """Return ``code``'s ancestors: the proper prefixes that exist in ``code_set``.
+
+    The longest-existing-prefix rule (ADR 0031). ICD-9 nests cleanly by string
+    prefix, so this reconstructs the tree directly from the edition's code set.
+
+    Returns:
+        Ancestor codes, root->parent order (empty for a top-level category).
+    """
+    return [p for p in code_prefixes(code) if p in code_set]
+
+
+#: Appendix E ("List of Three-Digit Categories", ``DC_3D`` RTF) lines: a numbered
+#: chapter header ("1. INFECTIOUS ... (001-139)"), a title-case block/section
+#: header ("Intestinal Infectious Diseases (001-009)"), or a category line
+#: ("001  Cholera"). NOTE: validate against a real ``DC_3D`` extract, and confirm
+#: whether it enumerates the V/E supplementary classifications (ADR 0031 open Q).
+_APX_CHAPTER_RE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*\(([A-Z0-9]+\s*-\s*[A-Z0-9]+)\)\s*$")
+_APX_BLOCK_RE = re.compile(r"^\s*([A-Za-z][^()]*?)\s*\(([A-Z0-9]+\s*-\s*[A-Z0-9]+)\)\s*$")
+_APX_CATEGORY_RE = re.compile(r"^\s*(\d{3}|V\d{2}|E\d{3})\s+(\S.*?)\s*$")
+
+
+def parse_appendix_e(text: str) -> dict[str, CategoryGroup]:
+    """Parse Appendix E text into a ``category -> CategoryGroup`` map (ADR 0031).
+
+    Walks chapter -> block -> category, carrying the current chapter/block onto
+    each three-digit category. Only chapter/block labels come from here; adjacency
+    comes from the code set (prefix rule).
+
+    Args:
+        text: The ``DC_3D`` RTF converted to plain text.
+
+    Returns:
+        Map from category (e.g. ``"250"``) to its chapter/block.
+    """
+    mapping: dict[str, CategoryGroup] = {}
+    chapter_code: str | None = None
+    chapter_name = ""
+    block_code = ""
+    block_name = ""
+    for line in text.splitlines():
+        chapter = _APX_CHAPTER_RE.match(line)
+        if chapter:
+            chapter_code, chapter_name = chapter.group(1), chapter.group(2).strip()
+            block_code = block_name = ""
+            continue
+        block = _APX_BLOCK_RE.match(line)
+        if block:
+            block_name, block_code = block.group(1).strip(), block.group(2).replace(" ", "")
+            continue
+        category = _APX_CATEGORY_RE.match(line)
+        if category and chapter_code is not None:
+            mapping[normalize_code(category.group(1))] = CategoryGroup(
+                chapter_code=chapter_code,
+                chapter_name=chapter_name,
+                block_code=block_code,
+                block_name=block_name,
+            )
+    return mapping
+
+
+def build_hierarchy(
+    records: list[Icd9Record], category_map: dict[str, CategoryGroup]
+) -> list[Icd9Node]:
+    """Enrich one edition's records with adjacency + path + chapter/block (ADR 0031).
+
+    Adjacency / ancestors / depth come from the prefix rule over the edition's own
+    code set; chapter/block from ``category_map`` (Appendix E), keyed by the code's
+    category. ``category_map`` may be empty (chapter/block left null). ``records``
+    must be a single edition.
+
+    Returns:
+        One :class:`Icd9Node` per record, in input order.
+    """
+    code_set = {r.icd9_code for r in records}
+    nodes: list[Icd9Node] = []
+    for r in records:
+        ancestors = tuple(ancestors_for(r.icd9_code, code_set))
+        grp = category_map.get(category_of(r.icd9_code))
+        nodes.append(
+            Icd9Node(
+                icd9_code=r.icd9_code,
+                edition_year=r.edition_year,
+                description=r.description,
+                is_billable=r.is_billable,
+                parent_icd9_code=ancestors[-1] if ancestors else None,
+                node_level=len(ancestors),
+                ancestor_codes=ancestors,
+                chapter_code=grp.chapter_code if grp else None,
+                chapter_name=grp.chapter_name if grp else None,
+                block_code=grp.block_code if grp else None,
+                block_name=grp.block_name if grp else None,
+            )
+        )
+    return nodes
+
+
+# ---------------------------------------------------------------------------
 # DQ helpers (pure; the entrypoint records results via ctx.recorder, ADR 0009)
 # ---------------------------------------------------------------------------
 
@@ -315,3 +478,32 @@ def find_duplicate_keys(records: list[Icd9Record]) -> list[tuple[str, int]]:
         key = (r.icd9_code, r.edition_year)
         seen[key] = seen.get(key, 0) + 1
     return [key for key, count in seen.items() if count > 1]
+
+
+def find_dangling_parents(nodes: list[Icd9Node]) -> list[str]:
+    """Return codes whose non-null parent is absent from the edition (blocking; ADR 0031).
+
+    The adjacency tree's intra-table referential integrity. Empty by construction
+    (parents come from the code set via :func:`ancestors_for`), but checked so any
+    anomaly surfaces as a blocking FAIL.
+    """
+    code_set = {n.icd9_code for n in nodes}
+    return [
+        n.icd9_code
+        for n in nodes
+        if n.parent_icd9_code is not None and n.parent_icd9_code not in code_set
+    ]
+
+
+def find_unmapped_categories(nodes: list[Icd9Node]) -> list[str]:
+    """Return distinct categories whose chapter/block didn't resolve (WARN; ADR 0031).
+
+    A category absent from the Appendix-E map yields null chapter/block (e.g. the V/E
+    classifications if Appendix E doesn't enumerate them); flagged, not blocking.
+    """
+    return sorted({category_of(n.icd9_code) for n in nodes if n.chapter_code is None})
+
+
+def find_orphan_codes(nodes: list[Icd9Node]) -> list[str]:
+    """Return subcategory codes (dotted) that found no parent in their edition (WARN)."""
+    return [n.icd9_code for n in nodes if "." in n.icd9_code and not n.ancestor_codes]
