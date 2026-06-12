@@ -421,15 +421,72 @@ def parse_appendix_e(text: str) -> dict[str, CategoryGroup]:
     return mapping
 
 
+#: ICD-9-CM is frozen, so its 17 chapters plus the V and E supplementary
+#: classifications are fixed and authoritative -- ``(chapter_code, chapter_name,
+#: low, high)`` by 3-digit numeric range. We assign chapters from this rather than
+#: parsing the RTF (robust, and it resolves the V/E open question -- ADR 0031).
+#: Blocks (the finer sections) still come from Appendix E.
+_ICD9_CHAPTERS: list[tuple[str, str, int, int]] = [
+    ("1", "Infectious and Parasitic Diseases", 1, 139),
+    ("2", "Neoplasms", 140, 239),
+    ("3", "Endocrine, Nutritional and Metabolic Diseases, and Immunity Disorders", 240, 279),
+    ("4", "Diseases of the Blood and Blood-Forming Organs", 280, 289),
+    ("5", "Mental Disorders", 290, 319),
+    ("6", "Diseases of the Nervous System and Sense Organs", 320, 389),
+    ("7", "Diseases of the Circulatory System", 390, 459),
+    ("8", "Diseases of the Respiratory System", 460, 519),
+    ("9", "Diseases of the Digestive System", 520, 579),
+    ("10", "Diseases of the Genitourinary System", 580, 629),
+    ("11", "Complications of Pregnancy, Childbirth, and the Puerperium", 630, 679),
+    ("12", "Diseases of the Skin and Subcutaneous Tissue", 680, 709),
+    ("13", "Diseases of the Musculoskeletal System and Connective Tissue", 710, 739),
+    ("14", "Congenital Anomalies", 740, 759),
+    ("15", "Certain Conditions Originating in the Perinatal Period", 760, 779),
+    ("16", "Symptoms, Signs, and Ill-Defined Conditions", 780, 799),
+    ("17", "Injury and Poisoning", 800, 999),
+]
+_ICD9_V_CHAPTER = (
+    "V",
+    "Supplementary Classification of Factors Influencing Health Status and Contact with "
+    "Health Services",
+)
+_ICD9_E_CHAPTER = (
+    "E",
+    "Supplementary Classification of External Causes of Injury and Poisoning",
+)
+
+
+def chapter_for(code: str) -> tuple[str, str] | None:
+    """Return ``(chapter_code, chapter_name)`` for a code, or ``None`` (ADR 0031).
+
+    V and E codes map to their supplementary classifications; numeric codes map by
+    the 3-digit category falling in a chapter's range.
+    """
+    cls = code_class(code)
+    if cls == "V":
+        return _ICD9_V_CHAPTER
+    if cls == "E":
+        return _ICD9_E_CHAPTER
+    try:
+        category = int(category_of(code))
+    except ValueError:
+        return None
+    for chapter_code, chapter_name, low, high in _ICD9_CHAPTERS:
+        if low <= category <= high:
+            return (chapter_code, chapter_name)
+    return None
+
+
 def build_hierarchy(
     records: list[Icd9Record], category_map: dict[str, CategoryGroup]
 ) -> list[Icd9Node]:
     """Enrich one edition's records with adjacency + path + chapter/block (ADR 0031).
 
     Adjacency / ancestors / depth come from the prefix rule over the edition's own
-    code set; chapter/block from ``category_map`` (Appendix E), keyed by the code's
-    category. ``category_map`` may be empty (chapter/block left null). ``records``
-    must be a single edition.
+    code set. ``chapter_code``/``chapter_name`` come from the static frozen chapter
+    map (:func:`chapter_for`, robust + resolves V/E); ``block_code``/``block_name``
+    from ``category_map`` (Appendix E), keyed by the code's category.
+    ``category_map`` may be empty (block left null). ``records`` must be one edition.
 
     Returns:
         One :class:`Icd9Node` per record, in input order.
@@ -438,6 +495,7 @@ def build_hierarchy(
     nodes: list[Icd9Node] = []
     for r in records:
         ancestors = tuple(ancestors_for(r.icd9_code, code_set))
+        chapter = chapter_for(r.icd9_code)
         grp = category_map.get(category_of(r.icd9_code))
         nodes.append(
             Icd9Node(
@@ -448,8 +506,8 @@ def build_hierarchy(
                 parent_icd9_code=ancestors[-1] if ancestors else None,
                 node_level=len(ancestors),
                 ancestor_codes=ancestors,
-                chapter_code=grp.chapter_code if grp else None,
-                chapter_name=grp.chapter_name if grp else None,
+                chapter_code=chapter[0] if chapter else None,
+                chapter_name=chapter[1] if chapter else None,
                 block_code=grp.block_code if grp else None,
                 block_name=grp.block_name if grp else None,
             )
@@ -501,12 +559,22 @@ def find_dangling_parents(nodes: list[Icd9Node]) -> list[str]:
 
 
 def find_unmapped_categories(nodes: list[Icd9Node]) -> list[str]:
-    """Return distinct categories whose chapter/block didn't resolve (WARN; ADR 0031).
+    """Return distinct categories with no resolved chapter (WARN; ADR 0031).
 
-    A category absent from the Appendix-E map yields null chapter/block (e.g. the V/E
-    classifications if Appendix E doesn't enumerate them); flagged, not blocking.
+    Chapters come from the static frozen map, so this should be empty -- a non-empty
+    result means a code's category fell outside every known ICD-9 chapter range
+    (a parse/format anomaly worth surfacing). Not blocking.
     """
     return sorted({category_of(n.icd9_code) for n in nodes if n.chapter_code is None})
+
+
+def find_unmapped_blocks(nodes: list[Icd9Node]) -> list[str]:
+    """Return distinct categories whose block didn't resolve from Appendix E (WARN).
+
+    Blocks come from Appendix E; a category absent from that map yields a null block.
+    Flagged for coverage visibility, not blocking.
+    """
+    return sorted({category_of(n.icd9_code) for n in nodes if n.block_code is None})
 
 
 def find_orphan_codes(nodes: list[Icd9Node]) -> list[str]:

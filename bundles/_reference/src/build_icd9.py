@@ -185,16 +185,31 @@ def _dq_checks(
             details={"expected_range": [_CARDINALITY_MIN, _CARDINALITY_MAX], "actual": n},
         )
 
-    unmapped = icd9.find_unmapped_categories(nodes)
+    # Chapter comes from the static frozen map -> should always resolve; a non-empty
+    # result means a category fell outside every ICD-9 chapter range (anomaly).
+    unmapped_chapters = icd9.find_unmapped_categories(nodes)
     ctx.recorder.record(
         table_name=table,
-        check_name="icd9_chapter_block_resolved",
+        check_name="icd9_chapter_resolved",
         category=DQCategory.REFERENTIAL,
         severity=DQSeverity.WARN,
-        passed=not unmapped,
-        failing_row_count=len(unmapped),
+        passed=not unmapped_chapters,
+        failing_row_count=len(unmapped_chapters),
         total_row_count=total,
-        details={"unmapped_categories": unmapped[:30]} if unmapped else None,
+        details={"unmapped_categories": unmapped_chapters[:30]} if unmapped_chapters else None,
+    )
+
+    # Block comes from Appendix E -> categories absent from DC_3D have a null block.
+    unmapped_blocks = icd9.find_unmapped_blocks(nodes)
+    ctx.recorder.record(
+        table_name=table,
+        check_name="icd9_block_resolved",
+        category=DQCategory.REFERENTIAL,
+        severity=DQSeverity.WARN,
+        passed=not unmapped_blocks,
+        failing_row_count=len(unmapped_blocks),
+        total_row_count=total,
+        details={"unmapped_blocks": unmapped_blocks[:30]} if unmapped_blocks else None,
     )
 
     orphans = icd9.find_orphan_codes(nodes)
@@ -356,6 +371,19 @@ def run(
             log.info("Downloading Appendix E", extra={"edition_year": year, "url": apx_url})
             apx_text, appendix_member = _fetch_rtf_text(apx_url, icd9.select_appendix_e_member)
             category_map = icd9.parse_appendix_e(apx_text)
+            # Diagnostic: blocks come from Appendix E, whose real RTF->text shape we
+            # confirm here. Logs the first non-empty lines + parse yield so the block
+            # parser can be tuned to the actual layout (temporary; remove once stable).
+            apx_sample = [ln for ln in apx_text.splitlines() if ln.strip()][:30]
+            log.info(
+                "Appendix-E sample",
+                extra={
+                    "edition_year": year,
+                    "member": appendix_member,
+                    "categories_mapped": len(category_map),
+                    "first_lines": apx_sample,
+                },
+            )
 
         edition_nodes = icd9.build_hierarchy(edition_records, category_map)
         src = dtab_member + (f" + {appendix_member}" if appendix_member else "")
@@ -369,6 +397,7 @@ def run(
             "records": len(edition_records),
             "billable": sum(1 for r in edition_records if r.is_billable),
             "unmapped_categories": len(icd9.find_unmapped_categories(edition_nodes)),
+            "unmapped_blocks": len(icd9.find_unmapped_blocks(edition_nodes)),
         }
         log.info("Built edition", extra={"edition_year": year, **stats[year]})
 

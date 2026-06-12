@@ -230,6 +230,29 @@ class TestCodePrefixesAndAncestors:
 
 
 @pytest.mark.unit
+class TestChapterMap:
+    @pytest.mark.parametrize(
+        "code,chapter_code",
+        [
+            ("001", "1"),
+            ("250.00", "3"),  # endocrine, 240-279
+            ("460", "8"),  # respiratory, 460-519
+            ("999.9", "17"),  # injury and poisoning, 800-999
+            ("V30.00", "V"),  # supplementary -- factors influencing health status
+            ("E812.0", "E"),  # supplementary -- external causes
+        ],
+    )
+    def test_chapter_for(self, code, chapter_code):
+        result = icd9.chapter_for(code)
+        assert result is not None and result[0] == chapter_code
+
+    def test_chapter_names_present(self):
+        assert "Endocrine" in icd9.chapter_for("250")[1]
+        assert icd9.chapter_for("V30")[1].startswith("Supplementary")
+        assert icd9.chapter_for("E812")[1].startswith("Supplementary")
+
+
+@pytest.mark.unit
 class TestAppendixE:
     def test_category_to_chapter_block(self):
         m = icd9.parse_appendix_e(APPENDIX_E_SAMPLE)
@@ -275,12 +298,13 @@ class TestBuildHierarchy:
         subtree = {n.icd9_code for n in nodes if "250" in n.ancestor_codes}
         assert subtree == {"250.0", "250.00"}  # descendants, not 250 itself
 
-    def test_empty_category_map_leaves_chapter_block_null(self):
+    def test_empty_category_map_leaves_block_null_chapter_static(self):
         records = icd9.assemble_records(icd9.parse_dtab(DTAB_SAMPLE), EDITION)
         nodes = {n.icd9_code: n for n in icd9.build_hierarchy(records, {})}
-        # adjacency still computed; chapter/block null
+        # adjacency still computed; chapter from the static map; only block null
         assert nodes["250.00"].parent_icd9_code == "250.0"
-        assert all(n.chapter_code is None for n in nodes.values())
+        assert nodes["250.00"].chapter_code == "3"
+        assert all(n.block_code is None for n in nodes.values())
 
 
 @pytest.mark.unit
@@ -296,6 +320,14 @@ class TestHierarchyDQ:
     def test_orphans_empty(self):
         assert icd9.find_orphan_codes(self._nodes()) == []
 
-    def test_unmapped_categories_flag_ve(self):
-        # 001 and 250 are in Appendix E; the V/E categories are not -> flagged
-        assert icd9.find_unmapped_categories(self._nodes()) == ["E810", "E812", "V30"]
+    def test_all_categories_get_a_chapter(self):
+        # chapters come from the static frozen map, so every code resolves a chapter
+        # (incl. V/E) -- find_unmapped_categories surfaces only true anomalies
+        assert icd9.find_unmapped_categories(self._nodes()) == []
+
+    def test_unmapped_blocks_flag_ve(self):
+        # blocks come from Appendix E; the sample maps 001 and 250 but omits the V/E
+        # categories -> those have a null block and are flagged (WARN, not blocking)
+        unmapped = icd9.find_unmapped_blocks(self._nodes())
+        assert unmapped == ["E810", "E812", "V30"]
+        assert "001" not in unmapped and "250" not in unmapped  # both in Appendix E
