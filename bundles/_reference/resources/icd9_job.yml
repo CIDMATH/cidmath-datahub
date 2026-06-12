@@ -32,7 +32,7 @@ resources:
               - "--catalog"
               - "${var.model_catalog}"
               - "--edition-year"
-              - "2014"
+              - "2012"
               - "--hierarchy"
               - "build"
               - "--data-engineers-group"

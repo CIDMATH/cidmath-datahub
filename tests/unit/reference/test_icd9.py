@@ -60,8 +60,8 @@ class TestUrlBuilder:
         assert icd9.edition_dir_year(2010) == 2009
 
     def test_zip_and_readme_urls(self):
-        assert icd9.dtab_zip_url(2012).endswith("/ICD9-CM/2011/DTAB12.ZIP")
-        assert icd9.appendix_zip_url(2012).endswith("/ICD9-CM/2011/APPNDX12.ZIP")
+        assert icd9.dtab_zip_url(2012).endswith("/ICD9-CM/2011/Dtab12.zip")
+        assert icd9.appendix_zip_url(2012).endswith("/ICD9-CM/2011/Appndx12.zip")
         assert icd9.readme_url(2012).endswith("/ICD9-CM/2011/Readme12.txt")
 
 
