@@ -302,16 +302,6 @@ def assemble_records(pairs: Iterable[tuple[str, str]], edition_year: int) -> lis
 
 
 @dataclass(frozen=True)
-class CategoryGroup:
-    """Chapter + block a three-digit category belongs to (from Appendix E)."""
-
-    chapter_code: str
-    chapter_name: str
-    block_code: str
-    block_name: str
-
-
-@dataclass(frozen=True)
 class Icd9Node:
     """An ICD-9-CM code enriched with its place in the classification tree.
 
@@ -372,38 +362,38 @@ def ancestors_for(code: str, code_set: set[str]) -> list[str]:
     return [p for p in code_prefixes(code) if p in code_set]
 
 
-#: Appendix E ("List of Three-Digit Categories", ``DC_3D`` RTF) lines: a numbered
-#: chapter header ("1. INFECTIOUS ... (001-139)"), a title-case block/section
-#: header ("Intestinal Infectious Diseases (001-009)"), or a category line
-#: ("001  Cholera"). NOTE: validate against a real ``DC_3D`` extract, and confirm
-#: whether it enumerates the V/E supplementary classifications (ADR 0031 open Q).
-_APX_CHAPTER_RE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*\(([A-Z0-9]+\s*-\s*[A-Z0-9]+)\)\s*$")
+#: Appendix E ("List of Three-Digit Categories", ``DC_3D`` RTF). The real
+#: ``striprtf`` output renders as (verified against the 2012 edition):
+#:   ``1\t.\tINFECTIOUS AND PARASITIC DISEASES``  -- chapter header: number + TAB +
+#:        ALL-CAPS name, NO code range. Used only to reset the running block.
+#:   ``Intestinal infectious diseases (001-009)`` -- block header: sentence-case
+#:        name + ``(low-high)``.
+#:   ``001\tCholera``                             -- category: code + TAB + title.
+#: Only the *block* label comes from here -- chapter is from the static map
+#: (:func:`chapter_for`) and adjacency from the prefix rule (ADR 0031).
+_APX_CHAPTER_RE = re.compile(r"^\s*\d+\.\s+[A-Z]")
 _APX_BLOCK_RE = re.compile(r"^\s*([A-Za-z][^()]*?)\s*\(([A-Z0-9]+\s*-\s*[A-Z0-9]+)\)\s*$")
 _APX_CATEGORY_RE = re.compile(r"^\s*(\d{3}|V\d{2}|E\d{3})\s+(\S.*?)\s*$")
 
 
-def parse_appendix_e(text: str) -> dict[str, CategoryGroup]:
-    """Parse Appendix E text into a ``category -> CategoryGroup`` map (ADR 0031).
+def parse_appendix_e(text: str) -> dict[str, tuple[str, str]]:
+    """Parse Appendix E text into a ``category -> (block_code, block_name)`` map.
 
-    Walks chapter -> block -> category, carrying the current chapter/block onto
-    each three-digit category. Only chapter/block labels come from here; adjacency
-    comes from the code set (prefix rule).
+    Walks block -> category, carrying the current block onto each three-digit
+    category beneath it; chapter headers reset the running block. Only block labels
+    come from here (chapter is static, adjacency is the prefix rule -- ADR 0031).
 
     Args:
         text: The ``DC_3D`` RTF converted to plain text.
 
     Returns:
-        Map from category (e.g. ``"250"``) to its chapter/block.
+        Map from category (e.g. ``"250"``) to its ``(block_code, block_name)``.
     """
-    mapping: dict[str, CategoryGroup] = {}
-    chapter_code: str | None = None
-    chapter_name = ""
+    mapping: dict[str, tuple[str, str]] = {}
     block_code = ""
     block_name = ""
     for line in text.splitlines():
-        chapter = _APX_CHAPTER_RE.match(line)
-        if chapter:
-            chapter_code, chapter_name = chapter.group(1), chapter.group(2).strip()
+        if _APX_CHAPTER_RE.match(line):
             block_code = block_name = ""
             continue
         block = _APX_BLOCK_RE.match(line)
@@ -411,13 +401,8 @@ def parse_appendix_e(text: str) -> dict[str, CategoryGroup]:
             block_name, block_code = block.group(1).strip(), block.group(2).replace(" ", "")
             continue
         category = _APX_CATEGORY_RE.match(line)
-        if category and chapter_code is not None:
-            mapping[normalize_code(category.group(1))] = CategoryGroup(
-                chapter_code=chapter_code,
-                chapter_name=chapter_name,
-                block_code=block_code,
-                block_name=block_name,
-            )
+        if category and block_code:
+            mapping[normalize_code(category.group(1))] = (block_code, block_name)
     return mapping
 
 
@@ -478,7 +463,7 @@ def chapter_for(code: str) -> tuple[str, str] | None:
 
 
 def build_hierarchy(
-    records: list[Icd9Record], category_map: dict[str, CategoryGroup]
+    records: list[Icd9Record], category_map: dict[str, tuple[str, str]]
 ) -> list[Icd9Node]:
     """Enrich one edition's records with adjacency + path + chapter/block (ADR 0031).
 
@@ -496,7 +481,7 @@ def build_hierarchy(
     for r in records:
         ancestors = tuple(ancestors_for(r.icd9_code, code_set))
         chapter = chapter_for(r.icd9_code)
-        grp = category_map.get(category_of(r.icd9_code))
+        block = category_map.get(category_of(r.icd9_code))
         nodes.append(
             Icd9Node(
                 icd9_code=r.icd9_code,
@@ -508,8 +493,8 @@ def build_hierarchy(
                 ancestor_codes=ancestors,
                 chapter_code=chapter[0] if chapter else None,
                 chapter_name=chapter[1] if chapter else None,
-                block_code=grp.block_code if grp else None,
-                block_name=grp.block_name if grp else None,
+                block_code=block[0] if block else None,
+                block_name=block[1] if block else None,
             )
         )
     return nodes
