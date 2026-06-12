@@ -215,8 +215,11 @@ def select_tabular_xml_member(names: Iterable[str]) -> str:
 #: Canonical dotted ICD-10-CM code: a letter, a digit, a digit-or-letter, then
 #: an optional decimal followed by 1-4 alphanumerics (codes are 3-7 chars
 #: excluding the decimal). Anchored and uppercase-only -- callers normalize
-#: first via :func:`normalize_code`.
-ICD10CM_CODE_RE = re.compile(r"^[A-Z][0-9][0-9A-Z](\.[0-9A-Z]{1,4})?$")
+#: first via :func:`normalize_code`. The 2nd character is alphanumeric, not
+#: digit-only: the classic shape is letter-digit-..., but CDC's FY2026 file
+#: includes codes with a letter there (e.g. ``QA0``), so position 2 allows
+#: ``[0-9A-Z]`` too.
+ICD10CM_CODE_RE = re.compile(r"^[A-Z][0-9A-Z]{2}(\.[0-9A-Z]{1,4})?$")
 
 # Fixed-width order-file column spans (0-indexed Python slices).
 _COL_CODE = slice(6, 13)

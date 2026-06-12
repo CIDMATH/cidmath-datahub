@@ -77,7 +77,19 @@ class TestNormalizeCode:
 
 @pytest.mark.unit
 class TestValidateCode:
-    @pytest.mark.parametrize("code", ["U07.1", "J18.9", "A00", "A00.0", "S72.001A"])
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "U07.1",
+            "J18.9",
+            "A00",
+            "A00.0",
+            "S72.001A",
+            "C4A",  # letter in the 3rd position (melanoma)
+            "QA0",  # letter in the 2nd position (present in CDC's FY2026 file)
+            "QA0.0101",
+        ],
+    )
     def test_valid(self, code):
         assert icd10.validate_code(code) is True
 
