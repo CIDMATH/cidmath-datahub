@@ -150,17 +150,17 @@ def _release_metadata(api_base: str, version: str, auth_header: str) -> dict[str
 
 
 def _download_release(api_base: str, version: str, meta: dict[str, Any], auth_header: str) -> bytes:
-    """Download the release zip.
+    """Download the release zip via the authenticated Download API.
 
-    Prefer the metadata's pre-signed ``downloadUrl`` (no auth header -- it carries its
-    own query-string auth, and adding ``Authorization`` would make S3 reject it); fall
-    back to the authenticated ``GET /Loinc/Download?version=<v>`` endpoint.
+    Both the metadata's ``downloadUrl`` and the explicit ``GET /Loinc/Download?version=<v>``
+    endpoint require the same HTTP Basic auth as the metadata call (a request without it
+    returns 401), so the auth header is sent on the download too. ``downloadUrl`` is
+    preferred when present; otherwise the explicit endpoint is used.
     """
-    download_url = meta.get("downloadUrl")
-    if download_url:
-        return _http_get(download_url)
-    fallback = f"{api_base}/Loinc/Download?version={urllib.parse.quote(version)}"
-    return _http_get(fallback, auth_header=auth_header)
+    download_url = meta.get("downloadUrl") or (
+        f"{api_base}/Loinc/Download?version={urllib.parse.quote(version)}"
+    )
+    return _http_get(download_url, auth_header=auth_header)
 
 
 def _extract_text(zip_bytes: bytes, basename: str) -> str:
