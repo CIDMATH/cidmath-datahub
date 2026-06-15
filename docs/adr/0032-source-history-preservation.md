@@ -1,11 +1,11 @@
 # 0032 — Source-history preservation for revise-in-place sources
 
 ## Status
-Proposed — 2026-06-15
+Accepted — 2026-06-15
 
-(Proposed ahead of the `codes.cvx` implementation, which is the first application and
-pins the remaining specifics — the Volume path/naming and retention. Moves to Accepted
-when that PR merges.)
+(Accepted with the `codes.cvx` implementation — the first application — which pins the
+remaining specifics: the Volume path/naming and retention, recorded under "Decision"
+below.)
 
 ## Context
 Most of our sources are **vintage-reproducible**: Census/geography ships dated vintages
@@ -55,10 +55,25 @@ retaining whole snapshots is cheap and far simpler than effective-dated rows. Us
 frequently per-record**, where storing a full copy per run would bloat; in that case
 still snapshot the raw payload to the Volume, but track the processed grain as SCD2.
 
-First application — `codes.cvx`: annual schedule; raw `XML-new` to a managed Volume in
-the `codes` schema; table keyed by `(cvx_code, snapshot_date)`, `snapshot_replace`,
-registered with `update_semantics="snapshot_replace"`. Retention: keep all snapshots
-(the data is tiny); revisit per-source if snapshots ever grow large.
+First application — `codes.cvx` (pins the standing specifics):
+
+- **Volume.** One managed Volume per source in the owning schema:
+  `ecdh_model_<env>.codes.cvx_raw`, created (`CREATE VOLUME IF NOT EXISTS`) by the
+  build's `ensure` phase.
+- **File naming.** `/Volumes/<catalog>/codes/cvx_raw/cvx_<YYYY-MM-DD>.xml`, one file
+  per `snapshot_date`. The payload is written **verbatim** (the bytes as fetched, in
+  the source's ISO-8859-1 encoding).
+- **Immutability.** A run never overwrites an existing date's file: if the file exists
+  (a same-day re-run), it is left untouched and its existing bytes are parsed, so the
+  table always reflects the immutable snapshot of record. The `(cvx_code,
+  snapshot_date)` `snapshot_replace` DELETE+append then makes the same-day re-run
+  idempotent (no duplicate partition).
+- **Table.** Keyed by `(cvx_code, snapshot_date)`, `snapshot_replace`, registered with
+  `update_semantics="snapshot_replace"`; annual schedule; `snapshot_date` = the run
+  date. Optional `codes.cvx_current` view exposes the latest snapshot.
+- **Retention.** Keep all snapshots and all raw files (the data is tiny — a few hundred
+  codes per snapshot); revisit per-source if snapshots ever grow large (route such
+  sources to SCD2 per the criterion above before retention bites).
 
 ## Alternatives considered
 - **SCD2 as the primary mechanism.** Rejected *for small/rare-change sources* like CVX:

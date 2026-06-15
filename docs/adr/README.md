@@ -97,7 +97,7 @@ both positive and negative consequences honestly.
 | [0029](0029-dq-check-helper-library.md) | Reusable DQ-check helper library — pure SQL builders + bound `TableDQ` (`unique`/`not_null`/`fk`/`cardinality`/`rowcount_equals`) single-source the recurring check+record+raise; bespoke checks stay inline (extends 0009 within the 0027 seam) | Accepted |
 | [0030](0030-icd10-hierarchy.md) | ICD-10-CM hierarchy — adjacency list + materialized path + denormalized chapter/block on `codes.icd10`, sourced from the tabular XML's chapter→section→diag nesting (prefix-rule fallback for 7th-char codes); additive, edition-scoped | Accepted |
 | [0031](0031-icd9-hierarchy.md) | ICD-9-CM hierarchy + shared code-system hierarchy contract — `codes.icd9` mirrors `codes.icd10`'s columns/semantics; adjacency from the prefix rule (primary, inverting 0030), chapter/block from NCHS Appendix E (`DC_3D` RTF); standalone module, frozen base editions | Accepted |
-| [0032](0032-source-history-preservation.md) | Source-history preservation for revise-in-place sources — raw immutable Volume snapshots + in-table revision tracking via `snapshot_replace` (keyed by `snapshot_date`, geography-style); when to use vs SCD2. First applied to `codes.cvx` | Proposed |
+| [0032](0032-source-history-preservation.md) | Source-history preservation for revise-in-place sources — raw immutable Volume snapshots + in-table revision tracking via `snapshot_replace` (keyed by `snapshot_date`, geography-style); when to use vs SCD2. First applied to `codes.cvx` | Accepted |
 
 ## Future ADRs (backlog)
 
