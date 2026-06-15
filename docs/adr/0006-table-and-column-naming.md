@@ -76,7 +76,7 @@ The subject is already in the schema name. Never repeat it in the table name (`w
 
 **Geographic identifiers use canonical code names.** `fips_state`, `fips_county`, `zcta`, `census_tract`, `census_block_group`. Avoid generic `geo_id` or `region_id`.
 
-**Pathogen / clinical identifiers use canonical code systems.** `loinc_code`, `snomed_code`, `icd10_code`, `cvx_code` (vaccines). The code system is in the column name so its meaning is unambiguous.
+**Pathogen / clinical identifiers use canonical code systems.** `loinc_code`, `snomed_code`, `icd10cm_code`, `cvx_code` (vaccines). The code system is in the column name so its meaning is unambiguous.
 
 **Measurement columns include unit when relevant.** `concentration_copies_per_ml`, `volume_ml`, `distance_meters`. Avoid raw `value` or `amount` unless the unit is implicit from the table's name.
 
