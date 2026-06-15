@@ -360,21 +360,32 @@ def dedupe_products(products: list[NdcProduct]) -> tuple[list[NdcProduct], int]:
 
 
 def dedupe_packages(packages: list[NdcPackage]) -> tuple[list[NdcPackage], int]:
-    """Collapse duplicate ``(product_id, ndc_package_code)`` rows (keep first).
+    """Collapse duplicate ``(product_id, ndc_package_code)`` rows, keeping the most
+    recent listing; return ``(rows, dropped)``.
 
-    The FDA package file contains occasional duplicate package listings for the same
-    product + package code (e.g. multi-level packaging); the table keys on that pair,
-    so duplicates are collapsed and the count recorded as a WARN by the entrypoint.
+    The FDA package file occasionally lists the same package code twice under one SPL
+    with a different ``STARTMARKETINGDATE`` -- a *re-listing* of the same code (e.g. a
+    package first marketed in 2018 and re-listed in 2025), identical in every other
+    column. The table keys on ``(product_id, ndc_package_code)`` per snapshot, so we
+    keep the row with the latest ``start_marketing_date`` (the current listing) and
+    record the collapse as a WARN; earlier listings remain recoverable from the raw
+    Volume snapshot. A missing start date sorts earliest, so a real date always wins.
+    Output preserves first-seen key order.
     """
-    seen: set[tuple[str, str]] = set()
-    out: list[NdcPackage] = []
+    best: dict[tuple[str, str], NdcPackage] = {}
+    order: list[tuple[str, str]] = []
+    dropped = 0
     for r in packages:
         key = (r.product_id, r.ndc_package_code)
-        if key in seen:
+        current = best.get(key)
+        if current is None:
+            best[key] = r
+            order.append(key)
             continue
-        seen.add(key)
-        out.append(r)
-    return out, len(packages) - len(out)
+        dropped += 1
+        if (r.start_marketing_date or date.min) > (current.start_marketing_date or date.min):
+            best[key] = r
+    return [best[k] for k in order], dropped
 
 
 def find_missing_product_fields(products: list[NdcProduct]) -> list[tuple[str, str]]:
