@@ -254,7 +254,7 @@ def _dq_checks(
         passed=not dup_map,
         failing_row_count=len(dup_map),
         total_row_count=n_maps,
-        details={"sample": dup_map[:10]} if dup_map else None,
+        details={"sample": [list(k) for k in dup_map[:10]]} if dup_map else None,
     )
 
     miss_map = loinc.find_missing_map_fields(maps)
@@ -269,20 +269,24 @@ def _dq_checks(
         details={"sample": [list(m) for m in miss_map[:10]]} if miss_map else None,
     )
 
+    # --- WARN checks ---
+    # MapTo -> core FK is INFORMATIONAL (ADR 0014): a replacement can point at a code
+    # absent from this release's core file (chained/multi-step deprecations), so
+    # orphans are recorded and the rows kept, not treated as build-blocking.
     term_nums = {t.loinc_num for t in terms}
     orphans = loinc.find_map_target_orphans(maps, term_nums)
     ctx.recorder.record(
         table_name=m_table,
         check_name="loinc_map_to_target_fk",
         category=DQCategory.REFERENTIAL,
-        severity=DQSeverity.FAIL,
+        severity=DQSeverity.WARN,
         passed=not orphans,
         failing_row_count=len(orphans),
         total_row_count=n_maps,
-        details={"sample": [list(o) for o in orphans[:10]]} if orphans else None,
+        details={"orphan_count": len(orphans), "sample": [list(o) for o in orphans[:10]]}
+        if orphans
+        else None,
     )
-
-    # --- WARN checks ---
     if number_of_loincs is not None:
         count_ok = n_terms == number_of_loincs
         ctx.recorder.record(
@@ -344,8 +348,6 @@ def _dq_checks(
         failures.append(f"duplicate map key: {dup_map[:5]}")
     if miss_map:
         failures.append(f"null map field: {miss_map[:5]}")
-    if orphans:
-        failures.append(f"map_to without core term: {orphans[:5]}")
     if failures:
         raise ValueError("LOINC blocking DQ failed -- " + "; ".join(failures))
 
