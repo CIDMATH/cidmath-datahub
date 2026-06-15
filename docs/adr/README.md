@@ -98,6 +98,7 @@ both positive and negative consequences honestly.
 | [0030](0030-icd10-hierarchy.md) | ICD-10-CM hierarchy — adjacency list + materialized path + denormalized chapter/block on `codes.icd10`, sourced from the tabular XML's chapter→section→diag nesting (prefix-rule fallback for 7th-char codes); additive, edition-scoped | Accepted |
 | [0031](0031-icd9-hierarchy.md) | ICD-9-CM hierarchy + shared code-system hierarchy contract — `codes.icd9` mirrors `codes.icd10`'s columns/semantics; adjacency from the prefix rule (primary, inverting 0030), chapter/block from NCHS Appendix E (`DC_3D` RTF); standalone module, frozen base editions | Accepted |
 | [0032](0032-source-history-preservation.md) | Source-history preservation for revise-in-place sources — raw immutable Volume snapshots + in-table revision tracking via `snapshot_replace` (keyed by `snapshot_date`, geography-style); when to use vs SCD2. First applied to `codes.cvx` | Accepted |
+| [0033](0033-catalog-grant-governance-and-drift-check.md) | Catalog-grant governance + drift check — keep schema-and-below grants in the deploy pipeline but catalog-level grants governance-owned (never the deploy SP); make `grant_catalog_permissions.sql` a drift-checked source of truth (`scripts/verify/audit_catalog_grants.py`). Amends 0012/0018 | Accepted |
 
 ## Future ADRs (backlog)
 

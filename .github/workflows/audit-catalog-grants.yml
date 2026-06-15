@@ -1,0 +1,64 @@
+# Catalog-grant drift check (ADR 0033).
+#
+# Compares the catalog-level grants declared in
+# scripts/setup/grant_catalog_permissions.sql against what Unity Catalog
+# actually reports (SHOW GRANTS), failing on drift. This keeps catalog grants
+# declarative + drift-detected WITHOUT giving the deploy SP catalog MANAGE
+# (ADR 0012/0018): catalog grants stay governance-owned.
+#
+# IDENTITY REQUIREMENT — read before enabling the schedule:
+#   The job must authenticate as a principal that can `SHOW GRANTS` on the
+#   catalogs (catalog owner / metastore admin / the governance identity that
+#   applies the SQL file). The dev/prod OIDC *deploy* SPs generally CANNOT do
+#   this (no MANAGE on the catalog), so this workflow does NOT reuse them by
+#   default. Configure a governance identity (e.g. an admin SP with read access
+#   to catalog grants + CAN_USE on a warehouse) as repo secrets, then enable the
+#   schedule below. Until then it is manual-only (workflow_dispatch).
+#
+# Catalog grants change rarely, so a periodic/manual cadence is appropriate;
+# this is intentionally not a per-PR gate.
+
+name: audit-catalog-grants
+
+on:
+  workflow_dispatch:
+    inputs:
+      catalogs:
+        description: "Space-separated catalogs to audit (blank = all in the SQL file)"
+        required: false
+        default: "ecdh_dev ecdh_model_dev"
+  # Enable once a governance identity is configured (see header). Monthly:
+  # schedule:
+  #   - cron: "0 7 1 * *"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Databricks SDK
+        run: pip install databricks-sdk
+
+      - name: Audit catalog grants vs. declared source of truth
+        run: |
+          python scripts/verify/audit_catalog_grants.py \
+            --warehouse-id "${DATABRICKS_WAREHOUSE_ID}" \
+            ${{ github.event.inputs.catalogs && format('--catalogs {0}', github.event.inputs.catalogs) || '' }}
+        env:
+          # Governance identity that can SHOW GRANTS on the catalog. Configure
+          # these as repo/environment secrets before enabling the schedule.
+          DATABRICKS_HOST: ${{ secrets.GOVERNANCE_DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.GOVERNANCE_DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.GOVERNANCE_DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+          DATABRICKS_WAREHOUSE_ID: ${{ secrets.GOVERNANCE_DATABRICKS_WAREHOUSE_ID }}

@@ -86,3 +86,21 @@ Expected output: every check `PASS` — the three reads allowed, the two `_ops` 
 ### Cleanup
 
 When you're done, you can leave the test SP in place for future re-checks, or delete it (UI, or `databricks service-principals delete <sp-id>`). It only ever had reader-tier access, so it's low risk to keep.
+
+## 3. Catalog-grant drift check (ADR 0033)
+
+`audit_catalog_grants.py` makes `scripts/setup/grant_catalog_permissions.sql` a *checkable* source of truth. Catalog-level grants are **not** applied by the bundle deploy jobs — the deploy SP lacks `MANAGE` on the catalog (ADR 0012/0018), so they're applied by an account admin from that SQL file. This script parses the declared `GRANT ... ON CATALOG ...` statements and compares them against what `SHOW GRANTS` actually reports, failing on drift (a declared grant missing, or — for a declared principal — a catalog privilege it holds that the file doesn't declare). Commented-out grants in the file are treated as *not declared*.
+
+The parse/diff logic is pure and unit-tested (`tests/unit/verify/test_audit_catalog_grants.py`); only the `SHOW GRANTS` read touches a workspace.
+
+**Identity:** run it as a principal that can `SHOW GRANTS` on the catalog — a catalog owner, metastore admin, or the same governance identity that applies the SQL file. The OIDC deploy SP generally **cannot** (no `MANAGE`), which is exactly why catalog grants stay governance-owned. This is therefore a governance-run / scheduled check, not a per-PR deploy-SP check (`.github/workflows/audit-catalog-grants.yml`, `workflow_dispatch`).
+
+```powershell
+$env:DATABRICKS_HOST = "https://dbc-926acb48-1c75.cloud.databricks.com"
+$env:DATABRICKS_WAREHOUSE_ID = "<warehouse-id>"
+# authenticate as a catalog owner / metastore admin (your own admin profile is fine)
+
+python scripts/verify/audit_catalog_grants.py --catalogs ecdh_dev ecdh_model_dev
+```
+
+Exit code 0 = catalog grants match the declared file; non-zero = drift (or the file needs updating to match an intended change).
