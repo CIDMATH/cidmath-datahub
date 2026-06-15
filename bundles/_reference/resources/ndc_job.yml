@@ -1,0 +1,68 @@
+# Job that builds the canonical codes.ndc_product + codes.ndc_package tables
+# (ADR 0014, ADR 0032).
+#
+# Fetches the FDA NDC Directory "Text Version" (ndctext.zip -> product.txt +
+# package.txt), writes the zip verbatim to an immutable date-stamped file on the
+# codes.ndc_raw UC Volume, and writes ecdh_model_<env>.codes.ndc_product and
+# codes.ndc_package keyed by snapshot_date using snapshot_replace (every snapshot
+# retained; ADR 0032). Parses/normalizes/validates via cidmath_datahub.reference.ndc
+# (10->11-digit NDC padding is the core logic). Also (re)creates the *_current views.
+#
+# Thin entrypoint over the run_build seam (ADR 0027). NDC is revised in place, so
+# history is preserved by us: raw Volume snapshot + in-table snapshot_date tracking.
+# The source's marketing dates already encode real-world validity, so quarterly
+# snapshots suffice (no SCD2). snapshot_date defaults to the run date.
+#
+# Scheduled quarterly (06:00 ET on the 1st of Jan/Apr/Jul/Oct). Re-running the same
+# day is idempotent: the immutable Volume file is not overwritten and
+# snapshot_replace replaces only that snapshot_date's rows.
+#
+# See bundles/_reference/src/build_ndc.py and ADR 0014/0032.
+
+resources:
+  jobs:
+    build_ndc_reference:
+      name: "[_reference] build_ndc_reference"
+      description: |
+        Builds codes.ndc_product + codes.ndc_package (FDA NDC Directory, finished
+        drugs) in the integrated catalog. Flat, two FK-linked grains; one row per
+        listing per snapshot; snapshot_replace with raw ndctext.zip preserved on a
+        UC Volume. Blocking DQ: PK uniqueness, non-null required fields, package->
+        product FK, 9-/11-digit NDC normalization. Quarterly schedule.
+
+      schedule:
+        # Quarterly: 06:00 on the 1st of Jan/Apr/Jul/Oct (Emory / US Eastern).
+        quartz_cron_expression: "0 0 6 1 1,4,7,10 ?"
+        timezone_id: "America/New_York"
+        pause_status: "UNPAUSED"
+
+      tasks:
+        - task_key: build_ndc
+          spark_python_task:
+            python_file: ../src/build_ndc.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: reference_env
+
+      environments:
+        - environment_key: reference_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 3600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}
