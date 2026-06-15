@@ -40,6 +40,31 @@ class TestSchemaStatements:
 
 
 @pytest.mark.unit
+class TestVolumeStatements:
+    def test_read_volume_statement(self):
+        stmts = grants.volume_read_statements(
+            "ecdh_model_dev", "codes", "cvx_raw", "ecdh-data-engineers"
+        )
+        assert stmts == [
+            "GRANT READ VOLUME ON VOLUME ecdh_model_dev.codes.cvx_raw TO `ecdh-data-engineers`"
+        ]
+
+    def test_grant_volume_reader_executes_statement(self):
+        executed = []
+
+        class FakeSpark:
+            def sql(self, stmt):
+                executed.append(stmt)
+
+        grants.grant_volume_reader(
+            FakeSpark(), "ecdh_model_dev", "codes", "cvx_raw", "ecdh-data-engineers"
+        )
+        assert executed == [
+            "GRANT READ VOLUME ON VOLUME ecdh_model_dev.codes.cvx_raw TO `ecdh-data-engineers`"
+        ]
+
+
+@pytest.mark.unit
 class TestApply:
     def test_apply_executes_each_statement(self):
         executed = []

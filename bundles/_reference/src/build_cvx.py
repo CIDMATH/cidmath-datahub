@@ -484,6 +484,11 @@ def run(
         grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
         grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
         grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
+        # READ VOLUME is volume-scoped and not covered by the schema SELECT grant,
+        # so grant it explicitly on the raw-snapshot Volume so readers can open the
+        # archived XML payloads (ADR 0032).
+        grants.grant_volume_reader(spark, catalog, SCHEMA, volume, data_engineers_group)
+        grants.grant_volume_reader(spark, catalog, SCHEMA, volume, analysts_group)
 
     run_build(
         catalog=catalog,
