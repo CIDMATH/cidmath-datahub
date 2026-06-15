@@ -78,6 +78,14 @@ variables:
   loinc_password_key:
     description: Key within the LOINC secret scope for the LOINC account password.
     default: loinc_password
+  umls_secret_scope:
+    description: |
+      Databricks secret scope holding the UMLS UTS API key, used for the NLM bulk
+      downloads of RxNorm (RRF) and SNOMED CT (RF2). One shared key serves both
+      builds. Set per-target.
+  umls_secret_key:
+    description: Key within the UMLS secret scope for the UTS API key.
+    default: umls_api_key
   email_recipient:
     description: Primary email recipient for paging-severity alerts and digest.
     default: connor.vanmeter@emory.edu
@@ -147,6 +155,7 @@ targets:
       teams_destination_id: c33c2883-2b42-4621-9578-b864fd33547f
       ipums_secret_scope: ecdh-dev-ipums
       loinc_secret_scope: ecdh-dev-loinc
+      umls_secret_scope: ecdh-dev-umls
     presets:
       tags:
         project: ${var.project_tag}
@@ -175,6 +184,7 @@ targets:
       teams_destination_id: 691bab0f-9854-4f89-ab12-3138be3ec998
       ipums_secret_scope: ecdh-prod-ipums
       loinc_secret_scope: ecdh-prod-loinc
+      umls_secret_scope: ecdh-prod-umls
     presets:
       tags:
         project: ${var.project_tag}
