@@ -134,6 +134,34 @@ class TestParsePackage:
 
 
 @pytest.mark.unit
+class TestDedupe:
+    def test_dedupe_packages_collapses_duplicate_keys(self):
+        rows = (
+            "PRODUCTID\tPRODUCTNDC\tNDCPACKAGECODE\tPACKAGEDESCRIPTION\t"
+            "STARTMARKETINGDATE\tENDMARKETINGDATE\tNDC_EXCLUDE_FLAG\tSAMPLE_PACKAGE\n"
+            "p_1\t0517-0801\t0517-0801-25\t25 VIAL\t20100101\t\t\tN\n"
+            "p_1\t0517-0801\t0517-0801-25\t25 VIAL\t20100101\t\t\tN\n"  # exact dup key
+        )
+        pkgs = ndc.parse_package_file(rows)
+        assert len(pkgs) == 2
+        deduped, dropped = ndc.dedupe_packages(pkgs)
+        assert len(deduped) == 1
+        assert dropped == 1
+        assert ndc.find_duplicate_package_keys(deduped) == []
+
+    def test_dedupe_products_collapses_duplicate_ids(self):
+        rows = "PRODUCTID\tPRODUCTNDC\tLABELERNAME\np_1\t0517-0801\tAcme\np_1\t0517-0801\tAcme\n"
+        prods = ndc.parse_product_file(rows)
+        deduped, dropped = ndc.dedupe_products(prods)
+        assert len(deduped) == 1 and dropped == 1
+
+    def test_dedupe_keeps_distinct_keys(self, packages: list[ndc.NdcPackage]):
+        deduped, dropped = ndc.dedupe_packages(packages)
+        assert dropped == 0
+        assert len(deduped) == len(packages)
+
+
+@pytest.mark.unit
 class TestDqHelpers:
     def test_clean_fixture_passes_blocking_checks(
         self, products: list[ndc.NdcProduct], packages: list[ndc.NdcPackage]

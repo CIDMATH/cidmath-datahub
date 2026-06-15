@@ -338,8 +338,43 @@ def find_duplicate_product_keys(products: list[NdcProduct]) -> list[str]:
 
 
 def find_duplicate_package_keys(packages: list[NdcPackage]) -> list[tuple[str, str]]:
-    """Duplicate ``(product_id, ndc_package_code)`` within a snapshot (blocking PK)."""
+    """Duplicate ``(product_id, ndc_package_code)`` within a snapshot (post-dedup PK)."""
     return _duplicates((p.product_id, p.ndc_package_code) for p in packages)
+
+
+def dedupe_products(products: list[NdcProduct]) -> tuple[list[NdcProduct], int]:
+    """Collapse rows with a duplicate ``product_id`` (keep first); return ``(rows, dropped)``.
+
+    The table is keyed by ``product_id``; FDA's product file can occasionally repeat
+    one, so exact key-duplicates are collapsed and the count is recorded as a WARN by
+    the entrypoint rather than failing the build.
+    """
+    seen: set[str] = set()
+    out: list[NdcProduct] = []
+    for r in products:
+        if r.product_id in seen:
+            continue
+        seen.add(r.product_id)
+        out.append(r)
+    return out, len(products) - len(out)
+
+
+def dedupe_packages(packages: list[NdcPackage]) -> tuple[list[NdcPackage], int]:
+    """Collapse duplicate ``(product_id, ndc_package_code)`` rows (keep first).
+
+    The FDA package file contains occasional duplicate package listings for the same
+    product + package code (e.g. multi-level packaging); the table keys on that pair,
+    so duplicates are collapsed and the count recorded as a WARN by the entrypoint.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[NdcPackage] = []
+    for r in packages:
+        key = (r.product_id, r.ndc_package_code)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out, len(packages) - len(out)
 
 
 def find_missing_product_fields(products: list[NdcProduct]) -> list[tuple[str, str]]:

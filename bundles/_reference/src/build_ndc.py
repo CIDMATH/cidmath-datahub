@@ -28,9 +28,12 @@ snapshot; ``ndc_package`` is keyed by ``(product_id, ndc_package_code,
 snapshot_date)`` and FK-links to ``ndc_product`` by ``product_id``.
 
 Thin entrypoint over the ``run_build`` seam (ADR 0027). Blocking DQ (FAIL, raises):
-PK uniqueness on both tables; non-null required fields; package -> product FK
-within the snapshot; ``*_ndc`` normalization (package -> 11 digits, product ->
-9 digits). WARN: cardinality, marketing-date order, DEA-schedule vocab, freshness.
+PK uniqueness on both tables (after collapsing the FDA files' occasional duplicate
+key-rows); non-null required fields; ``*_ndc`` normalization (package -> 11 digits,
+product -> 9 digits). The package -> product FK is **informational** (ADR 0014) -- the
+FDA files have real referential gaps -- so it is a WARN, not a build blocker. WARN
+also: cardinality, collapsed-duplicate counts, marketing-date order, DEA-schedule
+vocab, freshness.
 
 Usage:
     build_ndc.py --catalog ecdh_model_dev \\
@@ -182,6 +185,8 @@ def _dq_checks(
     snapshot_date: date,
     *,
     wrote_new_file: bool,
+    product_dups: int = 0,
+    package_dups: int = 0,
 ) -> None:
     """Record DQ; raise on any blocking FAIL so a bad table never writes."""
     p_table, k_table = f"{SCHEMA}.{PRODUCT_TABLE}", f"{SCHEMA}.{PACKAGE_TABLE}"
@@ -259,20 +264,48 @@ def _dq_checks(
         details={"sample": bad_pkg_ndc[:10]} if bad_pkg_ndc else None,
     )
 
+    # --- WARN checks ---
+    # Package -> product FK is INFORMATIONAL (ADR 0014): the FDA files have real
+    # referential gaps (a package can reference a product excluded from product.txt
+    # via NDC_EXCLUDE_FLAG asymmetry or daily-update timing), so orphans are recorded
+    # and kept, not treated as a build-blocking failure.
     product_ids = {p.product_id for p in products}
     orphans = ndc.find_package_orphans(packages, product_ids)
     ctx.recorder.record(
         table_name=k_table,
         check_name="ndc_package_product_fk",
         category=DQCategory.REFERENTIAL,
-        severity=DQSeverity.FAIL,
+        severity=DQSeverity.WARN,
         passed=not orphans,
         failing_row_count=len(orphans),
         total_row_count=n_pkg,
-        details={"sample": [list(o) for o in orphans[:10]]} if orphans else None,
+        details={"orphan_count": len(orphans), "sample": [list(o) for o in orphans[:10]]}
+        if orphans
+        else None,
     )
 
-    # --- WARN checks ---
+    # Source rows collapsed by dedupe (the table keys require it; FDA data quirk).
+    ctx.recorder.record(
+        table_name=p_table,
+        check_name="ndc_product_duplicate_rows_collapsed",
+        category=DQCategory.UNIQUENESS,
+        severity=DQSeverity.WARN,
+        passed=product_dups == 0,
+        failing_row_count=product_dups,
+        total_row_count=n_prod,
+        details={"collapsed": product_dups} if product_dups else None,
+    )
+    ctx.recorder.record(
+        table_name=k_table,
+        check_name="ndc_package_duplicate_rows_collapsed",
+        category=DQCategory.UNIQUENESS,
+        severity=DQSeverity.WARN,
+        passed=package_dups == 0,
+        failing_row_count=package_dups,
+        total_row_count=n_pkg,
+        details={"collapsed": package_dups} if package_dups else None,
+    )
+
     prod_card_ok = n_prod >= ndc.PRODUCT_CARDINALITY_MIN
     ctx.recorder.record(
         table_name=p_table,
@@ -354,8 +387,6 @@ def _dq_checks(
         failures.append(f"bad product_ndc: {bad_prod_ndc[:5]}")
     if bad_pkg_ndc:
         failures.append(f"bad package ndc: {bad_pkg_ndc[:5]}")
-    if orphans:
-        failures.append(f"package without product: {orphans[:5]}")
     if failures:
         raise ValueError("NDC blocking DQ failed -- " + "; ".join(failures))
 
@@ -416,9 +447,12 @@ _KNOWN_LIMITATIONS = (
     "Revision-tracked by quarterly snapshot (snapshot_date) with the raw ndctext.zip "
     "preserved verbatim on the codes.ndc_raw Volume; 'current' is the latest snapshot_date. "
     "A newly-launched NDC may be up to a quarter stale in-table; the source's marketing "
-    "dates carry real-world validity. PHARM_CLASSES / SUBSTANCENAME are multi-valued raw "
-    "text (semicolon-delimited; not exploded). The NDC switches to a 12-digit format in "
-    "2033 (out of scope here)."
+    "dates carry real-world validity. The FDA files contain occasional duplicate package "
+    "listings (same product_id + package code) which are collapsed to one row per key, and "
+    "some packages reference a product absent from product.txt -- the package->product FK is "
+    "informational (ADR 0014), so such rows are kept. PHARM_CLASSES / SUBSTANCENAME are "
+    "multi-valued raw text (semicolon-delimited; not exploded). The NDC switches to a "
+    "12-digit format in 2033 (out of scope here)."
 )
 
 
@@ -557,7 +591,19 @@ def run(
         snapshot_bytes, wrote_new_file = _persist_snapshot(snapshot_path, raw)
         products = ndc.parse_product_file(_extract_text(snapshot_bytes, ndc.PRODUCT_MEMBER))
         packages = ndc.parse_package_file(_extract_text(snapshot_bytes, ndc.PACKAGE_MEMBER))
-        _dq_checks(ctx, products, packages, snap, wrote_new_file=wrote_new_file)
+        # Collapse the FDA files' occasional duplicate key-rows so the PKs hold; the
+        # counts are recorded as WARNs (the package->product FK stays informational).
+        products, product_dups = ndc.dedupe_products(products)
+        packages, package_dups = ndc.dedupe_packages(packages)
+        _dq_checks(
+            ctx,
+            products,
+            packages,
+            snap,
+            wrote_new_file=wrote_new_file,
+            product_dups=product_dups,
+            package_dups=package_dups,
+        )
 
         now = datetime.now(tz=UTC)
         product_rows = [
