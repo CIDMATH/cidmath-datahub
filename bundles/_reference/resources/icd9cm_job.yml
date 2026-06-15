@@ -3,31 +3,31 @@
 # Downloads the NCHS ICD-9-CM DTAB (tabular list) and APPNDX (Appendix E) RTF
 # zips for the requested fiscal-year edition(s), converts RTF -> text (striprtf),
 # parses/normalizes/validates and builds the classification hierarchy via
-# cidmath_datahub.reference.icd9, and writes ecdh_model_<env>.codes.icd9cm keyed by
-# (icd9_code, edition_year). Mirrors codes.icd10cm's shape (ADR 0031). Thin
+# cidmath_datahub.reference.icd9cm, and writes ecdh_model_<env>.codes.icd9cm keyed by
+# (icd9cm_code, edition_year). Mirrors codes.icd10cm's shape (ADR 0031). Thin
 # entrypoint over the run_build seam (ADR 0027); full_refresh per edition
 # (ADR 0024). ICD-9-CM is frozen, so base annual editions only.
 #
 # Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**);
 # UI-triggered. Load multiple editions via --edition-year (e.g. "2014" "2013").
 #
-# See bundles/_reference/src/build_icd9.py and ADR 0014/0015/0031.
+# See bundles/_reference/src/build_icd9cm.py and ADR 0014/0015/0031.
 
 resources:
   jobs:
-    build_icd9_reference:
-      name: "[_reference] build_icd9_reference"
+    build_icd9cm_reference:
+      name: "[_reference] build_icd9cm_reference"
       description: |
         Builds codes.icd9cm (ICD-9-CM diagnosis code system, NCHS) in the
         integrated catalog. One row per code per fiscal-year edition (incl. V/E);
-        PK (icd9_code, edition_year). Blocking DQ: uniqueness, non-null
+        PK (icd9cm_code, edition_year). Blocking DQ: uniqueness, non-null
         description, code-format, parent referential integrity. Frozen source;
         full_refresh per edition.
 
       tasks:
-        - task_key: build_icd9
+        - task_key: build_icd9cm
           spark_python_task:
-            python_file: ../src/build_icd9.py
+            python_file: ../src/build_icd9cm.py
             parameters:
               - "--catalog"
               - "${var.model_catalog}"

@@ -2,7 +2,7 @@
 
 Parses the CDC IIS **CVX** ("Vaccine Administered") code set from the machine-
 readable *XML-new* report into a **flat** code set: one row per CVX code, no
-classification hierarchy (unlike ``codes.icd10`` / ``codes.icd9`` -- CVX has no
+classification hierarchy (unlike ``codes.icd10cm`` / ``codes.icd9cm`` -- CVX has no
 chapter/block/parent structure). This module is the single source of truth for
 CVX parsing, normalization, and validation; the entrypoint
 ``bundles/_reference/src/build_cvx.py`` is thin glue over it (ADR 0011/0027).

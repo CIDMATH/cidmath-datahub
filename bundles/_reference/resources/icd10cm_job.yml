@@ -5,8 +5,8 @@
 # edition(s), overlays the Apr-1 mid-year update where published (--midyear-update
 # auto), and builds the classification hierarchy (parent/ancestors/level + chapter
 # /block from the tabular XML; --hierarchy build; ADR 0030). Parses/validates via
-# cidmath_datahub.reference.icd10 and writes ecdh_model_<env>.codes.icd10cm keyed by
-# (icd10_code, edition_year).
+# cidmath_datahub.reference.icd10cm and writes ecdh_model_<env>.codes.icd10cm keyed by
+# (icd10cm_code, edition_year).
 # Thin entrypoint over the run_build seam (ADR 0027); editions are re-pullable,
 # so the table is vintage-reproducible (full_refresh per edition; ADR 0007/0024).
 #
@@ -14,22 +14,22 @@
 # but triggered from the UI -- only build_time_reference auto-runs. To load more
 # editions, add years to the --edition-year parameter (e.g. "2026" "2021").
 #
-# See bundles/_reference/src/build_icd10.py and ADR 0014/0015.
+# See bundles/_reference/src/build_icd10cm.py and ADR 0014/0015.
 
 resources:
   jobs:
-    build_icd10_reference:
-      name: "[_reference] build_icd10_reference"
+    build_icd10cm_reference:
+      name: "[_reference] build_icd10cm_reference"
       description: |
         Builds codes.icd10cm (ICD-10-CM diagnosis code system, CDC/NCHS) in the
         integrated catalog. One row per code per fiscal-year edition; PK
-        (icd10_code, edition_year). Blocking DQ: uniqueness, non-null
+        (icd10cm_code, edition_year). Blocking DQ: uniqueness, non-null
         description, code-format. Reference table; full_refresh per edition.
 
       tasks:
-        - task_key: build_icd10
+        - task_key: build_icd10cm
           spark_python_task:
-            python_file: ../src/build_icd10.py
+            python_file: ../src/build_icd10cm.py
             parameters:
               - "--catalog"
               - "${var.model_catalog}"

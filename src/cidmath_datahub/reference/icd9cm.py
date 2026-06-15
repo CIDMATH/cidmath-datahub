@@ -5,19 +5,19 @@ RTF) into the diagnosis code set used for U.S. coding *before* the 2015-10-01
 ICD-10 transition, including the V (``V01``-``V91``) and E (``E000``-``E999``)
 supplementary classifications. This module is the single source of truth for
 ICD-9-CM parsing, normalization, and format validation; the entrypoint
-``bundles/_reference/src/build_icd9.py`` is thin glue over it (ADR 0011/0027).
+``bundles/_reference/src/build_icd9cm.py`` is thin glue over it (ADR 0011/0027).
 
 It is a **standalone** module: ICD-9-CM's source (NCHS RTF), code structure, and
-tree-sourcing genuinely differ from ICD-10-CM, so ``reference/icd10.py`` is left
+tree-sourcing genuinely differ from ICD-10-CM, so ``reference/icd10cm.py`` is left
 untouched and the two share only the documented *hierarchy contract* (ADR 0031),
 not code. It holds **no Spark** -- pure functions over plain Python -- so the
 bundle entrypoint converts the result to a Spark DataFrame and writes
-``ecdh_model_<env>.codes.icd9cm`` keyed by ``(icd9_code, edition_year)`` (ADR 0006,
+``ecdh_model_<env>.codes.icd9cm`` keyed by ``(icd9cm_code, edition_year)`` (ADR 0006,
 ADR 0015: reference table, no Kimball suffix).
 
 ICD-9-CM is **frozen**: the final update was FY2014 and it is valid for US coding
 through 2015-09-30. There is no mid-year overlay (unlike ICD-10-CM), so none of
-``icd10.py``'s ``{year}-update`` machinery is ported.
+``icd10cm.py``'s ``{year}-update`` machinery is ported.
 
 Code structure (canonical dotted form):
     * numeric: ``NNN[.N[N]]`` -- decimal after the 3rd char (``250`` -> ``250.0``
@@ -193,7 +193,7 @@ class Icd9Record:
     hierarchy columns are added by the hierarchy slice (ADR 0031).
     """
 
-    icd9_code: str
+    icd9cm_code: str
     edition_year: int
     description: str
     is_billable: bool
@@ -285,7 +285,7 @@ def assemble_records(pairs: Iterable[tuple[str, str]], edition_year: int) -> lis
     billable = find_billable_codes(by_code.keys())
     return [
         Icd9Record(
-            icd9_code=code,
+            icd9cm_code=code,
             edition_year=edition_year,
             description=description,
             is_billable=code in billable,
@@ -306,17 +306,17 @@ class Icd9Node:
     """An ICD-9-CM code enriched with its place in the classification tree.
 
     Carries the shared code-system hierarchy contract (ADR 0031): adjacency
-    (``parent_icd9_code``), a materialized path (``ancestor_codes``, root->parent),
+    (``parent_icd9cm_code``), a materialized path (``ancestor_codes``, root->parent),
     depth (``node_level`` == ``len(ancestor_codes)``), and denormalized chapter/
     block. ``ancestor_codes`` is a tuple so the node is hashable; the entrypoint
     passes it straight to a Spark ``ARRAY<STRING>`` column.
     """
 
-    icd9_code: str
+    icd9cm_code: str
     edition_year: int
     description: str
     is_billable: bool
-    parent_icd9_code: str | None
+    parent_icd9cm_code: str | None
     node_level: int
     ancestor_codes: tuple[str, ...]
     chapter_code: str | None
@@ -476,19 +476,19 @@ def build_hierarchy(
     Returns:
         One :class:`Icd9Node` per record, in input order.
     """
-    code_set = {r.icd9_code for r in records}
+    code_set = {r.icd9cm_code for r in records}
     nodes: list[Icd9Node] = []
     for r in records:
-        ancestors = tuple(ancestors_for(r.icd9_code, code_set))
-        chapter = chapter_for(r.icd9_code)
-        block = category_map.get(category_of(r.icd9_code))
+        ancestors = tuple(ancestors_for(r.icd9cm_code, code_set))
+        chapter = chapter_for(r.icd9cm_code)
+        block = category_map.get(category_of(r.icd9cm_code))
         nodes.append(
             Icd9Node(
-                icd9_code=r.icd9_code,
+                icd9cm_code=r.icd9cm_code,
                 edition_year=r.edition_year,
                 description=r.description,
                 is_billable=r.is_billable,
-                parent_icd9_code=ancestors[-1] if ancestors else None,
+                parent_icd9cm_code=ancestors[-1] if ancestors else None,
                 node_level=len(ancestors),
                 ancestor_codes=ancestors,
                 chapter_code=chapter[0] if chapter else None,
@@ -507,23 +507,23 @@ def build_hierarchy(
 
 def find_format_violations(records: list[Icd9Record]) -> list[str]:
     """Return codes that fail canonical ICD-9-CM format validation."""
-    return [r.icd9_code for r in records if not validate_code(r.icd9_code)]
+    return [r.icd9cm_code for r in records if not validate_code(r.icd9cm_code)]
 
 
 def find_missing_descriptions(records: list[Icd9Record]) -> list[tuple[str, int]]:
-    """Return ``(icd9_code, edition_year)`` keys whose description is empty."""
+    """Return ``(icd9cm_code, edition_year)`` keys whose description is empty."""
     return [
-        (r.icd9_code, r.edition_year)
+        (r.icd9cm_code, r.edition_year)
         for r in records
         if not (r.description and r.description.strip())
     ]
 
 
 def find_duplicate_keys(records: list[Icd9Record]) -> list[tuple[str, int]]:
-    """Return ``(icd9_code, edition_year)`` keys appearing more than once."""
+    """Return ``(icd9cm_code, edition_year)`` keys appearing more than once."""
     seen: dict[tuple[str, int], int] = {}
     for r in records:
-        key = (r.icd9_code, r.edition_year)
+        key = (r.icd9cm_code, r.edition_year)
         seen[key] = seen.get(key, 0) + 1
     return [key for key, count in seen.items() if count > 1]
 
@@ -535,11 +535,11 @@ def find_dangling_parents(nodes: list[Icd9Node]) -> list[str]:
     (parents come from the code set via :func:`ancestors_for`), but checked so any
     anomaly surfaces as a blocking FAIL.
     """
-    code_set = {n.icd9_code for n in nodes}
+    code_set = {n.icd9cm_code for n in nodes}
     return [
-        n.icd9_code
+        n.icd9cm_code
         for n in nodes
-        if n.parent_icd9_code is not None and n.parent_icd9_code not in code_set
+        if n.parent_icd9cm_code is not None and n.parent_icd9cm_code not in code_set
     ]
 
 
@@ -550,7 +550,7 @@ def find_unmapped_categories(nodes: list[Icd9Node]) -> list[str]:
     result means a code's category fell outside every known ICD-9 chapter range
     (a parse/format anomaly worth surfacing). Not blocking.
     """
-    return sorted({category_of(n.icd9_code) for n in nodes if n.chapter_code is None})
+    return sorted({category_of(n.icd9cm_code) for n in nodes if n.chapter_code is None})
 
 
 def find_unmapped_blocks(nodes: list[Icd9Node]) -> list[str]:
@@ -559,9 +559,9 @@ def find_unmapped_blocks(nodes: list[Icd9Node]) -> list[str]:
     Blocks come from Appendix E; a category absent from that map yields a null block.
     Flagged for coverage visibility, not blocking.
     """
-    return sorted({category_of(n.icd9_code) for n in nodes if n.block_code is None})
+    return sorted({category_of(n.icd9cm_code) for n in nodes if n.block_code is None})
 
 
 def find_orphan_codes(nodes: list[Icd9Node]) -> list[str]:
     """Return subcategory codes (dotted) that found no parent in their edition (WARN)."""
-    return [n.icd9_code for n in nodes if "." in n.icd9_code and not n.ancestor_codes]
+    return [n.icd9cm_code for n in nodes if "." in n.icd9cm_code and not n.ancestor_codes]

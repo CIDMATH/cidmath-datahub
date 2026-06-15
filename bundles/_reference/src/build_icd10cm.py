@@ -4,21 +4,21 @@ the ``codes`` schema).
 ICD-10-CM is the U.S. Clinical Modification of ICD-10 diagnosis codes
 (CDC/NCHS) -- the public-health diagnosis standard -- *not* WHO ICD-10 or
 ICD-10-PCS (procedures). This entrypoint is the thin IO + Spark layer over the
-pure logic in ``cidmath_datahub.reference.icd10`` (ADR 0011). For each
+pure logic in ``cidmath_datahub.reference.icd10cm`` (ADR 0011). For each
 fiscal-year edition it:
 
   1. downloads the CDC NCHS Oct-1 base order file and, when published, overlays
-     the Apr-1 mid-year update (update wins per code; ``icd10.overlay_records``),
+     the Apr-1 mid-year update (update wins per code; ``icd10cm.overlay_records``),
      so an edition reflects the latest within-year release;
   2. downloads the tabular XML and builds the classification hierarchy
-     (``icd10.build_hierarchy``): adjacency (``parent_icd10_code``), materialized
+     (``icd10cm.build_hierarchy``): adjacency (``parent_icd10cm_code``), materialized
      path (``ancestor_codes``), and depth (``node_level``) from the XML's
      ``chapter -> section -> diag`` nesting, plus the denormalized chapter/block
      labels (ADR 0030). Seventh-character codes fall back to their nearest listed
      ancestor by prefix.
 
 It then runs DQ and writes ``ecdh_model_<env>.codes.icd10cm`` keyed by
-``(icd10_code, edition_year)`` (ADR 0006; ADR 0015: reference table, no Kimball
+``(icd10cm_code, edition_year)`` (ADR 0006; ADR 0015: reference table, no Kimball
 suffix). ``--midyear-update`` controls the overlay (``auto`` / ``require`` /
 ``skip``); ``--hierarchy`` (``build`` / ``skip``) controls the tabular-XML
 download -- with ``skip``, adjacency degrades to the prefix rule and chapter/block
@@ -32,16 +32,16 @@ re-pullable, so the table is vintage-reproducible: no SCD2/snapshot needed
 edition's rows, then append), leaving other loaded editions intact -- the same
 per-vintage refresh pattern as the geography vintages (ADR 0024).
 
-Blocking DQ (FAIL, raises): ``(icd10_code, edition_year)`` uniqueness, non-null
+Blocking DQ (FAIL, raises): ``(icd10cm_code, edition_year)`` uniqueness, non-null
 ``description``, and ICD-10-CM code-format validation. Cardinality (ICD-10-CM
 is ~70k+ codes per edition) is a WARN.
 
 Usage:
-    build_icd10.py --catalog ecdh_model_dev --edition-year 2026 \\
+    build_icd10cm.py --catalog ecdh_model_dev --edition-year 2026 \\
         --data-engineers-group ecdh-data-engineers --analysts-group ecdh-analysts
 
     # multiple editions in one run (e.g. to backfill U07.1's FY2021 debut):
-    build_icd10.py --catalog ecdh_model_dev --edition-year 2026 2021
+    build_icd10cm.py --catalog ecdh_model_dev --edition-year 2026 2021
 """
 
 from __future__ import annotations
@@ -64,13 +64,13 @@ from cidmath_datahub.common import grants, registration
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
-from cidmath_datahub.reference import icd10
+from cidmath_datahub.reference import icd10cm
 
 log = get_logger(__name__)
 
 SCHEMA = "codes"
 TABLE = "icd10cm"
-PIPELINE_REF = "bundles/_reference/src/build_icd10.py"
+PIPELINE_REF = "bundles/_reference/src/build_icd10cm.py"
 
 # ICD-10-CM has ~70k+ codes per edition (FY2026 ~74k). WARN if a parsed edition
 # falls outside a generous sanity band -- a real edition should never be this
@@ -84,11 +84,11 @@ _CARDINALITY_MAX = 120_000
 # notes remain out of scope.
 ICD10_SPARK_SCHEMA = T.StructType(
     [
-        T.StructField("icd10_code", T.StringType(), False),
+        T.StructField("icd10cm_code", T.StringType(), False),
         T.StructField("edition_year", T.IntegerType(), False),
         T.StructField("description", T.StringType(), False),
         T.StructField("is_billable", T.BooleanType(), False),
-        T.StructField("parent_icd10_code", T.StringType(), True),
+        T.StructField("parent_icd10cm_code", T.StringType(), True),
         T.StructField("node_level", T.IntegerType(), False),
         T.StructField("ancestor_codes", T.ArrayType(T.StringType()), False),
         T.StructField("chapter_code", T.StringType(), True),
@@ -103,7 +103,7 @@ ICD10_SPARK_SCHEMA = T.StructType(
 
 # ---------------------------------------------------------------------------
 # IO: download + extract a member from a CDC zip (kept out of the pure module
-# per ADR 0011; the URL/member knowledge lives in icd10.py). Used for both the
+# per ADR 0011; the URL/member knowledge lives in icd10cm.py). Used for both the
 # "Code Descriptions" order file and the "table and index" tabular XML.
 # ---------------------------------------------------------------------------
 
@@ -170,7 +170,7 @@ def _fetch_optional_zip_member(
 
 def _dq_checks(
     ctx: BuildContext,
-    records: list[icd10.Icd10Record],
+    records: list[icd10cm.Icd10Record],
     edition_years: list[int],
     overlay_stats: dict[int, dict[str, Any]],
 ) -> None:
@@ -179,10 +179,10 @@ def _dq_checks(
     table = f"{SCHEMA}.{TABLE}"
     total = len(records)
 
-    dup_keys = icd10.find_duplicate_keys(records)
+    dup_keys = icd10cm.find_duplicate_keys(records)
     ctx.recorder.record(
         table_name=table,
-        check_name="icd10_code_edition_year_uniqueness",
+        check_name="icd10cm_code_edition_year_uniqueness",
         category=DQCategory.UNIQUENESS,
         severity=DQSeverity.FAIL,
         passed=not dup_keys,
@@ -191,7 +191,7 @@ def _dq_checks(
         details={"sample_duplicates": [list(k) for k in dup_keys[:10]]} if dup_keys else None,
     )
 
-    missing_desc = icd10.find_missing_descriptions(records)
+    missing_desc = icd10cm.find_missing_descriptions(records)
     ctx.recorder.record(
         table_name=table,
         check_name="icd10_description_not_null",
@@ -203,10 +203,10 @@ def _dq_checks(
         details={"sample_missing": [list(k) for k in missing_desc[:10]]} if missing_desc else None,
     )
 
-    bad_format = icd10.find_format_violations(records)
+    bad_format = icd10cm.find_format_violations(records)
     ctx.recorder.record(
         table_name=table,
-        check_name="icd10_code_format",
+        check_name="icd10cm_code_format",
         category=DQCategory.BUSINESS_RULE,
         severity=DQSeverity.FAIL,
         passed=not bad_format,
@@ -248,17 +248,17 @@ def _dq_checks(
 
     failures: list[str] = []
     if dup_keys:
-        failures.append(f"duplicate (icd10_code, edition_year): {dup_keys[:5]}")
+        failures.append(f"duplicate (icd10cm_code, edition_year): {dup_keys[:5]}")
     if missing_desc:
         failures.append(f"null description: {missing_desc[:5]}")
     if bad_format:
-        failures.append(f"malformed icd10_code: {bad_format[:5]}")
+        failures.append(f"malformed icd10cm_code: {bad_format[:5]}")
     if failures:
         raise ValueError("ICD-10-CM blocking DQ failed -- " + "; ".join(failures))
 
 
 def _hierarchy_dq_checks(
-    ctx: BuildContext, nodes: list[icd10.Icd10Node], adjacency_mismatches: list[str]
+    ctx: BuildContext, nodes: list[icd10cm.Icd10Node], adjacency_mismatches: list[str]
 ) -> None:
     """Record hierarchy WARN checks (ADR 0030) -- non-blocking by design.
 
@@ -284,7 +284,7 @@ def _hierarchy_dq_checks(
         else None,
     )
 
-    unmapped = icd10.find_unmapped_categories(nodes)
+    unmapped = icd10cm.find_unmapped_categories(nodes)
     ctx.recorder.record(
         table_name=table,
         check_name="icd10_chapter_block_resolved",
@@ -296,7 +296,7 @@ def _hierarchy_dq_checks(
         details={"unmapped_categories": unmapped[:20]} if unmapped else None,
     )
 
-    orphans = icd10.find_orphan_codes(nodes)
+    orphans = icd10cm.find_orphan_codes(nodes)
     ctx.recorder.record(
         table_name=table,
         check_name="icd10_parent_resolved",
@@ -326,7 +326,7 @@ def _write_table(
     spark: SparkSession, catalog: str, rows: list[dict[str, Any]], edition_years: list[int]
 ) -> None:
     full = f"{catalog}.{SCHEMA}.{TABLE}"
-    df = spark.createDataFrame(rows, schema=ICD10_SPARK_SCHEMA).sort("edition_year", "icd10_code")
+    df = spark.createDataFrame(rows, schema=ICD10_SPARK_SCHEMA).sort("edition_year", "icd10cm_code")
     if _table_has_column(spark, full, "edition_year"):
         # Replace only the editions this run rebuilt; leave other vintages intact.
         years_sql = ", ".join(str(y) for y in edition_years)
@@ -342,8 +342,8 @@ def _comment_table(spark: SparkSession, catalog: str) -> None:
     spark.sql(
         f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TABLE} IS "
         f"'ICD-10-CM diagnosis code system (CDC/NCHS) with classification hierarchy "
-        f"(parent_icd10_code, ancestor_codes, chapter/block). One row per code per annual "
-        f"edition (Oct-1 base + Apr-1 mid-year update overlaid); PK (icd10_code, edition_year). "
+        f"(parent_icd10cm_code, ancestor_codes, chapter/block). One row per code per annual "
+        f"edition (Oct-1 base + Apr-1 mid-year update overlaid); PK (icd10cm_code, edition_year). "
         f"Reference table; vintage-reproducible (full_refresh per edition). ADR 0014/0015/0030.'"
     )
 
@@ -363,12 +363,12 @@ def _register(spark: SparkSession, catalog: str, edition_years: list[int]) -> No
             layer="reference",
             description=(
                 "ICD-10-CM (Clinical Modification) diagnosis code system from CDC/NCHS, "
-                "with the full classification hierarchy: parent_icd10_code, ancestor_codes "
+                "with the full classification hierarchy: parent_icd10cm_code, ancestor_codes "
                 "(root->parent path), node_level, and denormalized chapter/block labels "
                 "(ADR 0030). One row per code per fiscal-year edition, reflecting the latest "
                 "within-year release (Oct-1 base with the Apr-1 mid-year update overlaid "
                 "where published). is_billable distinguishes valid leaf codes from category "
-                "headers. PK (icd10_code, edition_year)."
+                "headers. PK (icd10cm_code, edition_year)."
             ),
             public_health_relevance=(
                 "Canonical diagnosis-code standard for U.S. surveillance and clinical data; "
@@ -379,15 +379,15 @@ def _register(spark: SparkSession, catalog: str, edition_years: list[int]) -> No
             spatial_resolution="none",
             spatial_coverage="United States",
             source_provider_code="cdc",
-            source_url=icd10.SOURCE_FILES_PAGE_URL,
-            source_documentation_url=icd10.ORDER_FILE_FORMAT_DOC_URL,
+            source_url=icd10cm.SOURCE_FILES_PAGE_URL,
+            source_documentation_url=icd10cm.ORDER_FILE_FORMAT_DOC_URL,
             license="public domain (U.S. Government work, 17 U.S.C. 105)",
             dua_required=False,
             dua_reference="No DUA. CDC/NCHS ICD-10-CM files are public domain.",
             access_tier="open",
             external_maintainer_name="National Center for Health Statistics (NCHS), CDC",
             is_hosted=True,
-            source_data_dictionary_url=icd10.ORDER_FILE_FORMAT_DOC_URL,
+            source_data_dictionary_url=icd10cm.ORDER_FILE_FORMAT_DOC_URL,
             temporal_coverage_start=cov_start,
             temporal_coverage_end=cov_end,
             temporal_resolution="annual",
@@ -406,7 +406,7 @@ def _register(spark: SparkSession, catalog: str, edition_years: list[int]) -> No
             full_table_name=full,
             update_semantics="full_refresh",
             materialization_type="table",
-            cluster_columns=["edition_year", "icd10_code"],
+            cluster_columns=["edition_year", "icd10cm_code"],
             pipeline_reference=PIPELINE_REF,
         ),
     )
@@ -417,10 +417,10 @@ def run(
     edition_years: list[int],
     data_engineers_group: str,
     analysts_group: str,
-    url_template: str = icd10.ORDER_FILE_ZIP_URL_TEMPLATE,
+    url_template: str = icd10cm.ORDER_FILE_ZIP_URL_TEMPLATE,
     midyear_update: str = "auto",
     hierarchy: str = "build",
-    tabular_url_template: str = icd10.TABULAR_ZIP_URL_TEMPLATE,
+    tabular_url_template: str = icd10cm.TABULAR_ZIP_URL_TEMPLATE,
 ) -> None:
     editions = sorted(set(edition_years))
 
@@ -430,70 +430,70 @@ def run(
     # tabular XML for chapter/block -> build_hierarchy adds adjacency + path
     # (ADR 0030). source_by_key stamps each row's source_file; overlay_stats feeds
     # an INFO DQ record.
-    records: list[icd10.Icd10Record] = []
-    nodes: list[icd10.Icd10Node] = []
+    records: list[icd10cm.Icd10Record] = []
+    nodes: list[icd10cm.Icd10Node] = []
     source_by_key: dict[tuple[str, int], str] = {}
     overlay_stats: dict[int, dict[str, Any]] = {}
     adjacency_mismatches: list[str] = []
     for year in editions:
-        base_url = icd10.order_file_zip_url(year, template=url_template)
+        base_url = icd10cm.order_file_zip_url(year, template=url_template)
         log.info("Downloading base order file", extra={"edition_year": year, "url": base_url})
         base_text, base_member = _fetch_zip_member(
-            base_url, icd10.select_order_file_member, encoding="latin-1"
+            base_url, icd10cm.select_order_file_member, encoding="latin-1"
         )
-        base_recs = icd10.parse_order_file(base_text, year)
+        base_recs = icd10cm.parse_order_file(base_text, year)
 
-        update_recs: list[icd10.Icd10Record] = []
+        update_recs: list[icd10cm.Icd10Record] = []
         update_member: str | None = None
         if midyear_update != "skip":
-            upd_url = icd10.update_file_zip_url(year)
+            upd_url = icd10cm.update_file_zip_url(year)
             log.info("Checking mid-year update", extra={"edition_year": year, "url": upd_url})
             fetched = _fetch_optional_zip_member(
                 upd_url,
-                icd10.select_order_file_member,
+                icd10cm.select_order_file_member,
                 encoding="latin-1",
                 required=(midyear_update == "require"),
             )
             if fetched is not None:
                 update_text, update_member = fetched
-                update_recs = icd10.parse_order_file(update_text, year)
+                update_recs = icd10cm.parse_order_file(update_text, year)
 
-        merged = icd10.overlay_records(base_recs, update_recs)
+        merged = icd10cm.overlay_records(base_recs, update_recs)
 
         # Hierarchy from the tabular XML (base required unless --hierarchy skip;
         # update tree overlaid when an Apr-1 order-file update was applied). The
         # XML nesting is the source of truth for parent/ancestors; chapter/block
         # come from it too. Seventh-character codes fall back to prefix (ADR 0030).
-        category_map: dict[str, icd10.CategoryGroup] = {}
+        category_map: dict[str, icd10cm.CategoryGroup] = {}
         parent_of: dict[str, str | None] = {}
         if hierarchy != "skip":
-            tab_url = icd10.tabular_zip_url(year, template=tabular_url_template)
+            tab_url = icd10cm.tabular_zip_url(year, template=tabular_url_template)
             log.info("Downloading tabular XML", extra={"edition_year": year, "url": tab_url})
             tab_text, _ = _fetch_zip_member(
-                tab_url, icd10.select_tabular_xml_member, encoding="utf-8"
+                tab_url, icd10cm.select_tabular_xml_member, encoding="utf-8"
             )
-            tree = icd10.parse_tabular_tree(tab_text)
+            tree = icd10cm.parse_tabular_tree(tab_text)
             category_map, parent_of = tree.category_map, tree.parent_of
             if update_member is not None:
                 upd_tab = _fetch_optional_zip_member(
-                    icd10.update_tabular_zip_url(year),
-                    icd10.select_tabular_xml_member,
+                    icd10cm.update_tabular_zip_url(year),
+                    icd10cm.select_tabular_xml_member,
                     encoding="utf-8",
                     required=False,
                 )
                 if upd_tab is not None:
-                    upd_tree = icd10.parse_tabular_tree(upd_tab[0])
+                    upd_tree = icd10cm.parse_tabular_tree(upd_tab[0])
                     category_map = {**category_map, **upd_tree.category_map}
                     parent_of = {**parent_of, **upd_tree.parent_of}
 
-        edition_nodes = icd10.build_hierarchy(merged, category_map, parent_of)
-        adjacency_mismatches.extend(icd10.find_adjacency_mismatches(merged, parent_of))
+        edition_nodes = icd10cm.build_hierarchy(merged, category_map, parent_of)
+        adjacency_mismatches.extend(icd10cm.find_adjacency_mismatches(merged, parent_of))
 
-        base_codes = {r.icd10_code for r in base_recs}
-        update_codes = {r.icd10_code for r in update_recs}
+        base_codes = {r.icd10cm_code for r in base_recs}
+        update_codes = {r.icd10cm_code for r in update_recs}
         for r in merged:
-            from_update = update_member is not None and r.icd10_code in update_codes
-            source_by_key[(r.icd10_code, year)] = update_member if from_update else base_member
+            from_update = update_member is not None and r.icd10cm_code in update_codes
+            source_by_key[(r.icd10cm_code, year)] = update_member if from_update else base_member
         records.extend(merged)
         nodes.extend(edition_nodes)
 
@@ -503,7 +503,7 @@ def run(
             "base_codes": len(base_codes),
             "update_codes": len(update_codes),
             "added_by_update": len(update_codes - base_codes),
-            "unmapped_categories": len(icd10.find_unmapped_categories(edition_nodes)),
+            "unmapped_categories": len(icd10cm.find_unmapped_categories(edition_nodes)),
             "final": len(merged),
         }
         log.info("Built edition", extra={"edition_year": year, **overlay_stats[year]})
@@ -521,18 +521,18 @@ def run(
         now = datetime.now(tz=UTC)
         rows = [
             {
-                "icd10_code": n.icd10_code,
+                "icd10cm_code": n.icd10cm_code,
                 "edition_year": n.edition_year,
                 "description": n.description,
                 "is_billable": n.is_billable,
-                "parent_icd10_code": n.parent_icd10_code,
+                "parent_icd10cm_code": n.parent_icd10cm_code,
                 "node_level": n.node_level,
                 "ancestor_codes": list(n.ancestor_codes),
                 "chapter_code": n.chapter_code,
                 "chapter_name": n.chapter_name,
                 "block_code": n.block_code,
                 "block_name": n.block_name,
-                "source_file": source_by_key[(n.icd10_code, n.edition_year)],
+                "source_file": source_by_key[(n.icd10cm_code, n.edition_year)],
                 "ingested_at": now,
             }
             for n in nodes
@@ -571,7 +571,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--url-template",
-        default=icd10.ORDER_FILE_ZIP_URL_TEMPLATE,
+        default=icd10cm.ORDER_FILE_ZIP_URL_TEMPLATE,
         help="Override the base order-file zip URL template (must contain '{year}').",
     )
     parser.add_argument(
@@ -596,7 +596,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--tabular-url-template",
-        default=icd10.TABULAR_ZIP_URL_TEMPLATE,
+        default=icd10cm.TABULAR_ZIP_URL_TEMPLATE,
         help="Override the base tabular-XML zip URL template (must contain '{year}').",
     )
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")

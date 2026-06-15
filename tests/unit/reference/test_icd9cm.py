@@ -1,4 +1,4 @@
-"""Unit tests for `cidmath_datahub.reference.icd9` (Slice 1: parse/normalize/billable).
+"""Unit tests for `cidmath_datahub.reference.icd9cm` (Slice 1: parse/normalize/billable).
 
 Anchored on real-shaped ICD-9-CM tabular rows incl. V and E codes:
   - 250 / 250.0 / 250.00 (diabetes mellitus) -- numeric category -> sub -> billable leaf
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from cidmath_datahub.reference import icd9
+from cidmath_datahub.reference import icd9cm
 
 EDITION = 2012
 
@@ -54,31 +54,31 @@ DTAB_SAMPLE = """\
 class TestUrlBuilder:
     def test_suffix_and_dir_mapping(self):
         # FY2012 -> dir 2011, suffix "12"
-        assert icd9.edition_suffix(2012) == "12"
-        assert icd9.edition_dir_year(2012) == 2011
-        assert icd9.edition_suffix(2010) == "10"
-        assert icd9.edition_dir_year(2010) == 2009
+        assert icd9cm.edition_suffix(2012) == "12"
+        assert icd9cm.edition_dir_year(2012) == 2011
+        assert icd9cm.edition_suffix(2010) == "10"
+        assert icd9cm.edition_dir_year(2010) == 2009
 
     def test_zip_and_readme_urls(self):
-        assert icd9.dtab_zip_url(2012).endswith("/ICD9-CM/2011/Dtab12.zip")
-        assert icd9.appendix_zip_url(2012).endswith("/ICD9-CM/2011/Appndx12.zip")
-        assert icd9.readme_url(2012).endswith("/ICD9-CM/2011/Readme12.txt")
+        assert icd9cm.dtab_zip_url(2012).endswith("/ICD9-CM/2011/Dtab12.zip")
+        assert icd9cm.appendix_zip_url(2012).endswith("/ICD9-CM/2011/Appndx12.zip")
+        assert icd9cm.readme_url(2012).endswith("/ICD9-CM/2011/Readme12.txt")
 
 
 @pytest.mark.unit
 class TestSelectMembers:
     def test_select_dtab(self):
         members = ["DTAB12.RTF", "DINDEX12.RTF", "PREFAC12.RTF"]
-        assert icd9.select_dtab_member(members) == "DTAB12.RTF"
+        assert icd9cm.select_dtab_member(members) == "DTAB12.RTF"
 
     def test_select_appendix_e(self):
         # APPNDX zip also ships the other appendices; pick only DC_3D
         members = ["DMORPH12.RTF", "DDRGCL12.RTF", "DINDST12.RTF", "DC_3D12.RTF"]
-        assert icd9.select_appendix_e_member(members) == "DC_3D12.RTF"
+        assert icd9cm.select_appendix_e_member(members) == "DC_3D12.RTF"
 
     def test_select_dtab_missing_raises(self):
         with pytest.raises(ValueError, match="exactly one"):
-            icd9.select_dtab_member(["DINDEX12.RTF", "PTAB12.RTF"])
+            icd9cm.select_dtab_member(["DINDEX12.RTF", "PTAB12.RTF"])
 
 
 @pytest.mark.unit
@@ -100,7 +100,7 @@ class TestNormalizeCode:
         ],
     )
     def test_normalization(self, raw, expected):
-        assert icd9.normalize_code(raw) == expected
+        assert icd9cm.normalize_code(raw) == expected
 
 
 @pytest.mark.unit
@@ -109,7 +109,7 @@ class TestValidateCode:
         "code", ["250", "250.0", "250.00", "460", "V30", "V30.00", "E810", "E812.0"]
     )
     def test_valid(self, code):
-        assert icd9.validate_code(code) is True
+        assert icd9cm.validate_code(code) is True
 
     @pytest.mark.parametrize(
         "code",
@@ -124,18 +124,18 @@ class TestValidateCode:
         ],
     )
     def test_invalid(self, code):
-        assert icd9.validate_code(code) is False
+        assert icd9cm.validate_code(code) is False
 
     def test_code_class(self):
-        assert icd9.code_class("250.00") == "numeric"
-        assert icd9.code_class("V30") == "V"
-        assert icd9.code_class("E812.0") == "E"
+        assert icd9cm.code_class("250.00") == "numeric"
+        assert icd9cm.code_class("V30") == "V"
+        assert icd9cm.code_class("E812.0") == "E"
 
 
 @pytest.mark.unit
 class TestParseDtab:
     def test_extracts_only_code_lines(self):
-        pairs = icd9.parse_dtab(DTAB_SAMPLE)
+        pairs = icd9cm.parse_dtab(DTAB_SAMPLE)
         codes = [c for c, _ in pairs]
         # every real code present, in all three classes
         for c in ["001", "001.0", "250", "250.00", "V30", "V30.00", "E810", "E812.0"]:
@@ -145,7 +145,7 @@ class TestParseDtab:
         assert "139" not in codes and "279" not in codes  # range banners not codes
 
     def test_titles_captured(self):
-        by_code = dict(icd9.parse_dtab(DTAB_SAMPLE))
+        by_code = dict(icd9cm.parse_dtab(DTAB_SAMPLE))
         assert by_code["250"] == "Diabetes mellitus"
         assert by_code["V30"] == "Single liveborn"
         assert by_code["E812.0"] == "Driver of motor vehicle other than motorcycle"
@@ -154,8 +154,8 @@ class TestParseDtab:
 @pytest.mark.unit
 class TestBillableLeafOfSet:
     def test_leaf_set(self):
-        codes = [c for c, _ in icd9.parse_dtab(DTAB_SAMPLE)]
-        billable = icd9.find_billable_codes(codes)
+        codes = [c for c, _ in icd9cm.parse_dtab(DTAB_SAMPLE)]
+        billable = icd9cm.find_billable_codes(codes)
         # leaves are billable
         assert {"001.0", "001.9", "250.00", "V30.00", "E810", "E812.0"} <= billable
         # parents/headers are not
@@ -163,14 +163,15 @@ class TestBillableLeafOfSet:
 
     def test_three_digit_with_no_subdivision_is_billable(self):
         # 460 has no children in this set -> it is a leaf -> billable
-        assert icd9.find_billable_codes(["460", "250", "250.0"]) == {"460", "250.0"}
+        assert icd9cm.find_billable_codes(["460", "250", "250.0"]) == {"460", "250.0"}
 
 
 @pytest.mark.unit
 class TestAssembleRecords:
     def test_records_and_billable_flag(self):
         recs = {
-            r.icd9_code: r for r in icd9.assemble_records(icd9.parse_dtab(DTAB_SAMPLE), EDITION)
+            r.icd9cm_code: r
+            for r in icd9cm.assemble_records(icd9cm.parse_dtab(DTAB_SAMPLE), EDITION)
         }
         assert recs["250.00"].is_billable is True
         assert recs["250"].is_billable is False
@@ -179,7 +180,7 @@ class TestAssembleRecords:
         assert all(r.edition_year == EDITION for r in recs.values())
 
     def test_dedup_first_wins(self):
-        recs = icd9.assemble_records([("250", "First"), ("250", "Second")], EDITION)
+        recs = icd9cm.assemble_records([("250", "First"), ("250", "Second")], EDITION)
         assert len(recs) == 1 and recs[0].description == "First"
 
 
@@ -220,18 +221,18 @@ class TestCodePrefixesAndAncestors:
         ],
     )
     def test_code_prefixes(self, code, expected):
-        assert icd9.code_prefixes(code) == expected
+        assert icd9cm.code_prefixes(code) == expected
 
     def test_category_of(self):
-        assert icd9.category_of("250.00") == "250"
-        assert icd9.category_of("V30.0") == "V30"
-        assert icd9.category_of("E812.0") == "E812"
+        assert icd9cm.category_of("250.00") == "250"
+        assert icd9cm.category_of("V30.0") == "V30"
+        assert icd9cm.category_of("E812.0") == "E812"
 
     def test_ancestors_only_existing(self):
         code_set = {"250", "250.0", "250.00"}
-        assert icd9.ancestors_for("250.00", code_set) == ["250", "250.0"]
+        assert icd9cm.ancestors_for("250.00", code_set) == ["250", "250.0"]
         # if an intermediate is missing, it's skipped
-        assert icd9.ancestors_for("250.00", {"250", "250.00"}) == ["250"]
+        assert icd9cm.ancestors_for("250.00", {"250", "250.00"}) == ["250"]
 
 
 @pytest.mark.unit
@@ -248,19 +249,19 @@ class TestChapterMap:
         ],
     )
     def test_chapter_for(self, code, chapter_code):
-        result = icd9.chapter_for(code)
+        result = icd9cm.chapter_for(code)
         assert result is not None and result[0] == chapter_code
 
     def test_chapter_names_present(self):
-        assert "Endocrine" in icd9.chapter_for("250")[1]
-        assert icd9.chapter_for("V30")[1].startswith("Supplementary")
-        assert icd9.chapter_for("E812")[1].startswith("Supplementary")
+        assert "Endocrine" in icd9cm.chapter_for("250")[1]
+        assert icd9cm.chapter_for("V30")[1].startswith("Supplementary")
+        assert icd9cm.chapter_for("E812")[1].startswith("Supplementary")
 
 
 @pytest.mark.unit
 class TestAppendixE:
     def test_category_to_block(self):
-        m = icd9.parse_appendix_e(APPENDIX_E_SAMPLE)
+        m = icd9cm.parse_appendix_e(APPENDIX_E_SAMPLE)
         assert m["250"] == ("249-259", "Diseases of other endocrine glands")
         assert m["001"] == ("001-009", "Intestinal infectious diseases")
         assert "002" in m  # all categories under a block are mapped
@@ -271,13 +272,13 @@ class TestAppendixE:
 @pytest.mark.unit
 class TestBuildHierarchy:
     def _nodes(self):
-        records = icd9.assemble_records(icd9.parse_dtab(DTAB_SAMPLE), EDITION)
-        category_map = icd9.parse_appendix_e(APPENDIX_E_SAMPLE)
-        return {n.icd9_code: n for n in icd9.build_hierarchy(records, category_map)}
+        records = icd9cm.assemble_records(icd9cm.parse_dtab(DTAB_SAMPLE), EDITION)
+        category_map = icd9cm.parse_appendix_e(APPENDIX_E_SAMPLE)
+        return {n.icd9cm_code: n for n in icd9cm.build_hierarchy(records, category_map)}
 
     def test_adjacency_and_path(self):
         n = self._nodes()["250.00"]
-        assert n.parent_icd9_code == "250.0"
+        assert n.parent_icd9cm_code == "250.0"
         assert n.ancestor_codes == ("250", "250.0")
         assert n.node_level == 2
         assert n.chapter_code == "3"
@@ -286,7 +287,7 @@ class TestBuildHierarchy:
 
     def test_category_root_has_null_parent(self):
         nodes = self._nodes()
-        assert nodes["250"].parent_icd9_code is None
+        assert nodes["250"].parent_icd9cm_code is None
         assert nodes["250"].node_level == 0
         assert nodes["250.0"].ancestor_codes == ("250",)
 
@@ -298,14 +299,14 @@ class TestBuildHierarchy:
     def test_subtree_semantics_match_icd10(self):
         # WHERE array_contains(ancestor_codes, '250') selects the 250 subtree
         nodes = self._nodes().values()
-        subtree = {n.icd9_code for n in nodes if "250" in n.ancestor_codes}
+        subtree = {n.icd9cm_code for n in nodes if "250" in n.ancestor_codes}
         assert subtree == {"250.0", "250.00"}  # descendants, not 250 itself
 
     def test_empty_category_map_leaves_block_null_chapter_static(self):
-        records = icd9.assemble_records(icd9.parse_dtab(DTAB_SAMPLE), EDITION)
-        nodes = {n.icd9_code: n for n in icd9.build_hierarchy(records, {})}
+        records = icd9cm.assemble_records(icd9cm.parse_dtab(DTAB_SAMPLE), EDITION)
+        nodes = {n.icd9cm_code: n for n in icd9cm.build_hierarchy(records, {})}
         # adjacency still computed; chapter from the static map; only block null
-        assert nodes["250.00"].parent_icd9_code == "250.0"
+        assert nodes["250.00"].parent_icd9cm_code == "250.0"
         assert nodes["250.00"].chapter_code == "3"
         assert all(n.block_code is None for n in nodes.values())
 
@@ -313,24 +314,24 @@ class TestBuildHierarchy:
 @pytest.mark.unit
 class TestHierarchyDQ:
     def _nodes(self):
-        records = icd9.assemble_records(icd9.parse_dtab(DTAB_SAMPLE), EDITION)
-        category_map = icd9.parse_appendix_e(APPENDIX_E_SAMPLE)
-        return icd9.build_hierarchy(records, category_map)
+        records = icd9cm.assemble_records(icd9cm.parse_dtab(DTAB_SAMPLE), EDITION)
+        category_map = icd9cm.parse_appendix_e(APPENDIX_E_SAMPLE)
+        return icd9cm.build_hierarchy(records, category_map)
 
     def test_dangling_parents_empty_by_construction(self):
-        assert icd9.find_dangling_parents(self._nodes()) == []
+        assert icd9cm.find_dangling_parents(self._nodes()) == []
 
     def test_orphans_empty(self):
-        assert icd9.find_orphan_codes(self._nodes()) == []
+        assert icd9cm.find_orphan_codes(self._nodes()) == []
 
     def test_all_categories_get_a_chapter(self):
         # chapters come from the static frozen map, so every code resolves a chapter
         # (incl. V/E) -- find_unmapped_categories surfaces only true anomalies
-        assert icd9.find_unmapped_categories(self._nodes()) == []
+        assert icd9cm.find_unmapped_categories(self._nodes()) == []
 
     def test_unmapped_blocks_flag_ve(self):
         # blocks come from Appendix E; the sample maps 001 and 250 but omits the V/E
         # categories -> those have a null block and are flagged (WARN, not blocking)
-        unmapped = icd9.find_unmapped_blocks(self._nodes())
+        unmapped = icd9cm.find_unmapped_blocks(self._nodes())
         assert unmapped == ["E810", "E812", "V30"]
         assert "001" not in unmapped and "250" not in unmapped  # both in Appendix E

@@ -4,7 +4,7 @@ CVX is the CDC IIS "Vaccine Administered" code set -- the canonical vaccine code
 that vaccine surveillance / clinical feeds conform to. This entrypoint is the thin
 IO + Spark layer over the pure logic in ``cidmath_datahub.reference.cvx`` (ADR
 0011). It is **flat** -- one row per CVX code, no classification hierarchy (unlike
-``codes.icd10`` / ``codes.icd9``).
+``codes.icd10cm`` / ``codes.icd9cm``).
 
 History model (ADR 0032). CVX is revised in place and CDC publishes only the
 *current* list, so we preserve history ourselves with two paired mechanisms:

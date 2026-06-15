@@ -5,12 +5,12 @@ ICD-10-CM (Clinical Modification) diagnosis code set used for U.S. public-health
 and clinical coding. One row per code or header, carrying a billable flag and a
 short + long description. This module is the single source of truth for
 ICD-10-CM parsing, normalization, and format validation (the entrypoint
-``bundles/_reference/src/build_icd10.py`` is thin glue over it; ADR 0011/0027).
+``bundles/_reference/src/build_icd10cm.py`` is thin glue over it; ADR 0011/0027).
 
 It holds **no Spark** -- pure functions over plain Python data structures, unit
 tested against real sample rows -- so the bundle entrypoint converts the output
 to a Spark DataFrame and writes ``ecdh_model_<env>.codes.icd10cm`` keyed by
-``(icd10_code, edition_year)`` (ADR 0006, ADR 0015: reference table, no Kimball
+``(icd10cm_code, edition_year)`` (ADR 0006, ADR 0015: reference table, no Kimball
 suffix).
 
 Variant: this is **ICD-10-CM** (CDC/NCHS clinical-modification diagnosis codes),
@@ -35,13 +35,13 @@ Columns           Content
 ================  ====================================================
 
 Codes are stored **without** a decimal in the source; the canonical
-``icd10_code`` is the dotted form (decimal after the 3rd character when the code
+``icd10cm_code`` is the dotted form (decimal after the 3rd character when the code
 is longer than 3), e.g. source ``U071`` -> ``U07.1``, ``J189`` -> ``J18.9``,
 ``A00`` -> ``A00``.
 
 This module also derives the ICD-10-CM **classification hierarchy** (ADR 0030)
 from the **tabular XML** (:func:`parse_tabular_tree`): adjacency
-(``parent_icd10_code``), a materialized path (``ancestor_codes``), depth
+(``parent_icd10cm_code``), a materialized path (``ancestor_codes``), depth
 (``node_level``), and chapter/block labels all come from the XML's
 ``chapter -> section -> diag`` nesting. Seventh-character codes (e.g. ``S72.001A``)
 are not XML nodes, so they fall back to their nearest listed ancestor by prefix
@@ -78,7 +78,7 @@ ORDER_FILE_ZIP_URL_TEMPLATE = (
 #: **Mid-year Apr-1 update** (``.../ICD10CM/{year}-update/``), published since
 #: FY2025. Same "Code Descriptions in Tabular Order" order-file format as the
 #: base, carrying the additions/revisions effective Apr 1-Sep 30. The entrypoint
-#: overlays it onto the base (update wins per ``icd10_code``; :func:`overlay_records`)
+#: overlays it onto the base (update wins per ``icd10cm_code``; :func:`overlay_records`)
 #: so an edition reflects the latest within-fiscal-year release. Not every year
 #: has one (pre-FY2025 editions 404 here -- an expected skip).
 UPDATE_FILE_ZIP_URL_TEMPLATE = (
@@ -236,7 +236,7 @@ class Icd10Record:
     (``source_file``/``ingested_at``), which the bundle entrypoint stamps.
 
     Attributes:
-        icd10_code: Canonical dotted code (PK component), e.g. ``"U07.1"``.
+        icd10cm_code: Canonical dotted code (PK component), e.g. ``"U07.1"``.
         edition_year: ICD-10-CM fiscal-year edition (effective Oct 1), e.g. 2025.
         description: Long description for the code.
         is_billable: True for a valid leaf code (order-file flag ``1``); False
@@ -245,7 +245,7 @@ class Icd10Record:
             even though the v1 table only persists ``description``.
     """
 
-    icd10_code: str
+    icd10cm_code: str
     edition_year: int
     description: str
     is_billable: bool
@@ -318,7 +318,7 @@ def parse_order_line(line: str, edition_year: int) -> Icd10Record | None:
 
     Returns:
         The parsed record, or ``None`` for a blank/too-short line (so the line
-        can be skipped). The returned ``icd10_code`` is normalized but **not**
+        can be skipped). The returned ``icd10cm_code`` is normalized but **not**
         validated here -- run format validation over the batch so violations are
         recorded as DQ rather than silently dropped (ADR 0009).
 
@@ -340,7 +340,7 @@ def parse_order_line(line: str, edition_year: int) -> Icd10Record | None:
     description = long_desc or short_desc
 
     return Icd10Record(
-        icd10_code=code,
+        icd10cm_code=code,
         edition_year=edition_year,
         description=description,
         is_billable=(flag == "1"),
@@ -373,14 +373,14 @@ def parse_order_file(text: str, edition_year: int) -> list[Icd10Record]:
 def overlay_records(base: list[Icd10Record], update: list[Icd10Record]) -> list[Icd10Record]:
     """Merge the mid-year (Apr-1) update onto the base (Oct-1) release.
 
-    The update wins per ``icd10_code``: an update record replaces a matching base
+    The update wins per ``icd10cm_code``: an update record replaces a matching base
     record (e.g. a revised description) or is appended if it is a new code. Base
     codes absent from the update are retained. This is correct whether the update
     file is a full re-issue or a delta of changed entries, and whether or not it
     introduces new codes -- mid-year updates add/revise but do not delete codes.
 
     Both inputs should belong to a single ``edition_year`` (the caller overlays
-    one edition at a time); the merge keys on ``icd10_code`` alone.
+    one edition at a time); the merge keys on ``icd10cm_code`` alone.
 
     Args:
         base: Records parsed from the Oct-1 base order file.
@@ -390,9 +390,9 @@ def overlay_records(base: list[Icd10Record], update: list[Icd10Record]) -> list[
         Merged records: base order preserved, updated codes replaced in place,
         new update-only codes appended. (The caller sorts on write.)
     """
-    merged: dict[str, Icd10Record] = {r.icd10_code: r for r in base}
+    merged: dict[str, Icd10Record] = {r.icd10cm_code: r for r in base}
     for r in update:
-        merged[r.icd10_code] = r
+        merged[r.icd10cm_code] = r
     return list(merged.values())
 
 
@@ -423,18 +423,18 @@ class CategoryGroup:
 class Icd10Node:
     """An ICD-10-CM code enriched with its place in the classification tree.
 
-    Extends the flat :class:`Icd10Record` with adjacency (``parent_icd10_code``),
+    Extends the flat :class:`Icd10Record` with adjacency (``parent_icd10cm_code``),
     a materialized path (``ancestor_codes``, root->parent), depth (``node_level``),
     and the denormalized chapter/block labels. ``ancestor_codes`` is a tuple so
     the node stays hashable/immutable; the entrypoint passes it straight to a
     Spark ``ARRAY<STRING>`` column.
     """
 
-    icd10_code: str
+    icd10cm_code: str
     edition_year: int
     description: str
     is_billable: bool
-    parent_icd10_code: str | None
+    parent_icd10cm_code: str | None
     node_level: int
     ancestor_codes: tuple[str, ...]
     chapter_code: str | None
@@ -633,18 +633,18 @@ def build_hierarchy(
         One :class:`Icd10Node` per input record, in input order.
     """
     parents = parent_of or {}
-    code_set = {r.icd10_code for r in records}
+    code_set = {r.icd10cm_code for r in records}
     nodes: list[Icd10Node] = []
     for r in records:
-        ancestors = tuple(resolve_ancestors(r.icd10_code, parents, code_set))
-        grp = category_map.get(category_of(r.icd10_code))
+        ancestors = tuple(resolve_ancestors(r.icd10cm_code, parents, code_set))
+        grp = category_map.get(category_of(r.icd10cm_code))
         nodes.append(
             Icd10Node(
-                icd10_code=r.icd10_code,
+                icd10cm_code=r.icd10cm_code,
                 edition_year=r.edition_year,
                 description=r.description,
                 is_billable=r.is_billable,
-                parent_icd10_code=ancestors[-1] if ancestors else None,
+                parent_icd10cm_code=ancestors[-1] if ancestors else None,
                 node_level=len(ancestors),
                 ancestor_codes=ancestors,
                 chapter_code=grp.chapter_code if grp else None,
@@ -671,13 +671,13 @@ def find_format_violations(records: list[Icd10Record]) -> list[str]:
         records: Parsed records.
 
     Returns:
-        The offending ``icd10_code`` values (empty if all are well-formed).
+        The offending ``icd10cm_code`` values (empty if all are well-formed).
     """
-    return [r.icd10_code for r in records if not validate_code(r.icd10_code)]
+    return [r.icd10cm_code for r in records if not validate_code(r.icd10cm_code)]
 
 
 def find_missing_descriptions(records: list[Icd10Record]) -> list[tuple[str, int]]:
-    """Return the ``(icd10_code, edition_year)`` keys whose description is empty.
+    """Return the ``(icd10cm_code, edition_year)`` keys whose description is empty.
 
     Backs the blocking non-null ``description`` DQ check. ``parse_order_line``
     already falls back to the short description, so a hit here means a row had
@@ -690,14 +690,14 @@ def find_missing_descriptions(records: list[Icd10Record]) -> list[tuple[str, int
         The keys with a blank/whitespace-only description, in first-seen order.
     """
     return [
-        (r.icd10_code, r.edition_year)
+        (r.icd10cm_code, r.edition_year)
         for r in records
         if not (r.description and r.description.strip())
     ]
 
 
 def find_duplicate_keys(records: list[Icd10Record]) -> list[tuple[str, int]]:
-    """Return ``(icd10_code, edition_year)`` keys that appear more than once.
+    """Return ``(icd10cm_code, edition_year)`` keys that appear more than once.
 
     Backs the blocking primary-key uniqueness DQ check.
 
@@ -709,7 +709,7 @@ def find_duplicate_keys(records: list[Icd10Record]) -> list[tuple[str, int]]:
     """
     seen: dict[tuple[str, int], int] = {}
     for r in records:
-        key = (r.icd10_code, r.edition_year)
+        key = (r.icd10cm_code, r.edition_year)
         seen[key] = seen.get(key, 0) + 1
     return [key for key, count in seen.items() if count > 1]
 
@@ -721,7 +721,7 @@ def find_unmapped_categories(nodes: list[Icd10Node]) -> list[str]:
     mid-year category, or the XML having been skipped) yields null chapter/block
     rather than a failed build.
     """
-    return sorted({category_of(n.icd10_code) for n in nodes if n.chapter_code is None})
+    return sorted({category_of(n.icd10cm_code) for n in nodes if n.chapter_code is None})
 
 
 def find_orphan_codes(nodes: list[Icd10Node]) -> list[str]:
@@ -731,7 +731,7 @@ def find_orphan_codes(nodes: list[Icd10Node]) -> list[str]:
     the code set is an orphan -- normally impossible (the order file lists every
     category), so a hit signals a malformed or partial source.
     """
-    return [n.icd10_code for n in nodes if "." in n.icd10_code and not n.ancestor_codes]
+    return [n.icd10cm_code for n in nodes if "." in n.icd10cm_code and not n.ancestor_codes]
 
 
 def find_adjacency_mismatches(
@@ -753,7 +753,7 @@ def find_adjacency_mismatches(
     Returns:
         The offending codes, sorted (empty when XML and prefix agree).
     """
-    code_set = {r.icd10_code for r in records}
+    code_set = {r.icd10cm_code for r in records}
     mismatches: list[str] = []
     for code, xml_parent in parent_of.items():
         if code not in code_set:
