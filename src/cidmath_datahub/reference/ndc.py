@@ -338,8 +338,54 @@ def find_duplicate_product_keys(products: list[NdcProduct]) -> list[str]:
 
 
 def find_duplicate_package_keys(packages: list[NdcPackage]) -> list[tuple[str, str]]:
-    """Duplicate ``(product_id, ndc_package_code)`` within a snapshot (blocking PK)."""
+    """Duplicate ``(product_id, ndc_package_code)`` within a snapshot (post-dedup PK)."""
     return _duplicates((p.product_id, p.ndc_package_code) for p in packages)
+
+
+def dedupe_products(products: list[NdcProduct]) -> tuple[list[NdcProduct], int]:
+    """Collapse rows with a duplicate ``product_id`` (keep first); return ``(rows, dropped)``.
+
+    The table is keyed by ``product_id``; FDA's product file can occasionally repeat
+    one, so exact key-duplicates are collapsed and the count is recorded as a WARN by
+    the entrypoint rather than failing the build.
+    """
+    seen: set[str] = set()
+    out: list[NdcProduct] = []
+    for r in products:
+        if r.product_id in seen:
+            continue
+        seen.add(r.product_id)
+        out.append(r)
+    return out, len(products) - len(out)
+
+
+def dedupe_packages(packages: list[NdcPackage]) -> tuple[list[NdcPackage], int]:
+    """Collapse duplicate ``(product_id, ndc_package_code)`` rows, keeping the most
+    recent listing; return ``(rows, dropped)``.
+
+    The FDA package file occasionally lists the same package code twice under one SPL
+    with a different ``STARTMARKETINGDATE`` -- a *re-listing* of the same code (e.g. a
+    package first marketed in 2018 and re-listed in 2025), identical in every other
+    column. The table keys on ``(product_id, ndc_package_code)`` per snapshot, so we
+    keep the row with the latest ``start_marketing_date`` (the current listing) and
+    record the collapse as a WARN; earlier listings remain recoverable from the raw
+    Volume snapshot. A missing start date sorts earliest, so a real date always wins.
+    Output preserves first-seen key order.
+    """
+    best: dict[tuple[str, str], NdcPackage] = {}
+    order: list[tuple[str, str]] = []
+    dropped = 0
+    for r in packages:
+        key = (r.product_id, r.ndc_package_code)
+        current = best.get(key)
+        if current is None:
+            best[key] = r
+            order.append(key)
+            continue
+        dropped += 1
+        if (r.start_marketing_date or date.min) > (current.start_marketing_date or date.min):
+            best[key] = r
+    return [best[k] for k in order], dropped
 
 
 def find_missing_product_fields(products: list[NdcProduct]) -> list[tuple[str, str]]:
