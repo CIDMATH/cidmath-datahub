@@ -1,4 +1,4 @@
-"""Build the canonical ``codes.icd9`` reference table (ADR 0014/0031).
+"""Build the canonical ``codes.icd9cm`` reference table (ADR 0014/0031).
 
 ICD-9-CM diagnosis codes (NCHS Tabular List of Diseases, Volume 1, incl. the V
 and E supplementary classifications) for U.S. coding before the 2015-10-01
@@ -10,9 +10,9 @@ edition it:
      converts the RTF members to text, and parses them;
   2. assembles records (``is_billable`` = leaf-of-set) and builds the hierarchy
      (prefix-rule adjacency + Appendix-E chapter/block; ADR 0031) -- the same
-     column shape and semantics as ``codes.icd10``.
+     column shape and semantics as ``codes.icd10cm``.
 
-It then runs DQ and writes ``ecdh_model_<env>.codes.icd9`` keyed by
+It then runs DQ and writes ``ecdh_model_<env>.codes.icd9cm`` keyed by
 ``(icd9_code, edition_year)`` (ADR 0006; ADR 0015: reference table, no Kimball
 suffix). ICD-9-CM is frozen, so editions are pure annual base releases (no
 mid-year overlay). ``--hierarchy`` (``build`` / ``skip``) controls the Appendix-E
@@ -51,7 +51,7 @@ from cidmath_datahub.reference import icd9
 log = get_logger(__name__)
 
 SCHEMA = "codes"
-TABLE = "icd9"
+TABLE = "icd9cm"
 PIPELINE_REF = "bundles/_reference/src/build_icd9.py"
 
 # ICD-9-CM diagnosis codes incl. V/E are ~13k-17k per edition. WARN outside a
@@ -59,7 +59,7 @@ PIPELINE_REF = "bundles/_reference/src/build_icd9.py"
 _CARDINALITY_MIN = 10_000
 _CARDINALITY_MAX = 22_000
 
-#: Mirrors codes.icd10's shape (ADR 0031 contract): flat columns + hierarchy.
+#: Mirrors codes.icd10cm's shape (ADR 0031 contract): flat columns + hierarchy.
 ICD9_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("icd9_code", T.StringType(), False),
@@ -272,7 +272,7 @@ def _write_table(
         df.write.option("mergeSchema", "true").mode("append").saveAsTable(full)
     else:
         df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full)
-    log.info("Wrote codes.icd9", extra={"rows": len(rows), "editions": edition_years})
+    log.info("Wrote codes.icd9cm", extra={"rows": len(rows), "editions": edition_years})
 
 
 def _comment_table(spark: SparkSession, catalog: str) -> None:
@@ -280,7 +280,7 @@ def _comment_table(spark: SparkSession, catalog: str) -> None:
         f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TABLE} IS "
         f"'ICD-9-CM diagnosis code system (NCHS, frozen through 2015-09-30) with classification "
         f"hierarchy (parent_icd9_code, ancestor_codes, chapter/block). One row per code per "
-        f"annual edition; PK (icd9_code, edition_year). Mirrors codes.icd10 (ADR 0030/0031). "
+        f"annual edition; PK (icd9_code, edition_year). Mirrors codes.icd10cm (ADR 0030/0031). "
         f"Reference table; full_refresh per edition.'"
     )
 
@@ -307,7 +307,7 @@ def _register(spark: SparkSession, catalog: str, edition_years: list[int]) -> No
             ),
             public_health_relevance=(
                 "Canonical diagnosis-code standard for U.S. surveillance/clinical data coded "
-                "before the 2015-10-01 ICD-10 transition; mirrors codes.icd10's hierarchy so "
+                "before the 2015-10-01 ICD-10 transition; mirrors codes.icd10cm's hierarchy so "
                 "pre/post-2015 data can be rolled up the same way (the GEM crosswalk bridges "
                 "the two code sets in a separate table)."
             ),

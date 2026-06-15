@@ -1,4 +1,4 @@
-"""Build the canonical ``codes.icd10`` reference table (ADR 0014; first table in
+"""Build the canonical ``codes.icd10cm`` reference table (ADR 0014; first table in
 the ``codes`` schema).
 
 ICD-10-CM is the U.S. Clinical Modification of ICD-10 diagnosis codes
@@ -17,7 +17,7 @@ fiscal-year edition it:
      labels (ADR 0030). Seventh-character codes fall back to their nearest listed
      ancestor by prefix.
 
-It then runs DQ and writes ``ecdh_model_<env>.codes.icd10`` keyed by
+It then runs DQ and writes ``ecdh_model_<env>.codes.icd10cm`` keyed by
 ``(icd10_code, edition_year)`` (ADR 0006; ADR 0015: reference table, no Kimball
 suffix). ``--midyear-update`` controls the overlay (``auto`` / ``require`` /
 ``skip``); ``--hierarchy`` (``build`` / ``skip``) controls the tabular-XML
@@ -69,7 +69,7 @@ from cidmath_datahub.reference import icd10
 log = get_logger(__name__)
 
 SCHEMA = "codes"
-TABLE = "icd10"
+TABLE = "icd10cm"
 PIPELINE_REF = "bundles/_reference/src/build_icd10.py"
 
 # ICD-10-CM has ~70k+ codes per edition (FY2026 ~74k). WARN if a parsed edition
@@ -335,7 +335,7 @@ def _write_table(
     else:
         # First build: establish the table and its schema.
         df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full)
-    log.info("Wrote codes.icd10", extra={"rows": len(rows), "editions": edition_years})
+    log.info("Wrote codes.icd10cm", extra={"rows": len(rows), "editions": edition_years})
 
 
 def _comment_table(spark: SparkSession, catalog: str) -> None:

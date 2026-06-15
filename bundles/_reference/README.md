@@ -12,7 +12,7 @@ Currently implemented:
 |---|---|---|---|
 | `time.calendar_date` | computational | `full_refresh` | deterministic generation |
 | `time.epi_week` | computational | `full_refresh` | deterministic generation (MMWR rules) |
-| `codes.icd10` | authoritative slow-changing | `full_refresh` (per edition) | CDC/NCHS ICD-10-CM order file |
+| `codes.icd10cm` | authoritative slow-changing | `full_refresh` (per edition) | CDC/NCHS ICD-10-CM order file |
 
 Planned (not yet built):
 
@@ -62,7 +62,7 @@ Views (not denormalized base columns) — the canonical entity tables stay norma
 
 ## ICD-10-CM code system (ADR 0014/0015/0030)
 
-`build_icd10.py` (job `build_icd10_reference`) builds `codes.icd10` — the canonical ICD-10-CM diagnosis code system from the CDC/NCHS order file plus the classification hierarchy from the tabular XML. One row per code per fiscal-year edition; PK `(icd10_code, edition_year)`. `is_billable` distinguishes valid leaf codes from category headers. Second adopter of the `run_build` seam (ADR 0027).
+`build_icd10.py` (job `build_icd10_reference`) builds `codes.icd10cm` — the canonical ICD-10-CM diagnosis code system from the CDC/NCHS order file plus the classification hierarchy from the tabular XML. One row per code per fiscal-year edition; PK `(icd10_code, edition_year)`. `is_billable` distinguishes valid leaf codes from category headers. Second adopter of the `run_build` seam (ADR 0027).
 
 | Column | Notes |
 |---|---|

@@ -99,7 +99,7 @@ First application — `codes.cvx` (pins the standing specifics):
 - **New standing convention:** a UC Volume per such source for raw snapshots, with
   date-stamp immutability (never overwrite a date). Volume location/naming and retention
   are pinned by the first implementation (`codes.cvx`) and generalized here.
-- **`snapshot_replace` gets real use.** Note `codes.icd10` and the geography builds
+- **`snapshot_replace` gets real use.** Note `codes.icd10cm` and the geography builds
   register `update_semantics="full_refresh"` despite doing per-edition/per-vintage
   replace; CVX uses the precise `snapshot_replace`. This ADR doesn't retrofit those, but
   flags the inconsistency for a future cleanup.

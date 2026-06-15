@@ -1,11 +1,11 @@
-# Job that builds the canonical codes.icd10 reference table (ADR 0014; first
+# Job that builds the canonical codes.icd10cm reference table (ADR 0014; first
 # table in the codes schema).
 #
 # Downloads the CDC NCHS ICD-10-CM order file for the requested fiscal-year
 # edition(s), overlays the Apr-1 mid-year update where published (--midyear-update
 # auto), and builds the classification hierarchy (parent/ancestors/level + chapter
 # /block from the tabular XML; --hierarchy build; ADR 0030). Parses/validates via
-# cidmath_datahub.reference.icd10 and writes ecdh_model_<env>.codes.icd10 keyed by
+# cidmath_datahub.reference.icd10 and writes ecdh_model_<env>.codes.icd10cm keyed by
 # (icd10_code, edition_year).
 # Thin entrypoint over the run_build seam (ADR 0027); editions are re-pullable,
 # so the table is vintage-reproducible (full_refresh per edition; ADR 0007/0024).
@@ -21,7 +21,7 @@ resources:
     build_icd10_reference:
       name: "[_reference] build_icd10_reference"
       description: |
-        Builds codes.icd10 (ICD-10-CM diagnosis code system, CDC/NCHS) in the
+        Builds codes.icd10cm (ICD-10-CM diagnosis code system, CDC/NCHS) in the
         integrated catalog. One row per code per fiscal-year edition; PK
         (icd10_code, edition_year). Blocking DQ: uniqueness, non-null
         description, code-format. Reference table; full_refresh per edition.

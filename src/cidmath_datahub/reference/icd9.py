@@ -12,7 +12,7 @@ tree-sourcing genuinely differ from ICD-10-CM, so ``reference/icd10.py`` is left
 untouched and the two share only the documented *hierarchy contract* (ADR 0031),
 not code. It holds **no Spark** -- pure functions over plain Python -- so the
 bundle entrypoint converts the result to a Spark DataFrame and writes
-``ecdh_model_<env>.codes.icd9`` keyed by ``(icd9_code, edition_year)`` (ADR 0006,
+``ecdh_model_<env>.codes.icd9cm`` keyed by ``(icd9_code, edition_year)`` (ADR 0006,
 ADR 0015: reference table, no Kimball suffix).
 
 ICD-9-CM is **frozen**: the final update was FY2014 and it is valid for US coding
@@ -50,7 +50,7 @@ from dataclasses import dataclass
 
 #: NCHS distributes one FTP directory per annual release. The directory is the
 #: *calendar* year of the Oct-1 effective date; the fiscal year (our
-#: ``edition_year``, for parity with ``codes.icd10``) is ``dir_year + 1``, and
+#: ``edition_year``, for parity with ``codes.icd10cm``) is ``dir_year + 1``, and
 #: the 2-digit filename suffix is ``fiscal_year % 100``. So FY2012 -> dir 2011 ->
 #: suffix "12" -> ``DTAB12.ZIP`` / ``DC_3D12.RTF`` / ``Readme12.txt``.
 SOURCE_FTP_BASE = "https://ftp.cdc.gov/pub/Health_Statistics/NCHS/Publications/ICD9-CM"
@@ -189,7 +189,7 @@ def code_class(code: str) -> str:
 class Icd9Record:
     """One ICD-9-CM code for a given edition (pre-hierarchy).
 
-    Mirrors the flat part of the ``codes.icd9`` shape minus audit columns; the
+    Mirrors the flat part of the ``codes.icd9cm`` shape minus audit columns; the
     hierarchy columns are added by the hierarchy slice (ADR 0031).
     """
 
@@ -296,7 +296,7 @@ def assemble_records(pairs: Iterable[tuple[str, str]], edition_year: int) -> lis
 
 # ---------------------------------------------------------------------------
 # Hierarchy (ADR 0031): prefix-rule adjacency + Appendix-E chapter/block. Mirrors
-# codes.icd10's contract (parent / ancestor_codes / node_level + chapter/block) so
+# codes.icd10cm's contract (parent / ancestor_codes / node_level + chapter/block) so
 # the two tables share subtree / chapter-rollup semantics. All pure / no Spark.
 # ---------------------------------------------------------------------------
 

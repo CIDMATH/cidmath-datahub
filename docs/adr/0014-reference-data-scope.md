@@ -73,7 +73,7 @@ ecdh_model_<env>.geography.urban_rural_nchs
 Future schemas as needs emerge:
 - `ecdh_model_<env>.codes.loinc`
 - `ecdh_model_<env>.codes.snomed`
-- `ecdh_model_<env>.codes.icd10`
+- `ecdh_model_<env>.codes.icd10cm`
 - `ecdh_model_<env>.codes.cvx`
 - `ecdh_model_<env>.pathogen.taxonomy`
 - `ecdh_model_<env>.pathogen.icd10_mapping`

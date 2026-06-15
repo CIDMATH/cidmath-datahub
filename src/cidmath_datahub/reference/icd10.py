@@ -9,7 +9,7 @@ ICD-10-CM parsing, normalization, and format validation (the entrypoint
 
 It holds **no Spark** -- pure functions over plain Python data structures, unit
 tested against real sample rows -- so the bundle entrypoint converts the output
-to a Spark DataFrame and writes ``ecdh_model_<env>.codes.icd10`` keyed by
+to a Spark DataFrame and writes ``ecdh_model_<env>.codes.icd10cm`` keyed by
 ``(icd10_code, edition_year)`` (ADR 0006, ADR 0015: reference table, no Kimball
 suffix).
 
@@ -232,7 +232,7 @@ _COL_LONG_DESC = slice(77, None)
 class Icd10Record:
     """One ICD-10-CM code for a given annual edition.
 
-    Mirrors the v1 ``codes.icd10`` table shape minus the audit columns
+    Mirrors the v1 ``codes.icd10cm`` table shape minus the audit columns
     (``source_file``/``ingested_at``), which the bundle entrypoint stamps.
 
     Attributes:

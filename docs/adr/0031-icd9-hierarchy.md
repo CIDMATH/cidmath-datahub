@@ -4,14 +4,14 @@
 Accepted — 2026-06-08
 
 ## Context
-`codes.icd10` (ADR 0030) preserves the ICD-10-CM classification tree on the node table — adjacency (`parent_icd10_code`), a materialized path (`ancestor_codes`), depth (`node_level`), and denormalized chapter/block — so subtree selection and chapter rollups are one query. We now add `codes.icd9` so surveillance/clinical data coded before the 2015-10-01 ICD-10 transition can be conformed and rolled up the same way. The payoff of having both is cross-2015 analysis; for that to work the two tables must be **query-compatible** — identical `array_contains` subtree and chapter-rollup semantics — even though their sources and code structures are genuinely different.
+`codes.icd10cm` (ADR 0030) preserves the ICD-10-CM classification tree on the node table — adjacency (`parent_icd10_code`), a materialized path (`ancestor_codes`), depth (`node_level`), and denormalized chapter/block — so subtree selection and chapter rollups are one query. We now add `codes.icd9cm` so surveillance/clinical data coded before the 2015-10-01 ICD-10 transition can be conformed and rolled up the same way. The payoff of having both is cross-2015 analysis; for that to work the two tables must be **query-compatible** — identical `array_contains` subtree and chapter-rollup semantics — even though their sources and code structures are genuinely different.
 
 ICD-9-CM is **frozen** (final update FY2014; valid for US coding through 2015-09-30), distributed by NCHS as **Rich Text Format** files (not a fixed-width order file or a tabular XML), with a different code structure: three-to-five-digit numeric categories (`250` → `250.0` → `250.00`), plus the V (`V01`–`V91`) and E (`E000`–`E999`) supplementary classifications. There is no tabular XML, no seventh-character mechanism, and no mid-year update. So neither ADR 0030's XML-primary tree-sourcing nor `icd10.py`'s order-file/overlay machinery applies; the implementation must be its own.
 
 ## Decision
 Two decisions: a shared **contract** (so the tables interoperate) and the ICD-9 **sourcing** (how its tree is built).
 
-**(1) The code-system hierarchy contract — documented, not coded.** Every code-system reference table (`codes.icd10`, now `codes.icd9`, and any future one) carries the same hierarchy columns with the same semantics:
+**(1) The code-system hierarchy contract — documented, not coded.** Every code-system reference table (`codes.icd10cm`, now `codes.icd9cm`, and any future one) carries the same hierarchy columns with the same semantics:
 
 ```
 parent_<sys>_code  STRING          -- nearest existing ancestor in the edition; NULL at a top-level category
@@ -35,7 +35,7 @@ This guarantees `WHERE array_contains(ancestor_codes, '250')` selects a subtree 
 - **XML-primary like ICD-10.** Not applicable: ICD-9-CM has no tabular XML, and its codes nest by pure string prefix, so the prefix rule is correct as primary rather than fallback.
 
 ## Consequences
-- **`codes.icd9` is query-compatible with `codes.icd10`** (same subtree/rollup semantics by construction), enabling cross-2015 analysis once both are loaded; the GEM crosswalk that bridges the code sets is its own table/issue (`codes.icd9_icd10_gem`).
+- **`codes.icd9cm` is query-compatible with `codes.icd10cm`** (same subtree/rollup semantics by construction), enabling cross-2015 analysis once both are loaded; the GEM crosswalk that bridges the code sets is its own table/issue (`codes.icd9_icd10_gem`).
 - **Simpler than ICD-10**: no second source download for the tree, no XML, no XML-vs-prefix cross-check — justified because ICD-9 nests cleanly. The only extra source is Appendix E for labels.
 - **`is_billable` is approximate by design** (leaf-of-set); it matches the ICD-9-CM highest-specificity billing rule, and DQ flags any oddities (e.g., a three-digit code billable despite having subdivisions).
 - **Resolved during implementation:** the V- and E-code chapter question is settled by the static chapter map (amendment above) — V and E are their own supplementary chapters (`V`/`E`), assigned directly rather than depending on whether `DC_3D` enumerates them. Their finer *block* labels still depend on Appendix E coverage and are flagged (WARN, `find_unmapped_blocks`) where absent. Recorded in `known_limitations`.

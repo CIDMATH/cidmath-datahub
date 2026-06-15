@@ -291,7 +291,7 @@ class TestBuildHierarchy:
         assert nodes["250.0"].ancestor_codes == ("250",)
 
     def test_contract_node_level_equals_len_ancestors(self):
-        # the shared code-system contract (ADR 0031), identical to codes.icd10
+        # the shared code-system contract (ADR 0031), identical to codes.icd10cm
         for n in self._nodes().values():
             assert n.node_level == len(n.ancestor_codes)
 

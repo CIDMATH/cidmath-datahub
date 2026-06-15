@@ -1,10 +1,10 @@
-# Job that builds the canonical codes.icd9 reference table (ADR 0014/0031).
+# Job that builds the canonical codes.icd9cm reference table (ADR 0014/0031).
 #
 # Downloads the NCHS ICD-9-CM DTAB (tabular list) and APPNDX (Appendix E) RTF
 # zips for the requested fiscal-year edition(s), converts RTF -> text (striprtf),
 # parses/normalizes/validates and builds the classification hierarchy via
-# cidmath_datahub.reference.icd9, and writes ecdh_model_<env>.codes.icd9 keyed by
-# (icd9_code, edition_year). Mirrors codes.icd10's shape (ADR 0031). Thin
+# cidmath_datahub.reference.icd9, and writes ecdh_model_<env>.codes.icd9cm keyed by
+# (icd9_code, edition_year). Mirrors codes.icd10cm's shape (ADR 0031). Thin
 # entrypoint over the run_build seam (ADR 0027); full_refresh per edition
 # (ADR 0024). ICD-9-CM is frozen, so base annual editions only.
 #
@@ -18,7 +18,7 @@ resources:
     build_icd9_reference:
       name: "[_reference] build_icd9_reference"
       description: |
-        Builds codes.icd9 (ICD-9-CM diagnosis code system, NCHS) in the
+        Builds codes.icd9cm (ICD-9-CM diagnosis code system, NCHS) in the
         integrated catalog. One row per code per fiscal-year edition (incl. V/E);
         PK (icd9_code, edition_year). Blocking DQ: uniqueness, non-null
         description, code-format, parent referential integrity. Frozen source;
