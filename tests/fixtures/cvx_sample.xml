@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="ISO-8859-1"?><CVXCodes>
+<CVXInfo><ShortDescription>Adenovirus types 4 and 7</ShortDescription>
+<FullVaccinename>Adenovirus, type 4 and type 7, live, oral</FullVaccinename>
+<CVXCode>143       </CVXCode>
+<Notes>This vaccine is administered as 2 tablets.</Notes>
+<Status>Active</Status>
+<LastUpdated>3/20/2011</LastUpdated>
+</CVXInfo>
+<CVXInfo><ShortDescription>adenovirus, type 4</ShortDescription>
+<FullVaccinename>adenovirus vaccine, type 4, live, oral</FullVaccinename>
+<CVXCode>54        </CVXCode>
+<Notes></Notes>
+<Status>Inactive</Status>
+<LastUpdated>5/28/2010</LastUpdated>
+</CVXInfo>
+<CVXInfo><ShortDescription>cholera, BivWC</ShortDescription>
+<FullVaccinename>cholera, BivWC</FullVaccinename>
+<CVXCode>173       </CVXCode>
+<Notes></Notes>
+<Status>Non-US</Status>
+<LastUpdated>6/17/2016</LastUpdated>
+</CVXInfo>
+<CVXInfo><ShortDescription>COVID-19, D614, recomb, preS dTM, AS03 adjuvant add, PF, 10mcg/0.5mL</ShortDescription>
+<FullVaccinename>SARS-COV-2 (COVID-19) vaccine, D614, prefusion spike recombinant protein subunit (CoV2 preS dTM), AS03 adjuvant added, preservative free, 10mcg/0.5mL dose</FullVaccinename>
+<CVXCode>226       </CVXCode>
+<Notes>EUA submission withdrawn by Sanofi</Notes>
+<Status>Never Active</Status>
+<LastUpdated>3/9/2023</LastUpdated>
+</CVXInfo>
+<CVXInfo><ShortDescription>no vaccine administered</ShortDescription>
+<FullVaccinename>no vaccine administered</FullVaccinename>
+<CVXCode>998       </CVXCode>
+<Notes>Code 998 was added for use in VXU HL7 messages where the OBX segment is nested with the RXA segment, but the message does not contain information about a vaccine administration.</Notes>
+<Status>Inactive</Status>
+<LastUpdated>3/9/2023</LastUpdated>
+</CVXInfo>
+</CVXCodes>
