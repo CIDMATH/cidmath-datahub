@@ -1,0 +1,5 @@
+LOINC_NUM,COMPONENT,PROPERTY,TIME_ASPCT,SYSTEM,SCALE_TYP,METHOD_TYP,CLASS,CLASSTYPE,LONG_COMMON_NAME,SHORTNAME,EXTERNAL_COPYRIGHT_NOTICE,STATUS,VersionFirstReleased,VersionLastChanged
+2160-0,Creatinine,MCnc,Pt,Ser/Plas,Qn,,CHEM,1,Creatinine [Mass/volume] in Serum or Plasma,Creat SerPl-mCnc,,ACTIVE,1.0,2.73
+44249-1,Patient Health Questionnaire 9 item (PHQ-9) total score,Score,Pt,Patient,Qn,,SURVEY.PHQ,2,PHQ-9 quick depression assessment panel [Reported.PHQ],PHQ-9 pnl,Copyright (c) Pfizer Inc. All rights reserved.,ACTIVE,2.40,2.68
+10000-8,R wave duration.lead AVR,Time,Pt,"Heart, electrode",Qn,EKG,EKG.MEAS,2,"R wave duration in lead AVR, by EKG",R' dur L-AVR,,ACTIVE,1.0i,2.36
+10999-9,Obsolete measurement,Time,Pt,Heart,Qn,,EKG.MEAS,2,Deprecated obsolete EKG measurement,Obs meas,,DEPRECATED,1.0i,2.50

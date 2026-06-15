@@ -122,6 +122,26 @@ databricks secrets list-acls ecdh-dev-ipums
 
 Without this, the geography job fails at the key fetch with `PERMISSION_DENIED: User <sp-uuid> does not have secret-scopes.secrets/get permission on scope ecdh-<env>-ipums`. The same pattern applies to any future job that reads a secret at runtime via `dbutils.secrets.get`: grant the deploy SP `READ` on that scope.
 
+**LOINC Download API credentials** (LOINC reference build, ADR 0014). LOINC is a licensed source; access is the authenticated Download API with HTTP Basic auth. Two keys per scope — `loinc_username` and `loinc_password` — matching the wired bundle variables (`loinc_secret_scope`, `loinc_username_key`, `loinc_password_key`):
+
+```bash
+databricks secrets create-scope ecdh-dev-loinc
+databricks secrets create-scope ecdh-prod-loinc
+
+# Add the LOINC account username + password as two keys in each scope
+databricks secrets put-secret ecdh-dev-loinc loinc_username
+databricks secrets put-secret ecdh-dev-loinc loinc_password
+databricks secrets put-secret ecdh-prod-loinc loinc_username
+databricks secrets put-secret ecdh-prod-loinc loinc_password
+```
+
+The credentials come from your LOINC account (free registration at https://loinc.org/; the Download API is documented at https://loinc.org/kb/api/). **Grant the deploy SPs READ on the LOINC scopes** (same reason as IPUMS — `build_loinc.py` calls `dbutils.secrets.get` as the run identity):
+
+```bash
+databricks secrets put-acl ecdh-dev-loinc  a55b6164-c0eb-42cf-a438-7de33c150f4a READ
+databricks secrets put-acl ecdh-prod-loinc caff7ad3-d82f-4692-98cc-678dc6807cbd READ
+```
+
 ### 6. GitHub repository configuration
 
 In the `CIDMATH/cidmath-datahub` GitHub repository settings:
