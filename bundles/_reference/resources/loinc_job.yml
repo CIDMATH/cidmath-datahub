@@ -1,0 +1,72 @@
+# Job that builds the canonical codes.loinc + codes.loinc_map_to tables (ADR 0014).
+#
+# Authenticates to the LOINC Download API with HTTP Basic credentials read at
+# runtime from the secret scope named by ${var.loinc_secret_scope} (keys
+# loinc_username / loinc_password; same secret-scoped pattern as IPUMS NHGIS,
+# ADR 0012 -- credentials never appear in config). Fetches the requested release,
+# verifies the download MD5 against the API's downloadMD5Hash (blocking), parses
+# LoincTableCore.csv + MapTo.csv, and writes ecdh_model_<env>.codes.loinc and
+# codes.loinc_map_to keyed by loinc_version using snapshot_replace (all versions
+# retained; the ICD-10 per-version / geography per-vintage model -- NOT ADR 0032).
+#
+# Thin entrypoint over the run_build seam (ADR 0027). Licensed source (Regenstrief):
+# both tables register access_tier=restricted / dua_required=true.
+#
+# Deploy-and-run, version-parameterized (--loinc-version) -- no schedule. Re-running
+# the same version is idempotent (snapshot_replace replaces only that version's rows).
+# To load another release, change --loinc-version and re-run.
+#
+# Prerequisite: the LOINC username/password must be provisioned in the secret scope
+# (ecdh-dev-loinc / ecdh-prod-loinc) with the deploy SP granted READ -- see
+# docs/operations.md (Secret scopes).
+#
+# See bundles/_reference/src/build_loinc.py and ADR 0014/0015.
+
+resources:
+  jobs:
+    build_loinc_reference:
+      name: "[_reference] build_loinc_reference"
+      description: |
+        Builds codes.loinc (LOINC core terms) + codes.loinc_map_to (deprecated->
+        replacement) in the integrated catalog. Flat (hierarchy deferred); one row
+        per term/mapping per loinc_version; snapshot_replace. Licensed/restricted.
+        Blocking DQ: download MD5, PK uniqueness, non-null, status vocab, MapTo FK.
+
+      tasks:
+        - task_key: build_loinc
+          spark_python_task:
+            python_file: ../src/build_loinc.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--loinc-version"
+              - "2.82"
+              - "--loinc-secret-scope"
+              - "${var.loinc_secret_scope}"
+              - "--loinc-username-key"
+              - "${var.loinc_username_key}"
+              - "--loinc-password-key"
+              - "${var.loinc_password_key}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: reference_env
+
+      environments:
+        - environment_key: reference_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 3600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

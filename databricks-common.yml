@@ -67,6 +67,17 @@ variables:
   ipums_secret_key:
     description: Key within the IPUMS secret scope for the NHGIS API key.
     default: nhgis_api_key
+  loinc_secret_scope:
+    description: |
+      Databricks secret scope holding the LOINC Download API credentials (HTTP
+      Basic username/password), used by the codes.loinc reference build (ADR 0014;
+      reuses the authenticated-download pattern of ADR 0012). Set per-target.
+  loinc_username_key:
+    description: Key within the LOINC secret scope for the LOINC username.
+    default: loinc_username
+  loinc_password_key:
+    description: Key within the LOINC secret scope for the LOINC password.
+    default: loinc_password
   email_recipient:
     description: Primary email recipient for paging-severity alerts and digest.
     default: connor.vanmeter@emory.edu
@@ -135,6 +146,7 @@ targets:
       teams_webhook_scope: ecdh-dev-teams-webhook
       teams_destination_id: c33c2883-2b42-4621-9578-b864fd33547f
       ipums_secret_scope: ecdh-dev-ipums
+      loinc_secret_scope: ecdh-dev-loinc
     presets:
       tags:
         project: ${var.project_tag}
@@ -162,6 +174,7 @@ targets:
       teams_webhook_scope: ecdh-prod-teams-webhook
       teams_destination_id: 691bab0f-9854-4f89-ab12-3138be3ec998
       ipums_secret_scope: ecdh-prod-ipums
+      loinc_secret_scope: ecdh-prod-loinc
     presets:
       tags:
         project: ${var.project_tag}
