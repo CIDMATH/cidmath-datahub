@@ -81,6 +81,19 @@ def reader_schema_statements(catalog: str, schema: str, principal: str) -> list[
     return schema_grant_statements(catalog, schema, principal, READER_SCHEMA_PRIVILEGES)
 
 
+def volume_read_statements(catalog: str, schema: str, volume: str, principal: str) -> list[str]:
+    """Statements granting read access to a UC Volume's files.
+
+    ``READ VOLUME`` is a volume-scoped privilege distinct from a schema's
+    ``SELECT`` (which covers tables/views only), so a reader who can query a
+    schema's tables still cannot list/open a Volume's files without it. Used for
+    raw source-snapshot Volumes (ADR 0032). Reading the files also needs ``USE
+    SCHEMA`` on the parent schema, which the schema reader/engineer grants cover.
+    """
+    name = f"{catalog}.{schema}.{volume}"
+    return [_grant_stmt("VOLUME", name, "READ VOLUME", principal)]
+
+
 # --- Execution convenience wrappers ---
 
 
@@ -103,6 +116,13 @@ def grant_schema_engineer(spark: SparkSession, catalog: str, schema: str, princi
 def grant_schema_reader(spark: SparkSession, catalog: str, schema: str, principal: str) -> None:
     """Grant reader-tier access on ``catalog.schema`` to ``principal``."""
     apply(spark, reader_schema_statements(catalog, schema, principal))
+
+
+def grant_volume_reader(
+    spark: SparkSession, catalog: str, schema: str, volume: str, principal: str
+) -> None:
+    """Grant READ VOLUME on ``catalog.schema.volume`` to ``principal`` (ADR 0032)."""
+    apply(spark, volume_read_statements(catalog, schema, volume, principal))
 
 
 # --- Verification (read-back of applied grants) ---
