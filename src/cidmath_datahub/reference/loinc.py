@@ -273,9 +273,13 @@ def find_status_violations(terms: list[LoincTerm]) -> list[tuple[str, str]]:
     return [(t.loinc_num, t.status_raw) for t in terms if t.status not in LOINC_STATUS_VALUES]
 
 
-def find_duplicate_map_keys(maps: list[LoincMapTo]) -> list[str]:
-    """Duplicate deprecated ``loinc_num`` within a version (blocking PK)."""
-    return _duplicates(m.loinc_num for m in maps)
+def find_duplicate_map_keys(maps: list[LoincMapTo]) -> list[tuple[str, str]]:
+    """Duplicate ``(loinc_num, map_to_loinc_num)`` within a version (blocking PK).
+
+    A deprecated LOINC can map to several replacements, so the deprecated ``loinc_num``
+    alone is not unique; the (deprecated, replacement) pair is.
+    """
+    return _duplicates((m.loinc_num, m.map_to_loinc_num) for m in maps)
 
 
 def find_missing_map_fields(maps: list[LoincMapTo]) -> list[tuple[str, str]]:
