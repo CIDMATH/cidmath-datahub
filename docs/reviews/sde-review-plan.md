@@ -112,5 +112,5 @@ this.**
 - [ ] **#1 — DECISION: shared reference-table builder**
 - [ ] S1 — layering · [ ] S2 — naming · [ ] S3 — semantics/history (0007+0034) ·
       [ ] S4 — testing · [ ] S5 — bundle/deploy · [ ] S6 — conformance · [ ] S7 — ADR coherence
-- [ ] D1 — data profiling & DQ-as-outcome
+- [x] D1 — data profiling & DQ-as-outcome (done 2026-06-16 — see d1-data-profiling-findings.md; surfaced the conformance-vintage must-fix → ADR 0035 draft)
 - [ ] O1 — operational readiness
