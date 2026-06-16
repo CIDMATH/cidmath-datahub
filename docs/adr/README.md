@@ -100,6 +100,7 @@ both positive and negative consequences honestly.
 | [0032](0032-source-history-preservation.md) | Source-history preservation for revise-in-place sources — raw immutable Volume snapshots + in-table revision tracking via `snapshot_replace` (keyed by `snapshot_date`, geography-style); when to use vs SCD2. First applied to `codes.cvx` | Accepted |
 | [0033](0033-catalog-grant-governance-and-drift-check.md) | Catalog-grant governance + drift check — keep schema-and-below grants in the deploy pipeline but catalog-level grants governance-owned (never the deploy SP); make `grant_catalog_permissions.sql` a drift-checked source of truth (`scripts/verify/audit_catalog_grants.py`). Amends 0012/0018 | Accepted |
 | [0034](0034-vintage-retained-snapshot-semantics.md) | Vintage-retained snapshot semantics — `update_semantics="vintage_snapshot"` (atomic per-vintage `replaceWhere`); vintages immutable (revisions = new vintage key, never in-place overwrite); SCD2 escalation rule with a named trigger; currency vocabulary (`is_current` / `is_latest_vintage` / `live`) and the deferred `in_force_from` applicability axis. Amends 0007 | Proposed |
+| [0035](0035-fact-geography-vintage-conformance.md) | Fact-to-geography vintage conformance — geography-conformed facts carry the geography `vintage` they're coded to; canonical join `(geoid, geo_vintage)`; basis set at conform time, not from obs date; nClimGrid basis determined = 2020. Extends 0023; relates 0020/0028/0034 | Proposed |
 
 ## Future ADRs (backlog)
 
