@@ -70,8 +70,10 @@ _COL_STR = 14
 _COL_SUPPRESS = 16
 _MIN_COLS = 17  # RXNCONSO has 18 fields; require at least through SUPPRESS
 
-#: RxNorm term types (``SAB=RXNORM``). Backs the blocking ``tty`` controlled-vocab check
-#: (ADR 0016). Synonym-style TTYs are included so an atom is never out-of-vocab.
+#: Known RxNorm term types (``SAB=RXNORM``), per the NLM RxNorm "Appendix 5" term-type list.
+#: Backs the ``tty`` *recognition* WARN -- NOT blocking: TTY is descriptive source metadata and
+#: the RxNorm TTY set can grow, so an unrecognized value is surfaced for review, never fatal.
+#: Includes the entry-term (``ET``) and synonym (``SY``/``TMSY``/``PSN``) types.
 RXNORM_TTY_VALUES: frozenset[str] = frozenset(
     {
         "IN",
@@ -96,12 +98,14 @@ RXNORM_TTY_VALUES: frozenset[str] = frozenset(
         "SY",
         "TMSY",
         "PSN",
+        "ET",
     }
 )
 
-#: TTYs that are *names of* a concept rather than the concept's own defining atom; these
-#: are deprioritized when choosing the canonical name/TTY for an RXCUI.
-_SYNONYM_TTYS: frozenset[str] = frozenset({"SY", "TMSY", "PSN"})
+#: TTYs that are alternate *names of* a concept (synonyms / prescribable name / tall-man /
+#: entry term) rather than the concept's own defining atom; these are deprioritized when
+#: choosing the canonical name/TTY for an RXCUI, so a defining atom (IN/SCD/SBD/...) wins.
+_SYNONYM_TTYS: frozenset[str] = frozenset({"SY", "TMSY", "PSN", "ET"})
 
 #: Sanity band for the active SAB=RXNORM concept count (hundreds of thousands).
 CARDINALITY_MIN = 100_000
