@@ -1,0 +1,73 @@
+# Job that builds the canonical codes.rxnorm reference table (ADR 0014).
+#
+# Downloads the NLM RxNorm full RRF monthly release via the UTS download proxy (UMLS
+# API key read at runtime from the shared secret scope named by ${var.umls_secret_scope},
+# key ${var.umls_secret_key} -- the same scope/key the SNOMED build uses; ADR 0012, no
+# creds in config). Parses RXNCONSO.RRF (SAB=RXNORM, SUPPRESS=N), reduces to one row per
+# RxCUI (normalized name + TTY), and writes ecdh_model_<env>.codes.rxnorm keyed by
+# rxnorm_version using snapshot_replace (releases retained; ICD-10 per-version model, NOT
+# ADR 0032). Flat -- relationships / attributes / NDC crosswalk deferred.
+#
+# Thin entrypoint over the run_build seam (ADR 0027). The RxNorm vocabulary (SAB=RXNORM)
+# is non-proprietary -> access_tier=open; only the download is UMLS-gated.
+#
+# Deploy-and-run, version-parameterized (monthly) -- no schedule. Update --rxnorm-version
+# and --release-url for a new release. --release-url is the NLM RxNorm_full_<MMDDYYYY>.zip
+# URL on the license-gated kss/ path; optionally pass --expected-md5 (the release's
+# published checksum) to make the integrity check blocking.
+#
+# Prerequisite: UMLS API key provisioned in ecdh-dev-umls / ecdh-prod-umls (key
+# umls_api_key) with the deploy SP granted READ -- see docs/operations.md (added with the
+# SNOMED build, which shares this scope).
+#
+# See bundles/_reference/src/build_rxnorm.py and ADR 0014/0015.
+
+resources:
+  jobs:
+    build_rxnorm_reference:
+      name: "[_reference] build_rxnorm_reference"
+      description: |
+        Builds codes.rxnorm (NLM RxNorm normalized drug concepts) in the integrated
+        catalog. Flat: rxcui + name + TTY from RXNCONSO.RRF (SAB=RXNORM, SUPPRESS=N); one
+        row per concept per release; snapshot_replace. Blocking DQ: PK uniqueness,
+        non-null, TTY controlled vocab, download MD5 (when supplied).
+
+      tasks:
+        - task_key: build_rxnorm
+          spark_python_task:
+            python_file: ../src/build_rxnorm.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              # The download URL is resolved from --rxnorm-version via the UTS Release API
+              # (https://uts-ws.nlm.nih.gov/releases?releaseType=rxnorm-full-monthly-release);
+              # pass --release-url only to override. Update the version for a new release.
+              - "--rxnorm-version"
+              - "04072025"
+              - "--umls-secret-scope"
+              - "${var.umls_secret_scope}"
+              - "--umls-secret-key"
+              - "${var.umls_secret_key}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: reference_env
+
+      environments:
+        - environment_key: reference_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 7200
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}
