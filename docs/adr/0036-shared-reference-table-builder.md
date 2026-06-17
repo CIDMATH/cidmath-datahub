@@ -98,3 +98,23 @@ def build_reference_table(specs: list[ReferenceTableSpec], catalog, groups, ...)
 ```
 Build the builder and prove it on ICD-10-PCS in one PR; do not backport existing builds in the same
 PR.
+
+### Registration gaps to close (from the I2 review — `docs/reviews/i2-ops-metadata-model-findings.md`)
+Because the builder owns the registration scaffolding, it is the single place to fix the `_ops`
+writer⊂schema gaps the I2 review found — close them here rather than as N per-build edits:
+- **Populate the consequential `dataset_catalog` columns** that `DatasetCatalogEntry` currently omits
+  — at least `refresh_cadence` / `reporting_lag` / `revision_cadence` (ADR 0007's source-behaviour
+  mechanism, presently unreachable) — and drop or defer the remaining always-null columns from the
+  DDL + the `discovery.datasets` view so the analyst surface stops advertising perpetually-null fields.
+- **Write `pipeline_runs` from `run_build`** (`run_id` / `pipeline_reference` / start / end / status /
+  `tables_written` / `triggered_by`): the table exists but has **no writer**, and the
+  `common.pipeline_runs` helper its DDL comment references does not exist. Closes the run-history /
+  observability gap (also tracked under O1).
+- **Make `freshness_sla_hours` and `history_table` settable** on `DatasetEngineeringEntry` —
+  freshness alerting, and `history_table` is the `merge_scd2_side` contract (ADR 0007) that becomes
+  required when ADR 0034's SCD2 escalation first lands.
+- **Validate the controlled-vocabulary fields centrally.** Today only `update_semantics` /
+  `materialization_type` are validated at construction. Add `layer` (reconcile first: code uses
+  `reference`, the DDL comment says `model`), `access_tier` (`open` in code vs `public` in the DDL),
+  `subject`, `source_provider_code`, `spatial_resolution` — to `vocabularies.py` + dataclass
+  `__post_init__`, and confirm CI (ADR 0016) covers them.
