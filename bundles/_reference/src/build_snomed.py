@@ -328,6 +328,22 @@ def _dq_checks(
         },
     )
 
+    # Drift detector: active concepts carrying a tag outside the published SNOMED_SEMANTIC_TAGS
+    # set. Kept (active FSN tags are authoritative) but flagged so the published set can be
+    # refreshed when SNOMED adds a tag, or a parse anomaly investigated.
+    unrecognized = snomed.find_active_unrecognized_tags(rows)
+    unrecognized_tags = sorted({tag for _, tag in unrecognized})
+    ctx.recorder.record(
+        table_name=table,
+        check_name="snomed_active_tags_in_published_set",
+        category=DQCategory.BUSINESS_RULE,
+        severity=DQSeverity.WARN,
+        passed=not unrecognized,
+        failing_row_count=len(unrecognized),
+        total_row_count=n_active,
+        details={"unrecognized_tags": unrecognized_tags[:25]} if unrecognized else None,
+    )
+
     failures: list[str] = []
     if checksum_ok is False:
         failures.append(f"download MD5 mismatch (got {computed_md5}, want {expected_md5})")

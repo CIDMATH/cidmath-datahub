@@ -78,6 +78,93 @@ ACTIVE_CONCEPT_MIN = 300_000
 #: The trailing "(semantic tag)" on an FSN, e.g. "... (disorder)".
 _SEMANTIC_TAG_RE = re.compile(r"\(([^()]+)\)\s*$")
 
+#: Published SNOMED CT semantic tags (a.k.a. hierarchy tags), per the SNOMED Editorial Guide /
+#: the Machine-Readable Concept Model, verified present in the US Edition. This is the
+#: authority for "is this a real tag": :func:`assemble_concepts` keeps a parsed FSN tag only if
+#: it is recognized (in this set OR carried by an active concept this release -- see there).
+#: SNOMED adds a tag only rarely; ``find_active_unrecognized_tags`` WARNs when an active concept
+#: carries a tag missing from this set, so it can be refreshed. Curating in only confident-real
+#: tags is deliberate: a wrong entry here would let junk survive, whereas a *missing* real tag
+#: is still kept (via active usage) and surfaced by the WARN.
+SNOMED_SEMANTIC_TAGS: frozenset[str] = frozenset(
+    {
+        # Clinical finding
+        "finding",
+        "disorder",
+        # Procedure
+        "procedure",
+        "regime/therapy",
+        # Body structure
+        "body structure",
+        "morphologic abnormality",
+        "cell",
+        "cell structure",
+        # Organism / substance / product
+        "organism",
+        "substance",
+        "product",
+        "medicinal product",
+        "medicinal product form",
+        "clinical drug",
+        "virtual clinical drug",
+        "physical object",
+        "physical force",
+        # Specimen / observable / event / situation
+        "specimen",
+        "observable entity",
+        "event",
+        "situation",
+        # Qualifier / attribute / value sets
+        "qualifier value",
+        "attribute",
+        "administration method",
+        "basic dose form",
+        "dose form",
+        "intended site",
+        "unit of presentation",
+        "disposition",
+        "state of matter",
+        "release characteristic",
+        "transformation",
+        "supplier",
+        "product name",
+        # Scales / staging
+        "assessment scale",
+        "staging scale",
+        "tumor staging",
+        # Social / context
+        "social concept",
+        "person",
+        "ethnic group",
+        "racial group",
+        "occupation",
+        "religion/philosophy",
+        "life style",
+        "role",
+        "administrative concept",
+        # Environment / location
+        "environment",
+        "environment / location",
+        "geographic location",
+        # Record / special / navigational
+        "record artifact",
+        "special concept",
+        "navigational concept",
+        "context-dependent category",
+        "inactive concept",
+        "biological function",
+        "calculation",
+        # Metadata model
+        "namespace concept",
+        "core metadata concept",
+        "foundation metadata concept",
+        "linkage concept",
+        "link assertion",
+        "OWL metadata concept",
+        "metadata",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # SCTID validation (Verhoeff check digit; the error-prone bit)
@@ -300,15 +387,16 @@ def assemble_concepts(
     active FSN get an empty ``fsn`` (surfaced by DQ for active concepts); the entrypoint
     keeps the ``active`` flag so inactive concepts are distinguishable.
 
-    Semantic tag: SNOMED only guarantees a trailing ``(semantic tag)`` on the FSN of
-    *active* concepts. Legacy/inactive concepts (e.g. Read-code-derived FSNs like
-    "O/E - abdominal movement (& wall)") can end in a parenthetical that is part of the
-    term, not a tag -- which the structural parser would otherwise mis-read as
-    ``semantic_tag = "& wall"``. So we build a trusted vocabulary from the tags actually
-    used by active concepts in *this release* (self-maintaining; no hardcoded list) and
-    keep a parsed tag only when it is in that set. An inactive concept therefore keeps a
-    genuine ``(disorder)`` (some active concept uses it) but drops ``(& wall)`` (no active
-    concept does). Active concepts always keep their tag (they define the vocabulary).
+    Semantic tag: the trailing ``(...)`` is only a true semantic tag on *some* FSNs --
+    legacy/inactive concepts (e.g. Read-code-derived "O/E - abdominal movement (& wall)")
+    can end in a parenthetical that is part of the term, which the structural parser would
+    otherwise mis-read as ``semantic_tag = "& wall"``. So a parsed tag is kept only when
+    **recognized**: in the published :data:`SNOMED_SEMANTIC_TAGS` set (the authority for
+    "is this a real tag"), OR carried by an active concept in this release. The second arm
+    is authoritative too -- SNOMED guarantees active FSNs end in an approved tag -- and lets
+    a newly-introduced tag flow through before the published constant is refreshed (the
+    entrypoint WARNs on those via :func:`find_active_unrecognized_tags`). An inactive concept
+    thus keeps a genuine ``(disorder)`` but drops ``(& wall)``; the FSN itself is untouched.
 
     Args:
         concepts: Parsed ``sct2_Concept_Snapshot`` rows.
@@ -326,9 +414,10 @@ def assemble_concepts(
         fsns = [d.term for d in by_concept.get(c.concept_id, []) if d.type_id == FSN_TYPE_ID]
         fsn_by_id[c.concept_id] = fsns[0] if fsns else ""
 
-    # Trusted semantic-tag vocabulary = tags carried by active concepts' FSNs.
+    # Recognized tags = the published set plus any tag an active concept carries this release.
     active_tags = {parse_semantic_tag(fsn_by_id[c.concept_id]) for c in concepts if c.active}
     active_tags.discard("")
+    recognized_tags = SNOMED_SEMANTIC_TAGS | active_tags
 
     out: list[SnomedConcept] = []
     for c in concepts:
@@ -345,7 +434,7 @@ def assemble_concepts(
                 concept_id=c.concept_id,
                 fsn=fsn,
                 preferred_term=preferred[0] if preferred else "",
-                semantic_tag=parsed_tag if parsed_tag in active_tags else "",
+                semantic_tag=parsed_tag if parsed_tag in recognized_tags else "",
                 active=c.active,
                 module_id=c.module_id,
                 effective_time=c.effective_time,
@@ -431,3 +520,16 @@ def semantic_tag_distribution(rows: list[SnomedConcept]) -> dict[str, int]:
 def find_active_missing_preferred(rows: list[SnomedConcept]) -> list[str]:
     """Active concepts with a blank ``preferred_term`` (backs a coverage WARN)."""
     return [r.concept_id for r in rows if r.active and not r.preferred_term.strip()]
+
+
+def find_active_unrecognized_tags(rows: list[SnomedConcept]) -> list[tuple[str, str]]:
+    """``(concept_id, semantic_tag)`` for active concepts whose tag is outside the published set.
+
+    These are kept (an active FSN's tag is authoritative) but flagged so the published set can
+    be refreshed when SNOMED introduces a tag -- or a parse anomaly investigated. Backs a WARN.
+    """
+    return [
+        (r.concept_id, r.semantic_tag)
+        for r in rows
+        if r.active and r.semantic_tag and r.semantic_tag not in SNOMED_SEMANTIC_TAGS
+    ]

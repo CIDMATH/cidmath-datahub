@@ -144,7 +144,37 @@ class TestLegacyTaglessFsn:
 
     def test_genuine_inactive_tag_kept(self):
         rows = self._assemble()
-        assert rows["195967001"].semantic_tag == "disorder"  # active 73211009 uses it
+        assert rows["195967001"].semantic_tag == "disorder"  # in published set + active uses it
+
+
+@pytest.mark.unit
+class TestPublishedTagAllowlist:
+    """Recognition = the published SNOMED_SEMANTIC_TAGS set OR a tag an active concept carries."""
+
+    def test_published_tag_kept_without_any_active_use(self):
+        # Inactive concept with a real published tag that no active concept here uses: the
+        # allowlist (not active usage) is what keeps it.
+        crow = snomed.SnomedConceptRow
+        desc = snomed.SnomedDescription
+        concepts = [crow("100000001", False, "m", "t", "ds")]
+        descriptions = [desc("1", True, "100000001", snomed.FSN_TYPE_ID, "Foo (specimen)", "en")]
+        rows = snomed.assemble_concepts(concepts, descriptions, set())
+        assert rows[0].semantic_tag == "specimen"
+
+    def test_unknown_tag_on_active_concept_kept_and_flagged(self):
+        # A tag absent from the published set but carried by an ACTIVE concept: kept (active
+        # FSNs are authoritative) and surfaced by the drift WARN helper.
+        crow = snomed.SnomedConceptRow
+        desc = snomed.SnomedDescription
+        concepts = [crow("99990001", True, "m", "t", "ds")]
+        descriptions = [desc("1", True, "99990001", snomed.FSN_TYPE_ID, "X (novel tag)", "en")]
+        rows = snomed.assemble_concepts(concepts, descriptions, set())
+        assert rows[0].semantic_tag == "novel tag"
+        assert snomed.find_active_unrecognized_tags(rows) == [("99990001", "novel tag")]
+
+    def test_published_set_excludes_junk(self):
+        for junk in ("& wall", "LSD reaction", "small intestine Ca", ""):
+            assert junk not in snomed.SNOMED_SEMANTIC_TAGS
 
 
 @pytest.mark.unit
