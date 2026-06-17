@@ -101,3 +101,28 @@ class TestSelectConsoMember:
     def test_raises_when_no_full_member(self):
         with pytest.raises(ValueError, match="RXNCONSO.RRF"):
             rxnorm.select_conso_member(["prescribe/rrf/RXNCONSO.RRF", "rrf/RXNREL.RRF"])
+
+
+@pytest.mark.unit
+class TestEntryTermTty:
+    """ET (dose-form entry term) is a valid RxNorm TTY (NLM Appendix 5); it must be recognized
+    and treated as a synonym so a defining atom wins. Regression for the blocking-DQ failure on
+    ET-typed concepts (e.g. RXCUI 4230)."""
+
+    def test_et_is_recognized(self):
+        assert "ET" in rxnorm.RXNORM_TTY_VALUES
+
+    def test_defining_atom_beats_entry_term(self):
+        atoms = [
+            rxnorm.RxnormAtom("317541", "ET", "Nasal Drops", "10", False),
+            rxnorm.RxnormAtom("317541", "DF", "Nasal Solution", "20", True),
+        ]
+        concepts = rxnorm.reduce_to_concepts(atoms)
+        assert len(concepts) == 1
+        assert concepts[0].tty == "DF" and concepts[0].name == "Nasal Solution"
+
+    def test_entry_term_only_concept_kept_and_recognized(self):
+        atoms = [rxnorm.RxnormAtom("4230", "ET", "Some entry term", "30", False)]
+        concepts = rxnorm.reduce_to_concepts(atoms)
+        assert len(concepts) == 1 and concepts[0].tty == "ET"
+        assert rxnorm.find_bad_tty(concepts) == []  # ET recognized -> no WARN, no block

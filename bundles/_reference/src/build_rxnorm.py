@@ -21,8 +21,9 @@ the rule-of-three (noted in the PR).
 
 Thin entrypoint over the ``run_build`` seam (ADR 0027). Blocking DQ (FAIL, raises):
 ``(rxcui, rxnorm_version)`` uniqueness; non-null ``rxcui`` / ``name`` / ``tty`` /
-``rxnorm_version``; ``tty`` in the RxNorm term-type vocabulary; and (when an expected MD5 is
-supplied) the download checksum matches. WARN: cardinality, TTY distribution.
+``rxnorm_version``; and (when an expected MD5 is supplied) the download checksum matches.
+WARN: cardinality, TTY recognition (an unknown TTY is surfaced, not fatal -- the RxNorm
+term-type set can grow), TTY distribution.
 
 Usage:
     build_rxnorm.py --catalog ecdh_model_dev --rxnorm-version 04072025 \\
@@ -236,16 +237,22 @@ def _dq_checks(
         details={"sample": [list(m) for m in miss[:10]]} if miss else None,
     )
 
+    # TTY recognition is a WARN, not a gate: TTY is descriptive source metadata and the RxNorm
+    # term-type set can grow (e.g. ET, the dose-form entry term), so an unrecognized value is
+    # surfaced for review rather than failing the whole reference load.
     bad_tty = rxnorm.find_bad_tty(concepts)
     ctx.recorder.record(
         table_name=table,
-        check_name="rxnorm_tty_controlled_vocab",
+        check_name="rxnorm_tty_recognized",
         category=DQCategory.BUSINESS_RULE,
-        severity=DQSeverity.FAIL,
+        severity=DQSeverity.WARN,
         passed=not bad_tty,
         failing_row_count=len(bad_tty),
         total_row_count=total,
-        details={"allowed": sorted(rxnorm.RXNORM_TTY_VALUES), "sample": [list(b) for b in bad_tty[:10]]}
+        details={
+            "allowed": sorted(rxnorm.RXNORM_TTY_VALUES),
+            "sample": [list(b) for b in bad_tty[:10]],
+        }
         if bad_tty
         else None,
     )
@@ -280,8 +287,6 @@ def _dq_checks(
         failures.append(f"duplicate rxcui: {dup[:5]}")
     if miss:
         failures.append(f"null required field: {miss[:5]}")
-    if bad_tty:
-        failures.append(f"tty out of vocab: {bad_tty[:5]}")
     if failures:
         raise ValueError("RxNorm blocking DQ failed -- " + "; ".join(failures))
 
