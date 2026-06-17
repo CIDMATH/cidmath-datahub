@@ -296,10 +296,19 @@ def assemble_concepts(
 
     For each concept, the FSN is its active ``FSN``-typed description and the preferred
     term is its active ``Synonym``-typed description whose id is in
-    ``preferred_description_ids`` (the US-English language refset). The semantic tag is
-    parsed from the FSN. Concepts with no active FSN get an empty ``fsn`` (surfaced by
-    DQ for active concepts); the entrypoint keeps the ``active`` flag so inactive
-    concepts are distinguishable.
+    ``preferred_description_ids`` (the US-English language refset). Concepts with no
+    active FSN get an empty ``fsn`` (surfaced by DQ for active concepts); the entrypoint
+    keeps the ``active`` flag so inactive concepts are distinguishable.
+
+    Semantic tag: SNOMED only guarantees a trailing ``(semantic tag)`` on the FSN of
+    *active* concepts. Legacy/inactive concepts (e.g. Read-code-derived FSNs like
+    "O/E - abdominal movement (& wall)") can end in a parenthetical that is part of the
+    term, not a tag -- which the structural parser would otherwise mis-read as
+    ``semantic_tag = "& wall"``. So we build a trusted vocabulary from the tags actually
+    used by active concepts in *this release* (self-maintaining; no hardcoded list) and
+    keep a parsed tag only when it is in that set. An inactive concept therefore keeps a
+    genuine ``(disorder)`` (some active concept uses it) but drops ``(& wall)`` (no active
+    concept does). Active concepts always keep their tag (they define the vocabulary).
 
     Args:
         concepts: Parsed ``sct2_Concept_Snapshot`` rows.
@@ -310,22 +319,33 @@ def assemble_concepts(
         One row per input concept, in input order.
     """
     by_concept = _active_descriptions_by_concept(descriptions)
+
+    # FSN per concept (first active FSN-typed description, else "").
+    fsn_by_id: dict[str, str] = {}
+    for c in concepts:
+        fsns = [d.term for d in by_concept.get(c.concept_id, []) if d.type_id == FSN_TYPE_ID]
+        fsn_by_id[c.concept_id] = fsns[0] if fsns else ""
+
+    # Trusted semantic-tag vocabulary = tags carried by active concepts' FSNs.
+    active_tags = {parse_semantic_tag(fsn_by_id[c.concept_id]) for c in concepts if c.active}
+    active_tags.discard("")
+
     out: list[SnomedConcept] = []
     for c in concepts:
         descs = by_concept.get(c.concept_id, [])
-        fsns = [d.term for d in descs if d.type_id == FSN_TYPE_ID]
         preferred = [
             d.term
             for d in descs
             if d.type_id == SYNONYM_TYPE_ID and d.description_id in preferred_description_ids
         ]
-        fsn = fsns[0] if fsns else ""
+        fsn = fsn_by_id[c.concept_id]
+        parsed_tag = parse_semantic_tag(fsn)
         out.append(
             SnomedConcept(
                 concept_id=c.concept_id,
                 fsn=fsn,
                 preferred_term=preferred[0] if preferred else "",
-                semantic_tag=parse_semantic_tag(fsn),
+                semantic_tag=parsed_tag if parsed_tag in active_tags else "",
                 active=c.active,
                 module_id=c.module_id,
                 effective_time=c.effective_time,

@@ -99,7 +99,52 @@ class TestParseAndAssemble:
     def test_inactive_carried(self, rows):
         i = next(r for r in rows if r.concept_id == "195967001")
         assert i.active is False
-        assert i.semantic_tag == "disorder"  # still parsed from its (active) FSN
+        # "disorder" is used by an active concept in the fixture (73211009), so the
+        # inactive concept's genuine tag is kept.
+        assert i.semantic_tag == "disorder"
+
+
+# Legacy CTV3-derived FSN whose trailing "(& wall)" is part of the term, not a semantic tag.
+_OE_WALL_FSN = "O/E - abdominal movement (& wall)"
+
+
+@pytest.mark.unit
+class TestLegacyTaglessFsn:
+    """A legacy/inactive FSN ending in a non-tag parenthetical (e.g. "(& wall)") must not
+    yield a spurious semantic tag; genuine tags on inactive concepts are still kept when an
+    active concept uses the same tag. Regression for concept 140406001 (O/E - abdominal
+    movement (& wall)) wrongly tagged "& wall"."""
+
+    def _assemble(self):
+        crow = snomed.SnomedConceptRow
+        desc = snomed.SnomedDescription
+        concepts = [
+            crow("73211009", True, "m", "t", "ds"),  # active disorder -> defines "disorder"
+            crow("386661006", True, "m", "t", "ds"),  # active finding -> defines "finding"
+            crow("140406001", False, "m", "20020131", "ds"),  # inactive legacy "(& wall)" FSN
+            crow("195967001", False, "m", "t", "ds"),  # inactive, genuine "(disorder)" tag
+        ]
+        descriptions = [
+            desc("1", True, "73211009", snomed.FSN_TYPE_ID, "Diabetes mellitus (disorder)", "en"),
+            desc("2", True, "386661006", snomed.FSN_TYPE_ID, "Fever (finding)", "en"),
+            desc("3", True, "140406001", snomed.FSN_TYPE_ID, _OE_WALL_FSN, "en"),
+            desc("4", True, "195967001", snomed.FSN_TYPE_ID, "Asthma (disorder)", "en"),
+        ]
+        return {r.concept_id: r for r in snomed.assemble_concepts(concepts, descriptions, set())}
+
+    def test_legacy_parenthetical_not_treated_as_tag(self):
+        rows = self._assemble()
+        assert rows["140406001"].semantic_tag == ""  # "& wall" dropped
+        assert rows["140406001"].fsn == _OE_WALL_FSN  # FSN preserved
+
+    def test_active_tags_kept(self):
+        rows = self._assemble()
+        assert rows["73211009"].semantic_tag == "disorder"
+        assert rows["386661006"].semantic_tag == "finding"
+
+    def test_genuine_inactive_tag_kept(self):
+        rows = self._assemble()
+        assert rows["195967001"].semantic_tag == "disorder"  # active 73211009 uses it
 
 
 @pytest.mark.unit
