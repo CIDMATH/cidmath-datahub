@@ -34,7 +34,9 @@ workspace ACLs/grants — see the confirmation checklist; findings assume code r
    with no in-repo source of truth and no drift check. A scope accidentally granted `READ` to a
    broad group / `users` wouldn't be caught. → Extend the 0033 pattern to secret scopes (drafted as
    a follow-up issue). Runtime check meanwhile: confirm each scope grants `READ` only to its deploy
-   SP + admins.
+   SP + admins. **Confirmed live 2026-06-16:** `ecdh-prod-ipums` is **missing entirely** (every
+   other dev/prod scope exists) — a missing declared scope is the same class of undetected drift, so
+   the auditor must check scope **existence**, not just ACLs.
 2. **`_get_secret` is copy-pasted** across `build_crosswalk` / `build_geography` / `build_loinc`
    (soon RxNorm/SNOMED). Move to `common/` (e.g. `common/secrets.py`) — one audited helper beats
    five copies; ties to the #1 shared-builder work.
@@ -56,3 +58,27 @@ notices (no ACL drift check, #1), or an admin grants a contractor `USE CATALOG`+
 `ecdh_model_prod` for a one-off and never revokes it (auditor only checks declared pairs, #3). The
 strong, drift-checked automation stops at deploy-SP-applied catalog grants; the human-applied
 grants (secret ACLs, ad-hoc catalog grants) are the soft spot. Closing #1 and #3 hardens that seam.
+
+## Runtime confirmation (2026-06-16)
+Ran the secret-scope portion of the confirmation checklist. **All dev + prod scopes present and as
+expected except `ecdh-prod-ipums`, which is absent** (other prod scopes — loinc/umls/teams-webhook —
+exist). Impact: the **prod** geography + crosswalk builds read the NHGIS key from this scope
+(`ipums_secret_scope` for the prod target), so they would fail at `_get_secret(...)` until it's
+created — i.e. prod geography is **not yet runnable**. Not a vulnerability; a **prod-provisioning
+gap**. Remediation (when prod geography is stood up): create `ecdh-prod-ipums`, add the
+`nhgis_api_key` secret, grant `READ` to the prod deploy SP (`caff7ad3-…`); track in
+`docs/operations.md` (prod setup). This is a concrete instance of SHOULD-FIX #1 — nothing checks
+scope existence, so the gap was invisible.
+
+**Resolved + signed off (2026-06-16):** `ecdh-prod-ipums` was created and granted `READ` to the prod
+SP (`caff7ad3-…`). Full ACL contents then captured for all `ecdh-*` scopes — **clean**: each grants
+`READ` only to its correct per-env deploy SP and `MANAGE` only to the admin; no groups, no `users`,
+no cross-env leakage.
+
+**Nit (vestigial config):** the `ecdh-{dev,prod}-teams-webhook` scopes have **no SP `READ`** — which
+is correct, because all job alerting uses the managed notification-destination ID
+(`teams_destination_id`), not the raw URL. No code reads `teams_webhook_scope`/`_key`, so those two
+variables (and the stored webhook secret) are unused → consider removing them from
+`databricks-common.yml` to cut confusion and a small unused attack surface (a stored webhook URL
+nobody reads). Non-`ecdh` scopes (`project-secrets`, `towerscout`) belong to other projects in the
+shared workspace — out of scope here.
