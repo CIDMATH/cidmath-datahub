@@ -1,0 +1,72 @@
+# Job that builds the canonical codes.icd10pcs reference table (ADR 0014).
+#
+# Downloads the CMS ICD-10-PCS order file for the requested fiscal-year edition(s)
+# over public HTTPS (no credential -- U.S. Government work, public domain), overlays
+# the Apr-1 mid-year (New Technology) update where published (--midyear-update auto),
+# parses/validates via cidmath_datahub.reference.icd10pcs, and writes
+# ecdh_model_<env>.codes.icd10pcs keyed by (icd10pcs_code, edition_year) using
+# snapshot_replace (editions retained; ICD-10 per-version model, NOT ADR 0032).
+# Flat: code + short/long title + Section grouping; no axis decomposition / GEMs.
+#
+# Thin entrypoint over the run_build seam (ADR 0027). Editions are re-pullable, so
+# the table is vintage-reproducible (ADR 0024).
+#
+# Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**) but
+# triggered from the UI. To load more editions, add years to --edition-year (e.g.
+# "2026" "2025"). The CMS direct-download slug shifts year to year and the listing
+# page is JavaScript-rendered; if the templated default 404s, pass the live link via
+# --order-url (grab it from https://www.cms.gov/medicare/coding-billing/icd-10-codes).
+#
+# See bundles/_reference/src/build_icd10pcs.py and ADR 0014/0015.
+
+resources:
+  jobs:
+    build_icd10pcs_reference:
+      name: "[_reference] build_icd10pcs_reference"
+      description: |
+        Builds codes.icd10pcs (ICD-10-PCS inpatient procedure code system, CMS) in
+        the integrated catalog. One row per code/header per fiscal-year edition; PK
+        (icd10pcs_code, edition_year). Blocking DQ: uniqueness, non-null long_title,
+        billable codes are 7-char, PCS charset, section controlled vocab. Reference
+        table; snapshot_replace per edition.
+
+      tasks:
+        - task_key: build_icd10pcs
+          spark_python_task:
+            python_file: ../src/build_icd10pcs.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--edition-year"
+              - "2026"
+              # Confirmed CMS link: the April 1, 2026 ICD-10-PCS Order File is the COMPLETE
+              # FY2026 code set (Oct-1 base + the New Technology additions), so we load it
+              # directly and skip the overlay. For future editions, drop --order-url and set
+              # --midyear-update auto to let the URL templates resolve base + April update.
+              - "--order-url"
+              - "https://www.cms.gov/files/zip/april-1-2026-icd-10-pcs-order-file-long-abbreviated-titles.zip"
+              - "--midyear-update"
+              - "skip"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: reference_env
+
+      environments:
+        - environment_key: reference_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 3600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}
