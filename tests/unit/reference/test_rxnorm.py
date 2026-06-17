@@ -80,3 +80,24 @@ class TestDq:
 
     def test_all_concept_ttys_are_in_vocab(self, concepts):
         assert all(c.tty in rxnorm.RXNORM_TTY_VALUES for c in concepts)
+
+
+@pytest.mark.unit
+class TestSelectConsoMember:
+    """The full release bundles RXNCONSO.RRF twice: rrf/ (full) and prescribe/rrf/ (subset).
+    Regression: the build must pick the full file, not error on the duplicate."""
+
+    def test_picks_full_over_prescribe_subset(self):
+        names = ["rrf/RXNCONSO.RRF", "prescribe/rrf/RXNCONSO.RRF", "rrf/RXNREL.RRF"]
+        assert rxnorm.select_conso_member(names) == "rrf/RXNCONSO.RRF"
+
+    def test_handles_versioned_top_dir(self):
+        names = [
+            "RxNorm_full_04072025/rrf/RXNCONSO.RRF",
+            "RxNorm_full_04072025/prescribe/rrf/RXNCONSO.RRF",
+        ]
+        assert rxnorm.select_conso_member(names) == "RxNorm_full_04072025/rrf/RXNCONSO.RRF"
+
+    def test_raises_when_no_full_member(self):
+        with pytest.raises(ValueError, match="RXNCONSO.RRF"):
+            rxnorm.select_conso_member(["prescribe/rrf/RXNCONSO.RRF", "rrf/RXNREL.RRF"])

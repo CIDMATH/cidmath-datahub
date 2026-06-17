@@ -36,6 +36,7 @@ Sources:
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
@@ -48,7 +49,9 @@ SOURCE_DATA_DICTIONARY_URL = SOURCE_DOCUMENTATION_URL
 #: UTS download proxy: GET ?url=<NLM file url>&apiKey=<UMLS key> returns the file.
 UTS_DOWNLOAD_URL = "https://uts-ws.nlm.nih.gov/download"
 
-#: RRF is pipe-delimited UTF-8 with NO header row; ``RXNCONSO.RRF`` lives under ``rrf/``.
+#: RRF is pipe-delimited UTF-8 with NO header row. The full release ships ``RXNCONSO.RRF``
+#: under ``rrf/`` AND a smaller "Prescribable Content" subset under ``prescribe/rrf/``; we use
+#: the full file (see :func:`select_conso_member`).
 SOURCE_ENCODING = "utf-8"
 CONSO_MEMBER = "RXNCONSO.RRF"
 
@@ -102,6 +105,34 @@ _SYNONYM_TTYS: frozenset[str] = frozenset({"SY", "TMSY", "PSN"})
 
 #: Sanity band for the active SAB=RXNORM concept count (hundreds of thousands).
 CARDINALITY_MIN = 100_000
+
+
+def select_conso_member(names: Iterable[str]) -> str:
+    """Pick the full-release ``RXNCONSO.RRF`` from a zip's name list (ADR 0011 keeps IO out).
+
+    The RxNorm full monthly release bundles two ``RXNCONSO.RRF`` files: the full file at
+    ``rrf/RXNCONSO.RRF`` and a smaller **Prescribable Content** subset at
+    ``prescribe/rrf/RXNCONSO.RRF``. Match by basename, then exclude any member under a
+    ``prescribe`` path segment so we always load the full file.
+
+    Args:
+        names: Member names in the downloaded zip.
+
+    Returns:
+        The single full-release ``RXNCONSO.RRF`` member name.
+
+    Raises:
+        ValueError: If zero or more than one full member remains after excluding the
+            ``prescribe/`` subset -- a sign the release layout changed.
+    """
+    matches = [n for n in names if n.replace("\\", "/").split("/")[-1].upper() == CONSO_MEMBER]
+    full = [n for n in matches if "prescribe" not in n.lower().replace("\\", "/").split("/")]
+    if len(full) != 1:
+        raise ValueError(
+            f"Expected exactly one full {CONSO_MEMBER} (excluding the prescribe/ subset); "
+            f"found full={full}, all={matches}"
+        )
+    return full[0]
 
 
 @dataclass(frozen=True)

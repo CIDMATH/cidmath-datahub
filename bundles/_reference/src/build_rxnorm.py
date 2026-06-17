@@ -160,14 +160,16 @@ def _uts_download(release_url: str, api_key: str) -> bytes:
     return raw
 
 
-def _extract_member(zip_bytes: bytes, basename: str) -> tuple[str, str]:
-    """Extract a member's text from the zip by basename (case-insensitive). Returns (text, member)."""
+def _extract_conso(zip_bytes: bytes) -> tuple[str, str]:
+    """Extract the full-release ``RXNCONSO.RRF`` text from the zip. Returns ``(text, member)``.
+
+    Member selection (full file vs the prescribe/ subset) lives in the pure module
+    (:func:`rxnorm.select_conso_member`) so it stays testable (ADR 0011).
+    """
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        matches = [n for n in zf.namelist() if n.split("/")[-1].upper() == basename.upper()]
-        if len(matches) != 1:
-            raise ValueError(f"Expected exactly one {basename} in zip; found {matches}")
-        raw = zf.read(matches[0])
-    return raw.decode(rxnorm.SOURCE_ENCODING), matches[0].split("/")[-1]
+        member = rxnorm.select_conso_member(zf.namelist())
+        raw = zf.read(member)
+    return raw.decode(rxnorm.SOURCE_ENCODING), member.replace("\\", "/").split("/")[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +434,7 @@ def run(
     computed_md5 = hashlib.md5(zip_bytes).hexdigest()  # nosec B324 - integrity, not security
     checksum_ok = (computed_md5.lower() == expected_md5.lower()) if expected_md5 else None
 
-    conso_text, conso_member = _extract_member(zip_bytes, rxnorm.CONSO_MEMBER)
+    conso_text, conso_member = _extract_conso(zip_bytes)
     atoms = rxnorm.parse_rxnconso(conso_text)
     concepts = rxnorm.reduce_to_concepts(atoms)
 
