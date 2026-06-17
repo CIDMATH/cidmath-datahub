@@ -39,10 +39,11 @@ resources:
             parameters:
               - "--catalog"
               - "${var.model_catalog}"
+              # The download URL is resolved from --snomed-version via the UTS Release API
+              # (https://uts-ws.nlm.nih.gov/releases?releaseType=snomed-ct-us-edition); pass
+              # --release-url only to override. Update the version for a new release.
               - "--snomed-version"
               - "20260301"
-              - "--release-url"
-              - "https://download.nlm.nih.gov/umls/kss/IHTSDO/SnomedCT_USEditionRF2_PRODUCTION_20260301T120000Z.zip"
               - "--umls-secret-scope"
               - "${var.umls_secret_scope}"
               - "--umls-secret-key"

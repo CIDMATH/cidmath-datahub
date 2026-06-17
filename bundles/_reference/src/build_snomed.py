@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import json
 import urllib.parse
 import urllib.request
 import zipfile
@@ -57,6 +58,11 @@ SCHEMA = "codes"
 TABLE = "snomed"
 CURRENT_VIEW = "snomed_current"
 PIPELINE_REF = "bundles/_reference/src/build_snomed.py"
+
+#: UTS Release API -- lists each release (with its downloadUrl) for a release type, so
+#: the exact NLM URL is resolved at runtime rather than hardcoded.
+RELEASES_URL = "https://uts-ws.nlm.nih.gov/releases"
+RELEASE_TYPE = "snomed-ct-us-edition"
 
 SNOMED_SPARK_SCHEMA = T.StructType(
     [
@@ -89,6 +95,51 @@ def _get_secret(scope: str, key: str) -> str:
     return dbutils.secrets.get(scope=scope, key=key)
 
 
+def _resolve_release_url(version: str) -> str:
+    """Resolve the NLM download URL for a SNOMED US Edition ``version`` via the Release API.
+
+    ``GET uts-ws.nlm.nih.gov/releases?releaseType=snomed-ct-us-edition`` lists each release
+    with its ``downloadUrl``; ``version`` is matched leniently (its digits must appear in the
+    release's version/filename/url, so ``"20260301"`` matches ``releaseVersion`` ``"2026-03-01"``
+    / file ``...20260301T120000Z.zip``). ``"current"`` (or empty) takes the current release.
+    No API key needed for the listing.
+    """
+    current = version.strip().lower() in ("", "current")
+    params = {"releaseType": RELEASE_TYPE}
+    if current:
+        params["current"] = "true"
+    url = f"{RELEASES_URL}?{urllib.parse.urlencode(params)}"
+    with urllib.request.urlopen(url) as resp:  # nosec B310 - trusted NLM/UTS host
+        releases = json.loads(resp.read())
+    if not releases:
+        raise ValueError(f"UTS Release API returned no releases for {RELEASE_TYPE!r}")
+    if current:
+        chosen = releases[0]
+    else:
+        want = "".join(c for c in version if c.isdigit())
+        chosen = next(
+            (
+                r
+                for r in releases
+                if want
+                in "".join(
+                    c
+                    for c in f"{r.get('releaseVersion', '')}{r.get('fileName', '')}{r.get('downloadUrl', '')}"
+                    if c.isdigit()
+                )
+            ),
+            None,
+        )
+        if chosen is None:
+            available = [r.get("releaseVersion") for r in releases[:10]]
+            raise ValueError(
+                f"No {RELEASE_TYPE} release matching version {version!r}; available: {available}"
+            )
+    download_url = chosen["downloadUrl"]
+    log.info("Resolved release URL", extra={"version": version, "download_url": download_url})
+    return download_url
+
+
 def _uts_download(release_url: str, api_key: str) -> bytes:
     """Download an NLM release via the UTS download proxy (UMLS API key auth).
 
@@ -100,6 +151,18 @@ def _uts_download(release_url: str, api_key: str) -> bytes:
     url = f"{snomed.UTS_DOWNLOAD_URL}?{query}"
     with urllib.request.urlopen(url) as resp:  # nosec B310 - trusted NLM/UTS host
         raw = resp.read()
+        content_type = resp.headers.get("Content-Type", "")
+    # A real release is a zip (starts with the "PK" local-file signature). A 200 with
+    # non-zip bytes means the UTS proxy returned an error/HTML page -- almost always a
+    # wrong --release-url or an unauthorized key -- so fail with the response, not a
+    # cryptic BadZipFile later.
+    if raw[:2] != b"PK":
+        preview = raw[:500].decode("utf-8", "replace")
+        raise ValueError(
+            f"UTS download did not return a zip ({len(raw)} bytes, Content-Type={content_type!r}). "
+            f"Check that --release-url is a valid current NLM release URL and the UMLS key is "
+            f"authorized. Response began: {preview!r}"
+        )
     log.info("Downloaded SNOMED RF2 release", extra={"release_url": release_url, "bytes": len(raw)})
     return raw
 
@@ -426,19 +489,20 @@ def run(
     data_engineers_group: str,
     analysts_group: str,
     snomed_version: str,
-    release_url: str,
-    umls_secret_scope: str,
+    release_url: str | None = None,
+    umls_secret_scope: str = "",
     umls_secret_key: str = "umls_api_key",
     expected_md5: str | None = None,
     create_view: bool = True,
 ) -> None:
     if not umls_secret_scope:
         raise ValueError("--umls-secret-scope is required to pull the licensed SNOMED release")
-    if not release_url:
-        raise ValueError("--release-url is required (the NLM US Edition RF2 zip URL)")
+
+    # Resolve the exact NLM download URL from the Release API unless one is given.
+    resolved_url = release_url or _resolve_release_url(snomed_version)
 
     api_key = _get_secret(umls_secret_scope, umls_secret_key)
-    zip_bytes = _uts_download(release_url, api_key)
+    zip_bytes = _uts_download(resolved_url, api_key)
     computed_md5 = hashlib.md5(zip_bytes).hexdigest()  # nosec B324 - integrity, not security
     checksum_ok = (computed_md5.lower() == expected_md5.lower()) if expected_md5 else None
 
@@ -512,10 +576,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
     parser.add_argument(
-        "--snomed-version", required=True, help="Release effective date, e.g. 20260301."
+        "--snomed-version",
+        required=True,
+        help="Release effective date, e.g. 20260301. Used to resolve the download URL via the "
+        "UTS Release API and to stamp the table.",
     )
     parser.add_argument(
-        "--release-url", required=True, help="NLM US Edition RF2 zip URL (downloaded via UTS)."
+        "--release-url",
+        default=None,
+        help="Override the NLM US Edition RF2 zip URL. If omitted, it's resolved from "
+        "--snomed-version via the UTS Release API.",
     )
     parser.add_argument("--umls-secret-scope", required=True, help="Shared UMLS secret scope.")
     parser.add_argument("--umls-secret-key", default="umls_api_key")
