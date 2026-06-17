@@ -1,0 +1,72 @@
+# Job that builds the canonical codes.snomed reference table (ADR 0014).
+#
+# Downloads the SNOMED CT US Edition RF2 release from the NLM via the UTS download
+# proxy (UMLS API key read at runtime from the shared secret scope named by
+# ${var.umls_secret_scope}, key ${var.umls_secret_key} -- the same scope/key the
+# RxNorm build uses; ADR 0012, no creds in config). Parses the RF2 Snapshot Concept
+# + Description + Language-refset files, reduces to one row per concept (FSN +
+# preferred term + semantic tag), and writes ecdh_model_<env>.codes.snomed keyed by
+# snomed_version using snapshot_replace (releases retained; ICD-10 per-version model,
+# NOT ADR 0032). Flat -- the IS-A hierarchy is deferred.
+#
+# Thin entrypoint over the run_build seam (ADR 0027). Licensed source
+# (UMLS/SNOMED affiliate) -> access_tier=restricted / dua_required=true.
+#
+# Deploy-and-run, version-parameterized (~2 releases/year) -- no schedule. Update
+# --snomed-version and --release-url for a new release. --release-url is the NLM US
+# Edition RF2 zip URL (from the UTS downloads page); optionally pass --expected-md5
+# (the release's published checksum) to make the integrity check blocking.
+#
+# Prerequisite: UMLS API key provisioned in ecdh-dev-umls / ecdh-prod-umls (key
+# umls_api_key) with the deploy SP granted READ -- see docs/operations.md.
+#
+# See bundles/_reference/src/build_snomed.py and ADR 0014/0015.
+
+resources:
+  jobs:
+    build_snomed_reference:
+      name: "[_reference] build_snomed_reference"
+      description: |
+        Builds codes.snomed (SNOMED CT US Edition concepts) in the integrated catalog.
+        Flat: concept + FSN + preferred term + semantic tag from the RF2 Snapshot; one
+        row per concept per release; snapshot_replace. Licensed/restricted. Blocking DQ:
+        PK uniqueness, valid SCTID (Verhoeff), one FSN/preferred per active concept.
+
+      tasks:
+        - task_key: build_snomed
+          spark_python_task:
+            python_file: ../src/build_snomed.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--snomed-version"
+              - "20260301"
+              - "--release-url"
+              - "https://download.nlm.nih.gov/umls/kss/IHTSDO/SnomedCT_USEditionRF2_PRODUCTION_20260301T120000Z.zip"
+              - "--umls-secret-scope"
+              - "${var.umls_secret_scope}"
+              - "--umls-secret-key"
+              - "${var.umls_secret_key}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: reference_env
+
+      environments:
+        - environment_key: reference_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 7200
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

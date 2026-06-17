@@ -142,6 +142,24 @@ databricks secrets put-acl ecdh-dev-loinc  a55b6164-c0eb-42cf-a438-7de33c150f4a 
 databricks secrets put-acl ecdh-prod-loinc caff7ad3-d82f-4692-98cc-678dc6807cbd READ
 ```
 
+**UMLS UTS API key** (SNOMED CT and RxNorm reference builds, ADR 0014). The NLM bulk downloads (SNOMED CT US Edition RF2, RxNorm RRF) are authenticated with a single UMLS UTS API key via the UTS download proxy. **One shared scope/key serves both builds** — matching the wired bundle variables (`umls_secret_scope`, `umls_secret_key` = `umls_api_key`):
+
+```bash
+databricks secrets create-scope ecdh-dev-umls
+databricks secrets create-scope ecdh-prod-umls
+
+# Add the UMLS UTS API key as the `umls_api_key` key in each scope
+databricks secrets put-secret ecdh-dev-umls umls_api_key
+databricks secrets put-secret ecdh-prod-umls umls_api_key
+```
+
+The key comes from your UMLS UTS profile: https://uts.nlm.nih.gov/uts/profile (requires a UMLS Metathesaurus License, which includes the SNOMED CT affiliate license — free for US use). **Grant the deploy SPs READ on the UMLS scopes** (`build_snomed.py` — and the RxNorm build — call `dbutils.secrets.get` as the run identity):
+
+```bash
+databricks secrets put-acl ecdh-dev-umls  a55b6164-c0eb-42cf-a438-7de33c150f4a READ
+databricks secrets put-acl ecdh-prod-umls caff7ad3-d82f-4692-98cc-678dc6807cbd READ
+```
+
 ### 6. GitHub repository configuration
 
 In the `CIDMATH/cidmath-datahub` GitHub repository settings:
