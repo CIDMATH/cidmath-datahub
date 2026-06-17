@@ -107,8 +107,8 @@ this.**
 - [ ] **T0 — Architecture & risk triage (START HERE)**
 - [ ] U1 — run_build seam · [ ] U2 — registration / `_ops` writers · [ ] U3 — TableDQ ·
       [ ] U4 — vocabularies + check_conventions · [ ] U5 — reference pure-logic consistency
-- [ ] I1 — one build end-to-end (→ #1) · [ ] I2 — `_ops` model · [ ] I3 — secret downloads ·
-      [ ] I4 — grants + deploy auth
+- [ ] I1 — one build end-to-end (→ #1) · [ ] I2 — `_ops` model · [x] I3 — secret downloads ·
+      [x] I4 — grants + deploy auth — both done 2026-06-16 (see i4-i3-security-governance-findings.md; no must-fix; secret-ACL-as-code follow-up drafted)
 - [ ] **#1 — DECISION: shared reference-table builder**
 - [ ] S1 — layering · [ ] S2 — naming · [ ] S3 — semantics/history (0007+0034) ·
       [ ] S4 — testing · [ ] S5 — bundle/deploy · [ ] S6 — conformance · [ ] S7 — ADR coherence
