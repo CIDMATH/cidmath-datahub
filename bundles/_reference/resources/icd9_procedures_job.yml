@@ -1,0 +1,64 @@
+# Job that builds the canonical codes.icd9_procedures reference table (ADR 0014).
+#
+# Downloads the CMS ICD-9-CM Version 32 master-descriptions zip over public HTTPS (no
+# credential -- U.S. Government work, public domain), extracts the procedure (SG) long +
+# short title files, joins them by code, and writes ecdh_model_<env>.codes.icd9_procedures
+# keyed by (icd9_procedure_code, edition_year) using snapshot_replace. Flat: code +
+# short/long title + chapter grouping; no classification hierarchy (contrast codes.icd9cm).
+#
+# ICD-9-CM is frozen (Version 32 is the final release, valid through 2015-09-30), so this is
+# a single edition (--edition-year 2015). Thin entrypoint over the run_build seam (ADR 0027);
+# re-pullable, so vintage-reproducible (ADR 0024).
+#
+# Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**) but triggered
+# from the UI. The CMS direct-download slug is JavaScript-rendered; if the default 404s, pass
+# the live link via --source-url (grab it from
+# https://www.cms.gov/medicare/coding-billing/icd-10-codes/icd-9-cm-diagnosis-procedure-codes-abbreviated-and-full-code-titles).
+#
+# See bundles/_reference/src/build_icd9_procedures.py and ADR 0014/0015.
+
+resources:
+  jobs:
+    build_icd9_procedures_reference:
+      name: "[_reference] build_icd9_procedures_reference"
+      description: |
+        Builds codes.icd9_procedures (ICD-9-CM Volume 3 procedure code system, CMS) in the
+        integrated catalog. One row per code per edition; PK (icd9_procedure_code,
+        edition_year). Blocking DQ: uniqueness, non-null long_title, NN[.NN] code format,
+        chapter resolution. Frozen (Version 32); reference table; snapshot_replace.
+
+      tasks:
+        - task_key: build_icd9_procedures
+          spark_python_task:
+            python_file: ../src/build_icd9_procedures.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--edition-year"
+              - "2015"
+              # If the CMS direct-download slug has shifted, add:
+              #   - "--source-url"
+              #   - "https://www.cms.gov/files/zip/<live-slug>.zip"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: reference_env
+
+      environments:
+        - environment_key: reference_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      timeout_seconds: 3600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}
