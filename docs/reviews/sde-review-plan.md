@@ -105,7 +105,7 @@ this.**
 
 ## Progress
 - [ ] **T0 — Architecture & risk triage (START HERE)**
-- [ ] U1 — run_build seam · [ ] U2 — registration / `_ops` writers · [ ] U3 — TableDQ ·
+- [ ] U1 — run_build seam · [ ] U2 — registration / `_ops` writers · [x] U3 — TableDQ (done 2026-06-22, see u3-tabledq-findings.md: query-based, ~unadopted in reference builds; needs in-memory helper → 0036) ·
       [ ] U4 — vocabularies + check_conventions · [ ] U5 — reference pure-logic consistency
 - [x] I1 — one build end-to-end (done 2026-06-16, see i1-build-end-to-end-findings.md) · [x] I2 — `_ops` model (done 2026-06-17, see i2-ops-metadata-model-findings.md) · [x] I3 — secret downloads ·
       [x] I4 — grants + deploy auth — both done 2026-06-16 (see i4-i3-security-governance-findings.md; no must-fix; secret-ACL-as-code follow-up drafted)
