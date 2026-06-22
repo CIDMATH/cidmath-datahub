@@ -1,6 +1,6 @@
 ---
 name: Data Hub task
-about: Any other change — a reference table, view, shared helper, fix, refactor, or doc
+about: Any change that isn't a reference subject or a source bundle — a view, shared helper, fix, refactor, or doc
 title: "<area>: <short imperative summary>"
 labels: ["data-hub"]
 ---
@@ -12,10 +12,9 @@ registration, the run_build seam). This issue gives the task-specific spec;
 point your agent at the standing docs rather than restating them. Delete the
 placeholder text as you fill each section.
 
-Routing: building a REFERENCE table? A simple flat lookup belongs here (single-step build). A
-COMPLEX one — internal hierarchy, multiple grains, or multiple downstream shapes — uses the
-"Complex / layered reference data" template instead (ADR 0037). A source-aligned FACT uses
-"New subject bundle".
+Routing: building a REFERENCE dataset (sourced OR generated)? Use the "Reference subject" template
+(ADR 0037 — raw → [processed] → canonical). A source-aligned FACT uses "New subject bundle". This
+"Data Hub task" template is for everything else — views, shared helpers, fixes, refactors, docs.
 -->
 
 ## Goal
@@ -36,8 +35,7 @@ via run_build where a table is built (ADR 0011/0027). Note any new ADR if a real
 ## Acceptance criteria
 - [ ] Testable logic in `src/cidmath_datahub/`, **unit-tested**; entrypoints thin (ADR 0011).
 - [ ] Controlled-vocabulary values (DQ severity/category, update_semantics, materialization_type) used correctly (CI-enforced, ADR 0016).
-- [ ] If it builds/changes a table: DQ recorded; `_ops` registration updated (`derived_from` where derived); grants correct (ADR 0008/0009/0018).
-- [ ] If it builds a **versioned reference table**: use the shared builder (ADR 0036) — `vintage_snapshot` + atomic write, `ingested_at`, no `_current` view, `TableDQ` (ADR 0034/0029). (Complex / hierarchical reference → the layered-reference template instead, ADR 0037.)
+- [ ] If it builds/changes a table: DQ recorded; `_ops` registration updated (`derived_from` where derived); grants correct (ADR 0008/0009/0018). (A *reference* table belongs on the "Reference subject" template, not here.)
 - [ ] If a decision was made: an ADR added/updated (`docs/adr/NNNN-*.md`) and the index updated.
 - [ ] `ruff format src tests && ruff check src tests` clean (also `ruff` any changed bundle files); `pytest -q` green; bundle changes pass `databricks bundle validate --target dev`.
 

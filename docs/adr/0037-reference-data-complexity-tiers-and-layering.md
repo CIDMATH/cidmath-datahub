@@ -1,136 +1,115 @@
-# 0037 — Reference-data complexity tiers and raw→processed layering
+# 0037 — Reference-data ingestion: uniform source→model path, processed stage by complexity
 
 ## Status
-Proposed. **Amends ADR 0014** (reference-data scope/structure) and **ADR 0030** (ICD hierarchy:
-flat → layered, additive); **extends ADR 0036** (the shared builder gains a multi-stage mode).
-Relates to 0001 (raw/processed/analysis layering), 0003 (source vs integrated catalogs), 0021/0028
-(geography grains + enriched views), 0032 (raw Volume snapshots), 0034 (vintage model). Triggered by
-the observation that the one-shot reference pattern oversimplifies hierarchical / multi-grain
-reference data.
+Proposed. **Amends ADR 0014** (reference now uses the landing→model path, not one-shot-to-model) and
+**ADR 0030** (ICD hierarchy: flat → layered, additive); **extends ADR 0003's framing** (the source
+catalog is the **raw/landing layer**, origin-agnostic — not exclusively externally-sourced);
+**simplifies/extends ADR 0036** (one placement model + an optional processed stage). Relates to 0001
+(layering), 0021/0028 (geography), 0032 (raw Volume snapshots), 0034 (vintage model), 0035
+(`(geoid, geo_vintage)` conformance for augmenting inputs).
 
 ## Context
-ADR 0014 framed reference data as **one-shot builds** that download → parse → normalize → derive
-structure → enrich → write the canonical table directly in the model catalog. That fits *simple
-lookups*, but it oversimplifies genuinely **hierarchical or multi-grain** reference data in two ways:
+Reference builds historically went straight to the **model** catalog in one step. That (a) is a soft
+deviation from ADR 0003 for sourced data (externally-sourced data landing directly in the integrated
+catalog with no raw layer), and (b) oversimplifies hierarchical / multi-grain reference data (one
+script does download + parse + derive-structure + enrich + write; the flat output can't express the
+source's structure).
 
-- The build script does too much in one step (e.g. `build_icd10cm.py` parses, derives the
-  adjacency/ancestry, denormalizes chapter/block, and writes — all at once), which is hard to test,
-  reprocess, or audit stage-by-stage.
-- The resulting **flat** table can't express the source's internal structure: ICD-10-CM has a real
-  chapter → block → category → code hierarchy; geography has state → county → tract → block-group →
-  block grains. Flattening forces these into a schema they don't fit (the concern that motivated
-  this ADR).
+Two refinements emerged while designing this:
+- **RUCA** (a flat rural-urban code that augments geography and must land where geography's processed
+  step can join it same-catalog) showed **placement and workflow are separate axes**: placement
+  should be uniform; only whether there's a *processed* stage is complexity-driven.
+- For **continuity** — one place data lands and one way it's processed — even purely **logic-generated**
+  reference (e.g. `time`) should follow the same path rather than be a model-only special case. Its
+  "raw" is simply the generator's output landing in the raw/landing layer instead of a fetched file.
 
-Source-aligned data already has the right machinery — **raw (as-is) → processed (conformed/enriched)**
-layering (ADR 0001), used by weather. The realization: **complex reference data is just
-source-aligned *dimension* data**, so it should use the same workflow. The single-step path
-(validated by the flat ICD-10-PCS build) stays correct for simple lookups; it just isn't the only
-path.
+So the model is: **one path for all reference data**; the source catalog is the raw/landing layer
+(origin-agnostic); the only thing that varies is whether a *processed* stage sits between raw and the
+promoted canonical.
 
 ## Decision
-1. **Tier reference data by complexity; the tier picks the workflow.**
-   - **Simple → single-step, flat** (ADR 0014 pattern via the ADR 0036 builder): one canonical table,
-     no raw/processed split. E.g. CVX, MVX, a state/FIPS list, race/ethnicity, units, ICD-10-PCS.
-   - **Complex → raw → processed layering**: ingest constituents as-is into raw, derive structure +
-     enrich in processed, promote a canonical/enriched consumer table. E.g. ICD-9/10-CM (hierarchy),
-     geography (multi-grain), LOINC Parts.
+1. **One uniform path for all reference data:** `raw (source catalog) → [processed (source catalog)]
+   → canonical (model catalog)`. Raw lands in `ecdh_<env>.<subject>_raw` — whether **fetched** from an
+   external source *or* **produced by internal logic** (the generator's output is the raw landing).
+   The canonical/enriched table is promoted to `ecdh_model_<env>.<subject>.<table>`. Flow is
+   landing→model only, never model→source. Every layer is vintage-stamped (`vintage_snapshot`, ADR
+   0034); the immutable Volume snapshot (ADR 0032) is retained for revise-in-place *sourced* inputs.
 
-2. **Criterion for "complex"** — any one triggers layering:
-   (a) **internal hierarchy/levels** the consumer will traverse or roll up (ICD chapters/blocks; LOINC
-   Parts); (b) **composes from multiple constituent grains or source files** that are individually
-   meaningful (geography levels; multi-file releases); (c) **one source feeds multiple downstream
-   shapes** (a flat lookup *and* level tables *and* an enriched table). None apply → simple tier.
+2. **The processed stage is optional, gated by complexity** — this is the only thing "tier" decides
+   (not the catalog):
+   - **Simple** (flat, no hierarchy/multi-grain): `raw → promote canonical`. No processed stage.
+     E.g. CVX, MVX, ICD-10-PCS, HCPCS, a state list, RUCA, and most generated tables.
+   - **Complex**: `raw → processed → promote canonical`; the processed stage derives level/grain
+     tables and enriches. E.g. ICD-9/10-CM, geography, LOINC Parts. (A *generated* table can also be
+     complex — e.g. `time` may derive `epi_week` from the generated calendar in a processed step.)
 
-3. **Placement: source catalog for raw + intermediate; model catalog for the canonical.** Complex
-   reference raw + processed-intermediate tables live in the **source catalog** (`ecdh_dev` /
-   `ecdh_prod`) in `<subject>_raw` / `<subject>_processed` schemas — treating complex-reference
-   ingestion as the source-aligned activity it is (ADR 0003) — and the **canonical/enriched** table is
-   promoted to the **model catalog** (`ecdh_model_*`) under its subject schema (`codes` / `geography`),
-   where consumers and conformance expect it. (Same shape as weather; the difference is reference
-   promotes a canonical dimension upward.)
+   **Criterion** for a processed stage — any one: internal **hierarchy/levels**; **multiple
+   constituent grains or files**; **one source → multiple downstream shapes**. None → simple.
 
-   **Placement follows role, not only the dataset's own tier.** The tier (decision 1) picks the
-   *workflow* (single-step vs layered); it does not by itself fix the *catalog*. A **simple** reference
-   dataset that is an **input to a complex subject's processed layer** — an augmenting classification
-   such as **RUCA** (Rural-Urban Commuting Area: a flat 1–10 code per census-tract / ZCTA geoid), SVI,
-   ADI, urbanicity — is still ingested **single-step** (its own tier is simple), but its **raw lands in
-   the consuming subject's `*_raw` (source catalog)** so that subject's processed step joins it as a
-   same-catalog dependency and the source→model flow is preserved (no model→source back-reference). If
-   the classification is also wanted as a direct standalone lookup, promote a canonical to the model
-   catalog (e.g. `geography.us_tract_ruca`); otherwise denormalize it onto the enriched table. Such
-   augmenting inputs are vintage-stamped *and* coded to a geography vintage, so the ADR 0035
-   `(geoid, geo_vintage)` conformance contract applies to their keys.
+3. **Generated reference uses the same path** — no carve-out. Its raw is the logic-produced output
+   landing in `<subject>_raw` (no external artifact, no Volume snapshot needed), then promoted (and
+   processed if complex) exactly like sourced data. This is what makes the source catalog the
+   origin-agnostic raw/landing layer (extending ADR 0003's framing).
 
-4. **Layering *adds*, doesn't replace, the flat consumer table.** The canonical flat/enriched table
-   (e.g. `codes.icd10cm` with denormalized chapter/block) stays the **conformance workhorse** — facts
-   join one code, not five level tables. The per-level/hierarchy tables are *additive* analytical
-   structure derived in processed. So a complex source yields: raw constituents + processed
-   level/derived tables + the promoted canonical table.
+4. **Augmenting inputs land raw in the consuming subject's `*_raw` (the RUCA rule).** A simple
+   reference that augments a complex subject (RUCA / SVI / ADI / urbanicity on geography) lands its
+   raw in *that subject's* `<subject>_raw` so the processed step joins it same-catalog; promote a
+   standalone canonical to the model catalog if it's also wanted as a direct lookup, else denormalize.
+   Coded to a geography vintage → the ADR 0035 `(geoid, geo_vintage)` contract applies to its keys.
 
-5. **Raw = the Volume snapshot *and* a raw table.** Keep the immutable Volume snapshot of the source
-   artifact (ADR 0032) for fidelity/reproducibility, **and** land a raw *table* (parsed but
-   unstructured, 1:1 with source rows) so processed steps build from a queryable raw layer without
-   re-parsing. (Simple tier: Volume snapshot stays optional, as today.)
+5. **Layering *adds*, doesn't replace, the flat canonical.** The canonical flat/enriched table stays
+   the conformance workhorse; processed level/grain tables are additive analytical structure.
 
-6. **The vintage model carries through unchanged (ADR 0034).** Every layer is vintage-stamped with
-   `vintage_snapshot` semantics; the vintage key flows raw → processed → canonical; immutability and
-   the currency vocabulary apply per layer.
-
-7. **The shared builder (ADR 0036) gains a multi-stage mode.** Extend `ReferenceTableSpec` /
-   `build_reference_table` from single-table to a small **pipeline** — a raw-ingest stage plus one or
-   more processed-transform stages plus the promote+register of the canonical table (e.g.
-   `build_reference_pipeline([...])`). Single-step remains the simple-tier path. Each stage still runs
-   through `run_build` and inherits the converged conventions (atomic write, `ingested_at`, `TableDQ`,
-   registration).
-
-8. **Proving grounds — both shapes.**
-   - **Geography block-group + block** proves the **multi-grain composition** shape: raw per-level
-     tables → processed enrichment/joins. Greenfield (no live-table rework) and clears ledger-deferred
-     grains.
-   - **ICD-10-CM relayered** proves the **hierarchy** shape: raw (order file / tabular XML) → processed
-     chapter/block/category level tables → enriched canonical `codes.icd10cm`. This is a rework of a
-     live table — treat as a careful migration (data is reproducible from CDC; drop+rebuild per the
-     established runbook), and it amends ADR 0030's flat-hierarchy decision.
+6. **The shared builder (ADR 0036) is one path with an optional processed stage.**
+   `build_reference_table` always does `raw (source) → [processed (source)] → promote canonical
+   (model) → register → grant`; simple subjects skip the processed stage; generated subjects run a
+   generator in place of a fetch for the raw step. No separate single-step / multi-stage / model-only
+   variants. Conventions inherited by construction: atomic `replaceWhere`, `ingested_at`, no
+   `_current` views, `TableDQ`, schema-declared-once, pure logic (ADR 0011).
 
 ## Alternatives considered
-- **Layer all reference data.** Rejected: ceremony for simple lookups; the single-step path is
-  correct and proven for flat code systems (YAGNI).
-- **Keep all reference one-shot (status quo).** Rejected: forces hierarchical/multi-grain data into
-  flat schemas it doesn't fit, and the build scripts already strain doing everything in one step.
-- **Hierarchy via denormalized columns / views only (0028, 0030).** Partial: denormalization and the
-  enriched views serve the *flat-consumer* need and stay — but they don't give queryable **per-level
-  tables** for rollups/joins. The complex tier adds those; it doesn't discard the views.
-- **Model-catalog-only placement.** Rejected (per decision 3): mixes raw source ingestion into the
-  integrated catalog, against ADR 0003.
+- **Tier *placement* too** (simple → model-only; complex → source). Rejected: RUCA showed placement ≠
+  workflow; two placement models is a needless special case and leaves simple reference deviating
+  from ADR 0003.
+- **Carve out generated reference as model-only** (an earlier version of this ADR). Rejected for
+  **continuity**: a single landing zone + one flow is simpler to teach and build than a
+  sourced-vs-generated fork, and it keeps the builder to one shape. Accepted costs: the source
+  catalog now holds some internally-generated data (the "raw/landing layer" reframing), and for
+  generated/flat tables raw ≈ canonical so the promote is near a copy + an extra table. Bounded at
+  this scale.
+- **Keep all reference one-shot in the model catalog (status quo).** Rejected: deviates from 0003 and
+  oversimplifies complex data.
 
 ## Consequences
-- ADR 0014 is amended (reference is **tiered**, not uniformly one-shot); ADR 0030 is amended for ICD
-  (flat → layered, additive); ADR 0036 is extended (multi-stage builder).
-- New `<subject>_raw` / `<subject>_processed` schemas in the **source** catalog for complex subjects;
-  the canonical table is promoted to the model catalog. Per-layer `_ops` registration + grants apply
-  (raw/processed engineer-only; canonical reader-tier).
-- More tables per complex source (raw + level + canonical) — justified by the analytical capability
-  (hierarchy rollups, multi-grain joins) and the auditability/reprocessability of split stages.
-- **Migration:** ICD-10-CM relayer is a rework (reproducible drop+rebuild); geography BG/block is
-  additive/greenfield. Both are the proving grounds; the simple tier is unchanged.
-- A **decision tree** ("does this source need layering?") belongs in the authoring guide / ADR 0036 so
-  contributors pick the tier consistently. The coverage ledger moves BG/block from *deferred* to
-  *in-progress* when the geography test lands.
-- Risk — **over-tiering**: contributors layering simple sources for symmetry. Mitigation: the
-  criterion (decision 2) is the gate, and the default is simple/single-step unless a complexity
-  trigger is met.
+- **One rule, zero forks:** every reference subject is `raw → [processed if complex] → canonical`;
+  raw always lands in the source/landing catalog, canonical always in the model catalog. No
+  sourced-vs-generated and no simple-vs-complex *placement* branching to get wrong.
+- Reference data conforms to ADR 0003 as reframed (source catalog = raw/landing layer; model catalog =
+  integrated/promoted).
+- **Cost, stated honestly:** for flat or generated tables raw ≈ canonical, so the promote adds a near-
+  copy table + `_ops` row + grants for little transformation. Accepted as the price of one coherent
+  pattern; the source catalog also now contains internally-generated reference (a semantic stretch we
+  take on deliberately).
+- **Migration is a low-stakes backport, not a rebuild:** existing model-only reference — `codes.cvx`,
+  `codes.ndc_*`, `codes.loinc*`, `codes.icd10pcs`, the icd9/10-cm canonicals, **and generated
+  `time`** — gains a `<subject>_raw` landing layer in the source catalog (data reproducible /
+  regenerable; canonicals unaffected). RUCA (being built now via the old methodology) is re-homed
+  under decision 4.
+- **Templates re-simplify** to one sourced/generated reference path (processed stage optional),
+  retiring the "simple→task / complex→layered" routing.
+- Amends 0014; amends 0030; extends 0003's framing and 0036.
 
 ## Implementation notes (non-normative)
-Decision tree for a new reference source:
+Decision tree for a reference subject:
 ```
-Hierarchy/levels consumers traverse OR multiple meaningful grains OR multiple downstream shapes?
-   ├─ no  → SIMPLE: single-step build → flat canonical table (model catalog)
-   └─ yes → COMPLEX: raw tables (source catalog) → processed level/enriched tables
-            → promote canonical/enriched table (model catalog)
+raw → <subject>_raw (source/landing catalog)
+   • fetched (external source) or generated (run the generator) — same step
+Needs a processed stage? (hierarchy / multi-grain / multiple downstream shapes)
+   ├─ no  → promote canonical → model catalog
+   └─ yes → processed (derive levels/grains, enrich) → promote canonical → model catalog
+(Augmenting a complex subject? land raw in THAT subject's <subject>_raw — decision 4.)
 ```
-Sketch of the complex pipeline (one `run_build` per stage; ADR 0036 multi-stage):
-- **raw**: ingest each constituent as-is into `<subject>_raw.<thing>` (+ Volume snapshot), vintage-stamped.
-- **processed**: derive level/hierarchy tables and joins into `<subject>_processed.*`.
-- **canonical**: build/enrich the consumer table into `ecdh_model_*.<subject>.<table>`, register + grant.
-
-First implementations = the two proving grounds above; sequence each as its own PR.
+Proving grounds (both prove the processed-stage path): **geography block-group + block** (multi-grain)
+and **ICD-10-CM relayered** (hierarchy). ICD-10-PCS already exercised the no-processed-stage path; it
++ the other model-only tables (incl. `time`) need only the raw-layer backport. Sequence geography
+first (greenfield — it builds the simplified ADR 0036 builder), then the ICD-10-CM relayer reuses it.
