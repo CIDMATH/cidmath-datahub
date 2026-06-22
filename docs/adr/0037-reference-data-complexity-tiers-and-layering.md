@@ -49,6 +49,18 @@ path.
    where consumers and conformance expect it. (Same shape as weather; the difference is reference
    promotes a canonical dimension upward.)
 
+   **Placement follows role, not only the dataset's own tier.** The tier (decision 1) picks the
+   *workflow* (single-step vs layered); it does not by itself fix the *catalog*. A **simple** reference
+   dataset that is an **input to a complex subject's processed layer** — an augmenting classification
+   such as **RUCA** (Rural-Urban Commuting Area: a flat 1–10 code per census-tract / ZCTA geoid), SVI,
+   ADI, urbanicity — is still ingested **single-step** (its own tier is simple), but its **raw lands in
+   the consuming subject's `*_raw` (source catalog)** so that subject's processed step joins it as a
+   same-catalog dependency and the source→model flow is preserved (no model→source back-reference). If
+   the classification is also wanted as a direct standalone lookup, promote a canonical to the model
+   catalog (e.g. `geography.us_tract_ruca`); otherwise denormalize it onto the enriched table. Such
+   augmenting inputs are vintage-stamped *and* coded to a geography vintage, so the ADR 0035
+   `(geoid, geo_vintage)` conformance contract applies to their keys.
+
 4. **Layering *adds*, doesn't replace, the flat consumer table.** The canonical flat/enriched table
    (e.g. `codes.icd10cm` with denormalized chapter/block) stays the **conformance workhorse** — facts
    join one code, not five level tables. The per-level/hierarchy tables are *additive* analytical
