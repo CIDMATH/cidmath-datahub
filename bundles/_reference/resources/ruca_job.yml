@@ -1,12 +1,17 @@
-# Job that builds the canonical RUCA geography reference tables (ADR 0020, ADR 0038).
+# Job that builds the RUCA geography reference on the source->model path (ADR 0020/0037/0038).
 #
 # Downloads the USDA ERS Rural-Urban Commuting Area (RUCA) files for the requested
 # vintage(s) over public HTTPS (no credential -- U.S. Government work, public domain),
 # reads CSV / XLSX / legacy .xls (xlrd) into row dicts, parses/validates via
-# cidmath_datahub.reference.ruca, and writes two tables in the integrated catalog:
-#   geography.us_ruca_tract  PK (geoid, vintage)   -- attribute extension of us_tract
-#   geography.us_ruca_zip    PK (zip_code, vintage) -- ZIP grain, >= 2010 only
-# using snapshot_replace per vintage (vintages retained; NOT comparable across decades).
+# cidmath_datahub.reference.ruca, lands raw in the SOURCE catalog and promotes the
+# canonical tables to the MODEL catalog (reworked ADR 0037: sourced reference augmenting
+# the geography subject lands in geography_raw, promotes to geography):
+#   ecdh_<env>.geography_raw.us_ruca_tract / .us_ruca_zip   -- fetched-as-is, engineer-only
+#   ecdh_model_<env>.geography.us_ruca_tract (geoid,vintage) -- attribute extension of us_tract
+#   ecdh_model_<env>.geography.us_ruca_zip   (zip_code,vintage) -- ZIP grain, >= 2010 only
+#   ecdh_model_<env>.geography.us_ruca_zcta  -- approximate ZIP->ZCTA bridge view
+# using update_semantics=vintage_snapshot (atomic per-vintage replaceWhere; vintages
+# immutable + NOT comparable across decades; no _current views -- ADR 0034).
 #
 # Thin entrypoint over the run_build seam (ADR 0027). Vintages are re-pullable, so the
 # tables are vintage-reproducible (ADR 0024). primary_ruca (1-10/99) + secondary_ruca
@@ -25,18 +30,22 @@ resources:
     build_ruca_reference:
       name: "[_reference] build_ruca_reference"
       description: |
-        Builds geography.us_ruca_tract and geography.us_ruca_zip (USDA ERS Rural-Urban
-        Commuting Area codes) in the integrated catalog. Tract table joins to us_tract on
-        (geoid, vintage); ZIP table keyed (zip_code, vintage), >= 2010. Blocking DQ: PK
-        uniqueness, geoid 11-digit / zip 5-digit, primary code 1-10/99, secondary code in
-        the published set. Reference tables; snapshot_replace per vintage.
+        Builds the USDA ERS RUCA geography reference: raw landings in
+        ecdh_<env>.geography_raw (engineer-only) promoted to canonical
+        ecdh_model_<env>.geography.us_ruca_tract / us_ruca_zip (reader-tier) plus the
+        us_ruca_zcta bridge view. Tract joins to us_tract on (geoid, vintage); ZIP keyed
+        (zip_code, vintage), >= 2010. Blocking DQ: PK uniqueness, geoid 11-digit / zip
+        5-digit, primary code 1-10/99, secondary code in the published set.
+        update_semantics=vintage_snapshot (atomic per-vintage replaceWhere).
 
       tasks:
         - task_key: build_ruca
           spark_python_task:
             python_file: ../src/build_ruca.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               - "--vintage"
               - "2020"
