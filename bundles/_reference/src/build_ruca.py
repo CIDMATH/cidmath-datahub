@@ -60,6 +60,8 @@ log = get_logger(__name__)
 SCHEMA = "geography"
 TRACT_TABLE = "us_ruca_tract"
 ZIP_TABLE = "us_ruca_zip"
+ZCTA_VIEW = "us_ruca_zcta"  # us_ruca_zip joined to us_zcta (approximate ZIP->ZCTA bridge)
+ZCTA_TABLE = "us_zcta"
 PIPELINE_REF = "bundles/_reference/src/build_ruca.py"
 
 # Per-vintage ERS download URLs (public HTTPS; the ?v= cache-buster shifts on re-post -- override
@@ -332,8 +334,9 @@ def _comment_tables(spark: SparkSession, catalog: str) -> None:
     spark.sql(
         f"COMMENT ON TABLE {catalog}.{SCHEMA}.{ZIP_TABLE} IS "
         f"'USDA ERS RUCA codes by ZIP code (>= 2010 only). primary_ruca (1-10/99) + "
-        f"secondary_ruca (verbatim). ZIP is not a census GEOID and does not join to us_zcta. "
-        f"PK (zip_code, vintage); snapshot_replace. ADR 0020/0038.'"
+        f"secondary_ruca (verbatim). ZIP is not a census GEOID, but zip_code is an approximate FK "
+        f"to us_zcta.geoid (5-digit; join on (zip_code = geoid, vintage)); see the us_ruca_zcta "
+        f"view. PK (zip_code, vintage); snapshot_replace. ADR 0020/0038.'"
     )
 
 
@@ -346,6 +349,44 @@ def _create_current_views(spark: SparkSession, catalog: str) -> None:
             f"SELECT * FROM {full} WHERE vintage = (SELECT MAX(vintage) FROM {full})"
         )
         spark.sql(f"COMMENT ON VIEW {view} IS 'geography.{table} restricted to the latest vintage.'")
+
+
+def _create_zcta_view(spark: SparkSession, catalog: str) -> bool:
+    """Materialize the approximate ZIP->ZCTA join (us_ruca_zip x us_zcta).
+
+    ZCTA is the Census areal approximation of ZIP codes, so the 5-digit zip_code is joined to
+    us_zcta.geoid on (zip_code = geoid, vintage). INNER join: only ZIP rows with a matching ZCTA
+    appear (point / PO-box / newer ZIPs drop out). Depends on geography.us_zcta existing (the
+    geography build runs first); if absent, skip with a WARN rather than fail. Returns whether the
+    view was created (so registration can match).
+    """
+    zcta_full = f"{catalog}.{SCHEMA}.{ZCTA_TABLE}"
+    zip_full = f"{catalog}.{SCHEMA}.{ZIP_TABLE}"
+    if not (spark.catalog.tableExists(zcta_full) and spark.catalog.tableExists(zip_full)):
+        log.warning(
+            "Skipping us_ruca_zcta view -- us_zcta or us_ruca_zip missing (build geography first)",
+            extra={"zcta_table": zcta_full, "zip_table": zip_full},
+        )
+        return False
+    view = f"{catalog}.{SCHEMA}.{ZCTA_VIEW}"
+    spark.sql(
+        f"CREATE OR REPLACE VIEW {view} AS "
+        f"SELECT r.*, "
+        f"z.gisjoin AS zcta_gisjoin, "
+        f"z.centroid_geo_lon AS zcta_centroid_geo_lon, "
+        f"z.centroid_geo_lat AS zcta_centroid_geo_lat, "
+        f"z.area_land_sqm AS zcta_area_land_sqm "
+        f"FROM {zip_full} r "
+        f"JOIN {zcta_full} z ON r.zip_code = z.geoid AND r.vintage = z.vintage"
+    )
+    spark.sql(
+        f"COMMENT ON VIEW {view} IS "
+        f"'us_ruca_zip joined to us_zcta on (zip_code = geoid, vintage) -- the approximate "
+        f"ZIP->ZCTA bridge (ZCTA = Census ZIP approximation), with ZCTA geometry attached. INNER "
+        f"join: ZIPs without a matching ZCTA (point/PO-box/newer) are omitted. Not exact identity. "
+        f"ADR 0038.'"
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -362,9 +403,12 @@ _TRACT_KNOWN_LIMITATIONS = (
 )
 _ZIP_KNOWN_LIMITATIONS = (
     "Primary + secondary RUCA codes (verbatim) + ZIP labels (state, zip_code_type, po_name) only. "
-    "ZIP codes are USPS routes, not census GEOIDs -- this table does NOT join to us_zcta. ZIP "
-    "files exist only from the 2010 vintage on. RUCA codes are transferred from tracts to ZIPs by "
-    "ERS (population-share for area ZIPs; containing-tract for point ZIPs)."
+    "ZIP codes are USPS routes, not census GEOIDs, but ZCTA is the Census areal approximation of "
+    "ZIP codes, so zip_code joins approximately to us_zcta.geoid on (zip_code = geoid, vintage) -- "
+    "see the us_ruca_zcta view. The match is not 1:1 (point/PO-box and newer ZIPs have no ZCTA; "
+    "ZCTA boundaries lag ZIP changes), so it is approximate enrichment, not identity. ZIP files "
+    "exist only from the 2010 vintage on. RUCA codes are transferred from tracts to ZIPs by ERS "
+    "(population-share for area ZIPs; containing-tract for point ZIPs)."
 )
 
 
@@ -474,6 +518,42 @@ def _register(spark: SparkSession, catalog: str, vintages: list[int], *, create_
                 ),
             )
 
+        # Register the ZIP->ZCTA bridge view only when it was actually created (same guard as
+        # _create_zcta_view), so we don't catalog a view that geography hasn't enabled yet.
+        if spark.catalog.tableExists(f"{g}.{ZCTA_TABLE}") and spark.catalog.tableExists(
+            f"{g}.{ZIP_TABLE}"
+        ):
+            registration.register_dataset(
+                spark,
+                catalog,
+                registration.DatasetCatalogEntry(
+                    full_table_name=f"{g}.{ZCTA_VIEW}",
+                    layer="reference",
+                    description=(
+                        "us_ruca_zip joined to us_zcta on (zip_code = geoid, vintage) -- the "
+                        "approximate ZIP->ZCTA bridge with ZCTA geometry attached. INNER join; "
+                        "ZIPs without a matching ZCTA are omitted. Not exact identity."
+                    ),
+                    public_health_relevance=(
+                        "ZCTA-keyed RUCA classification for joining to census-geography (ZCTA) data "
+                        "without hand-writing the approximate ZIP->ZCTA bridge."
+                    ),
+                    spatial_resolution="us_zcta",
+                    known_limitations=(
+                        "Approximate ZIP->ZCTA match (not 1:1); point/PO-box and newer ZIPs absent."
+                    ),
+                    derived_from=[f"{g}.{ZIP_TABLE}", f"{g}.{ZCTA_TABLE}"],
+                    **{**common, "is_hosted": False},
+                ),
+                registration.DatasetEngineeringEntry(
+                    full_table_name=f"{g}.{ZCTA_VIEW}",
+                    update_semantics="full_refresh",
+                    materialization_type="view",
+                    cluster_columns=None,
+                    pipeline_reference=PIPELINE_REF,
+                ),
+            )
+
 
 # ---------------------------------------------------------------------------
 # Orchestration
@@ -543,6 +623,7 @@ def run(
         _comment_tables(ctx.spark, catalog)
         if create_views:
             _create_current_views(ctx.spark, catalog)
+            _create_zcta_view(ctx.spark, catalog)
 
     def _grant(spark: SparkSession) -> None:
         # Reference data is canonical and pipeline-owned: both groups get reader-tier (ADR 0018).

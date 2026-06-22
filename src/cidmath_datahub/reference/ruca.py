@@ -20,9 +20,13 @@ How RUCA differs from the entity geography tables (so it is not mis-modeled):
   same 11-digit tract GEOID + decennial ``vintage`` as ``geography.us_tract`` -- so it is an
   attribute extension that joins ``USING (geoid, vintage)``. ``state_geoid``/``county_geoid`` are
   derived from the GEOID exactly as in :mod:`cidmath_datahub.reference.geography`.
-* **ZIP grain is not a census GEOID.** ``us_ruca_zip`` keys on ``(zip_code, vintage)``. ZIP codes
-  are USPS routes, do not nest in census geography, and do **not** join to ``us_zcta`` -- hence a
-  descriptively named key, not ``geoid``.
+* **ZIP grain is not a census GEOID, but joins to ZCTA approximately.** ``us_ruca_zip`` keys on
+  ``(zip_code, vintage)``. ZIP codes are USPS routes, not census units -- hence a descriptively
+  named key, not ``geoid``. However ZCTA is the Census Bureau's areal approximation of ZIP codes,
+  so the 5-digit ``zip_code`` is treated as an **approximate** foreign key to
+  ``geography.us_zcta.geoid`` (join on ``(zip_code = geoid, vintage)``). The match is not 1:1 --
+  point / PO-box ZIPs and newer ZIPs have no ZCTA, and ZCTA boundaries lag ZIP changes -- so the
+  join is for approximate geographic enrichment, not exact identity (ADR 0038).
 * **Vintages are not comparable across decades.** Tract boundaries and the urban-core methodology
   change each decade, so ``vintage`` is part of the key and nothing assumes a tract persists across
   decades. ZIP files exist only from 2010 on.

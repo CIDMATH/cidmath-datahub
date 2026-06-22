@@ -10,6 +10,14 @@ adopt the still-proposed ADR 0034 `vintage_snapshot` semantics or ADR 0036 share
 unmerged, so this build hand-rolls the skeleton like the current `codes.*` builds and backports when
 those land.
 
+Per **ADR 0037**'s complexity tiers, RUCA is the **simple tier**: a single-step, flat build writing
+canonical tables directly to the model catalog (no `_raw`/`_processed` layering). None of 0037's
+complexity triggers apply — there is no internal hierarchy a consumer traverses (primary/secondary
+are two flat coded attributes, not a rolled-up tree), and the tract and ZIP grains are independent
+parallel lookups rather than constituent levels composed into one canonical table. Two flat tables
+from one source is the same simple-tier shape as `codes.ndc_product`/`ndc_package` and
+`codes.loinc`/`loinc_map_to`, and exactly the flat ICD-10-PCS pattern 0037 cites as validated.
+
 ## Context
 The USDA Economic Research Service (ERS) Rural-Urban Commuting Area (RUCA) codes are a sub-county
 rural/urban classification keyed to census tracts (and, from 2010 on, adapted to ZIP codes). They
@@ -37,8 +45,16 @@ were first published in 2010; Puerto Rico was added in 2010 and the other territ
    exactly like `us_tract` (ADR 0020), and carries the source-provided `primary_ruca`,
    `secondary_ruca`, `population`, `land_area_sqmi`, `population_density`, plus `state`/`county`
    labels. The ZIP table keys on **`zip_code`** (5-digit) + `vintage` — a ZIP is **not** a census
-   GEOID and does **not** join to `us_zcta`, so it is named descriptively and carries `state`,
-   `zip_code_type`, `po_name`, `primary_ruca`, `secondary_ruca`.
+   GEOID, so it is named descriptively (not `geoid`) and carries `state`, `zip_code_type`,
+   `po_name`, `primary_ruca`, `secondary_ruca`. **ZCTA is the Census Bureau's areal
+   approximation of ZIP codes**, so `zip_code` is treated as an **approximate foreign key** to
+   `geography.us_zcta.geoid` — both are 5-digit, joined on `(zip_code = geoid, vintage)`. The
+   match is intentionally not 1:1 (point / PO-box ZIPs and new ZIPs have no ZCTA; ZCTA
+   boundaries lag ZIP changes), so it is for approximate geographic enrichment, not identity. A
+   convenience view **`geography.us_ruca_zcta`** materializes this join (inner join → the ZIP
+   rows that have a matching ZCTA), so consumers get a ZCTA-keyed, geometry-enriched RUCA without
+   hand-writing the bridge. We do **not** rename the key to `zcta` (that would assert a false
+   identity) nor add a stored `zcta` FK column (the join is code-equality, computed on read).
 
 2. **Versioned per RUCA vintage, `snapshot_replace` per vintage (ADR 0024).** `vintage` is the
    decennial RUCA year (`1990`/`2000`/`2010`/`2020`), aligning with the `geography` `vintage`
@@ -85,6 +101,11 @@ were first published in 2010; Puerto Rico was added in 2010 and the other territ
   tests; `xlrd` is added to the job environment for the legacy `.xls` vintages.
 - `us_ruca_tract` joins cleanly to `us_tract` on `(geoid, vintage)`, giving any tract-coded dataset a
   rural/urban classification by the same key it already uses for geography.
+- `us_ruca_zip` joins approximately to `us_zcta` on `(zip_code = geoid, vintage)`; the
+  `geography.us_ruca_zcta` view exposes that bridge with ZCTA geometry attached. ZIPs without a
+  matching ZCTA (point / PO-box / newer ZIPs) are absent from the view but remain in the base table.
+  The view depends on `us_zcta` existing (geography build runs first); the build guards on its
+  presence and logs a skip rather than failing if it is absent.
 - Cross-decade comparisons are intentionally unsupported: `vintage` is part of the key and no
   cross-vintage referential check assumes a tract persists across decades.
 - The 1990 population/land-area errata (ERS, 12/9/2025) is handled by capturing the source URL `?v=`
