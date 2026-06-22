@@ -151,9 +151,13 @@ def _read_rows(raw: bytes, filename: str, *, sheet: Any = 0) -> list[dict[str, A
 
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
-        df = pd.read_csv(io.BytesIO(raw), dtype=str, keep_default_na=False)
+        # ERS CSVs are Latin-1 / Windows-1252, not UTF-8 (place names carry bytes like 0xF1 = n-tilde,
+        # e.g. "Canon", Puerto Rico names). latin-1 maps every byte, so the read never aborts -- the
+        # same encoding the ICD order-file modules use.
+        df = pd.read_csv(io.BytesIO(raw), dtype=str, keep_default_na=False, encoding="latin-1")
     elif suffix in (".xlsx", ".xls"):
-        # engine auto-selected by pandas: openpyxl for .xlsx, xlrd for legacy .xls.
+        # engine auto-selected by pandas: openpyxl for .xlsx, xlrd for legacy .xls (encoding is
+        # handled inside the workbook format, so no encoding arg needed here).
         df = pd.read_excel(io.BytesIO(raw), sheet_name=sheet, dtype=str, keep_default_na=False)
     else:
         raise ValueError(f"Unsupported RUCA file type {suffix!r} for {filename!r}")
