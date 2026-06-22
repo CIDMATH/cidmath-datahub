@@ -62,6 +62,11 @@ class DatasetCatalogEntry:
     external_maintainer_name: str
     is_hosted: bool
     owner: str = "cidmath-data-team"
+    # Originating authority (ADR 0006) — who defines/produces the data (e.g. "census",
+    # "cdc") — distinct from source_provider_code, the vendor/distributor it is pulled
+    # from (e.g. "ipums_nhgis", "cmu_delphi"). May equal the provider when the origin
+    # distributes directly. Nullable: existing builds leave it None until backfilled.
+    source_origin_code: str | None = None
     # Optional fields populated by sourced + temporal subjects (e.g. weather,
     # ADR 0025): a data-dictionary/readme URL and the temporal coverage/grain.
     # Spatial-only reference tables (geography) leave them None. Surfaced via
@@ -137,6 +142,7 @@ def register_dataset(
             T.StructField("spatial_resolution", T.StringType()),
             T.StructField("spatial_coverage", T.StringType()),
             T.StructField("source_provider_code", T.StringType()),
+            T.StructField("source_origin_code", T.StringType()),
             T.StructField("source_url", T.StringType()),
             T.StructField("source_documentation_url", T.StringType()),
             T.StructField("license", T.StringType()),
@@ -164,6 +170,7 @@ def register_dataset(
             catalog_entry.spatial_resolution,
             catalog_entry.spatial_coverage,
             catalog_entry.source_provider_code,
+            catalog_entry.source_origin_code,
             catalog_entry.source_url,
             catalog_entry.source_documentation_url,
             catalog_entry.license,
@@ -192,7 +199,8 @@ def register_dataset(
             subject = s.subject, layer = s.layer, description = s.description,
             public_health_relevance = s.public_health_relevance,
             spatial_resolution = s.spatial_resolution, spatial_coverage = s.spatial_coverage,
-            source_provider_code = s.source_provider_code, source_url = s.source_url,
+            source_provider_code = s.source_provider_code,
+            source_origin_code = s.source_origin_code, source_url = s.source_url,
             source_documentation_url = s.source_documentation_url, license = s.license,
             dua_required = s.dua_required, dua_reference = s.dua_reference,
             access_tier = s.access_tier, external_maintainer_name = s.external_maintainer_name,
@@ -205,14 +213,16 @@ def register_dataset(
             last_validated = CURRENT_DATE()
         WHEN NOT MATCHED THEN INSERT
             (full_table_name, subject, layer, description, public_health_relevance,
-             spatial_resolution, spatial_coverage, source_provider_code, source_url,
+             spatial_resolution, spatial_coverage, source_provider_code, source_origin_code,
+             source_url,
              source_documentation_url, license, dua_required, dua_reference, access_tier,
              external_maintainer_name, is_hosted, owner, source_data_dictionary_url,
              temporal_coverage_start, temporal_coverage_end, temporal_resolution,
              known_limitations, derived_from, last_validated)
             VALUES
             (s.full_table_name, s.subject, s.layer, s.description, s.public_health_relevance,
-             s.spatial_resolution, s.spatial_coverage, s.source_provider_code, s.source_url,
+             s.spatial_resolution, s.spatial_coverage, s.source_provider_code, s.source_origin_code,
+             s.source_url,
              s.source_documentation_url, s.license, s.dua_required, s.dua_reference, s.access_tier,
              s.external_maintainer_name, s.is_hosted, s.owner, s.source_data_dictionary_url,
              s.temporal_coverage_start, s.temporal_coverage_end, s.temporal_resolution,

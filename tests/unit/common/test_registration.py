@@ -78,6 +78,12 @@ class TestDatasetCatalogEntry:
     def test_owner_overridable(self):
         assert _catalog_entry(owner="someone-else").owner == "someone-else"
 
+    def test_source_origin_code_default_and_override(self):
+        # Originating authority, distinct from source_provider_code (the vendor/
+        # distributor); nullable until backfilled (ADR 0006/0008).
+        assert _catalog_entry().source_origin_code is None
+        assert _catalog_entry(source_origin_code="census").source_origin_code == "census"
+
     def test_temporal_and_doc_fields_default_none(self):
         # Spatial-only reference tables (geography) leave these unset (ADR 0025).
         e = _catalog_entry()
