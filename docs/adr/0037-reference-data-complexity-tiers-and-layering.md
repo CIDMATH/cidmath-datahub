@@ -84,6 +84,17 @@ promoted canonical.
    enriched row), and accept the bounded denormalization cost — only revisit if a measured cost
    actually bites.
 
+8. **Validation: validate the staging, gate the promote — one pattern at every size.** DQ runs as a
+   **query-based** check over the raw/processed staging (engineer-only), and the **promote to the
+   canonical is gated** on it passing — so the consumer-facing canonical never lands bad data, at any
+   scale (a 290-row code set and an ~8M-row block table use the same flow). The layering's staging
+   *is* the "never land a bad table" mechanism the in-memory pre-write pattern provided, now uniform —
+   this **supersedes the reference-vs-conformance validation split of ADR 0027**. **In-memory
+   validation** (pure checks on parsed records before the raw write) is a permitted **optional
+   fast-path for genuinely small data** — not a separate architectural pattern, and it needs no
+   parallel DQ helper; `TableDQ` (query-based) is the single DQ family. The pure parse + check *logic*
+   stays pure and unit-tested (ADR 0011); only *where* it executes (driver vs Spark) varies by scale.
+
 ## Alternatives considered
 - **Tier *placement* too** (simple → model-only; complex → source). Rejected: RUCA showed placement ≠
   workflow; two placement models is a needless special case and leaves simple reference deviating

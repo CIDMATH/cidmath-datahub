@@ -1,7 +1,13 @@
 # 0027 — Bundle authoring and pipeline standardization
 
 ## Status
-Accepted — 2026-05-31
+Accepted — 2026-05-31. **Amended by ADR 0037 (2026-06-22):** the two validation patterns this ADR's
+`run_build` docstring contrasts (in-memory *validate-then-write* for reference vs *write-then-query*
+for conformance) are **unified** — all builds use one **gated write-then-validate**: validate the
+raw/processed staging (query-based, `TableDQ`) and gate the promote to the canonical, which gives the
+"never land a bad table" safety at any scale (incl. large reference like census block). In-memory
+validation is now an optional fast-path for tiny data, not a co-equal pattern. The `run_build` seam
+stays validation-agnostic; only the recommended default changed. See ADR 0037 decision 8.
 
 ## Context
 Two layers of standardization are already strong: **conventions** (CLAUDE.md + ADRs 0001–0026 cover catalogs, schemas, naming, update semantics, DQ, grants, discovery, job-vs-LDP) and **shared library primitives** (`common/`: `dq.DQRecorder`, `registration.register_dataset`, `grants`, `logging`, `vocabularies`; `reference/` domain logic). The ADR 0011 rule — thin entrypoints in `bundles/<x>/src/`, testable logic in `src/cidmath_datahub/` — is followed.

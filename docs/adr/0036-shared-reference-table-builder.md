@@ -99,6 +99,15 @@ def build_reference_table(specs: list[ReferenceTableSpec], catalog, groups, ...)
 Build the builder and prove it on ICD-10-PCS in one PR; do not backport existing builds in the same
 PR.
 
+### DQ + validation (from the U3 review — `docs/reviews/u3-tabledq-findings.md`)
+The builder owns DQ for reference builds, and uses **one** mode (ADR 0037 decision 8): query-based
+checks (`TableDQ`) over the raw/processed **staging**, **gating the promote** to the canonical so the
+canonical never lands bad data — at any scale (including census block). **No parallel in-memory DQ
+helper is built** (U3's original suggestion is withdrawn); in-memory checks on parsed records stay a
+permitted optional fast-path for tiny sources, not a separate mode. Extend `TableDQ` with the missing
+recurring check types U3 found (range / freshness / controlled-vocab membership) and fix the `fk`
+metric grain (distinct key values vs rows).
+
 ### Registration gaps to close (from the I2 review — `docs/reviews/i2-ops-metadata-model-findings.md`)
 Because the builder owns the registration scaffolding, it is the single place to fix the `_ops`
 writer⊂schema gaps the I2 review found — close them here rather than as N per-build edits:
