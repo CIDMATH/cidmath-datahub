@@ -33,7 +33,10 @@ CI (confirming I2 #4).
    reclass — are blocked until `VINTAGE_SNAPSHOT = "vintage_snapshot"` is added** to the enum (a
    one-line, additive change; the mirror set + CI pick it up automatically). Good news: this proves
    CI is doing its job (it would correctly block a premature usage); it just needs the enum updated
-   first. **This is the unblocking first commit of the builder work.**
+   first. **This is the unblocking first commit of the builder work.** — **RESOLVED 2026-06-22:**
+   `VINTAGE_SNAPSHOT = "vintage_snapshot"` added to `UpdateSemantics`; the mirror set, the CI scan,
+   and `DatasetEngineeringEntry` validation all derive from the enum, so it propagated automatically.
+   0034 / 0037 / the proving grounds / the RUCA migration are unblocked.
 
 ### SHOULD-FIX
 2. **`layer` / `access_tier` / `subject` / `source_provider_code` / `spatial_resolution` are
