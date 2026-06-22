@@ -1,7 +1,12 @@
 # 0028 — Geography hierarchical-filter views
 
 ## Status
-Accepted — 2026-05-31
+Accepted — 2026-05-31. **Amended by ADR 0037 (2026-06-22):** for the *serving form*, the enriched
+data is now the **promoted model-catalog canonical** — parent attributes denormalized onto the child
+dimension, computed in the processed stage — **not a view over a lean base**. So the `*_enriched`
+views are retired in favour of one enriched canonical per level. 0028's intent (filter children by a
+readable parent; parent keys denormalized onto children) stands; only the lean-base-plus-view
+*mechanism* is superseded. See ADR 0037 decision 7.
 
 ## Context
 A very common end-user need is filtering a census geography by a *higher* level: "all counties in Georgia", "all census tracts in Fulton County, GA". The `geography` reference already supports this **by parent code** with no join, because the parent geoids are denormalized onto the child tables (ADR 0020): `us_county` carries `state_geoid`, and `us_tract` carries both `state_geoid` and `county_geoid`. So `us_county WHERE state_geoid = '13'` and `us_tract WHERE county_geoid = '13121'` are single-table filters today.

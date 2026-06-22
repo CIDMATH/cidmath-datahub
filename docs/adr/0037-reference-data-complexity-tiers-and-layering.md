@@ -67,6 +67,23 @@ promoted canonical.
    variants. Conventions inherited by construction: atomic `replaceWhere`, `ingested_at`, no
    `_current` views, `TableDQ`, schema-declared-once, pure logic (ADR 0011).
 
+7. **Serving form — the model-catalog canonical is the *enriched* (denormalized) dimension; the
+   normalized levels stay in processed** ("normalize in the build layer, serve a star"). For a
+   reference *dimension* with internal hierarchy or parents, the processed stage holds the normalized
+   per-level tables (engineer-only), and the **one** table promoted to the model catalog is the
+   enriched form: child rows carry the parent **keys *and* denormalized parent attributes** (labels).
+   There is **no separate lean-base + `_enriched` view** (this amends ADR 0028) — matching how
+   `codes.icd10cm` already denormalizes chapter/block onto the code row (ADR 0030). Keep the parent
+   **keys** on the canonical so it stays joinable/conformant and re-derivable. **Bounds:** (a) this is
+   a *dimension* pattern — **facts stay thin and FK to dimensions**, never denormalize dimension
+   attributes onto fact rows; (b) **enrich at *every* grain, including census block** — block rows
+   should carry the full parent chain (block group, tract, county, state) keys + labels, because
+   carrying that geographic context is the point. Large grains (block ~8M rows) are a
+   **storage/clustering *awareness*** flag, **not** a reason to skip enrichment: cluster well (e.g. by
+   `(geo_level, vintage)` / parent geoid), keep geometry in the companion `boundary` table (off the
+   enriched row), and accept the bounded denormalization cost — only revisit if a measured cost
+   actually bites.
+
 ## Alternatives considered
 - **Tier *placement* too** (simple → model-only; complex → source). Rejected: RUCA showed placement ≠
   workflow; two placement models is a needless special case and leaves simple reference deviating
