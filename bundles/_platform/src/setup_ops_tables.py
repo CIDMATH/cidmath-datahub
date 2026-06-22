@@ -338,6 +338,32 @@ LEFT JOIN (
 # requires MANAGE/ownership that the deploy SP does not have.
 
 
+# Idempotent additive column migrations for _ops tables. CREATE TABLE IF NOT EXISTS
+# does NOT add columns to a table that already exists, so a column added to a DDL
+# above must also be back-filled here for catalogs created before the change. Each
+# entry is `table -> {column: "TYPE [COMMENT '...'] [AFTER other]"}`; applied only
+# when the column is absent, so it is safe to re-run.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "dataset_catalog": {
+        "source_origin_code": (
+            "STRING COMMENT 'Originating authority (ADR 0006), e.g. census, cdc; "
+            "distinct from provider.' AFTER source_provider_code"
+        ),
+    },
+}
+
+
+def _apply_added_columns(spark: SparkSession, catalog: str) -> None:
+    """Add any missing additive columns to existing _ops tables (idempotent)."""
+    for table, columns in _ADDED_COLUMNS.items():
+        full = f"{catalog}._ops.{table}"
+        existing = {row["col_name"] for row in spark.sql(f"DESCRIBE TABLE {full}").collect()}
+        for column, spec in columns.items():
+            if column not in existing:
+                log.info("Adding missing column", extra={"table": full, "column": column})
+                spark.sql(f"ALTER TABLE {full} ADD COLUMNS ({column} {spec})")
+
+
 def run(
     catalog: str,
     scope: Literal["source", "model"],
@@ -375,6 +401,9 @@ def run(
         full = f"{catalog}._ops.{name}"
         log.info("Creating table", extra={"table": full})
         spark.sql(ddl.format(catalog=catalog))
+
+    # Back-fill additive columns on tables that pre-date a DDL change (idempotent).
+    _apply_added_columns(spark, catalog)
 
     for name, ddl in VIEWS:
         full = f"{catalog}._ops.{name}"
