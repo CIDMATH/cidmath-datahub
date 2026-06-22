@@ -195,6 +195,17 @@ class TestParseZipRows:
         with pytest.raises(ValueError):
             ruca.parse_zip_rows([{"State": "AK", "PrimaryRUCA": "1", "SecondaryRUCA": "1.0"}], 2020)
 
+    def test_na_zip_row_skipped(self):
+        na = {
+            "ZIPCode": "N/A",
+            "State": "",
+            "ZIPCodeType": "",
+            "POName": "",
+            "PrimaryRUCA": "",
+            "SecondaryRUCA": "",
+        }
+        assert len(ruca.parse_zip_rows([*ZIP_ROWS, na], 2020)) == 2
+
 
 @pytest.mark.unit
 class TestParseTractRows:
@@ -225,6 +236,19 @@ class TestParseTractRows:
         recs = ruca.parse_tract_rows(TRACT_ROWS, 2020)
         assert recs[2].geoid == "02016000100"
         assert recs[2].state_geoid == "02"
+
+    def test_na_geoid_row_skipped(self):
+        # ERS files carry footer / unassigned rows with a sentinel FIPS ("N/A"); skip, don't crash.
+        rows = [*TRACT_ROWS, _tract_row("N/A", "", "", "", "", "", "", "")]
+        recs = ruca.parse_tract_rows(rows, 2020)
+        assert len(recs) == 3
+
+    def test_malformed_geoid_kept_for_dq(self):
+        # A non-sentinel but malformed GEOID is kept (not dropped) so blocking DQ flags it.
+        rows = [_tract_row("13ABC", "GA", "X", "1", "1.0", "1", "1", "1")]
+        recs = ruca.parse_tract_rows(rows, 2020)
+        assert len(recs) == 1
+        assert ruca.find_bad_tract_geoids(recs) == ["13ABC"]
 
 
 @pytest.mark.unit

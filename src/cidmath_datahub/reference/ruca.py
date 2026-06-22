@@ -407,6 +407,27 @@ def _label(value: Any) -> str | None:
     return s or None
 
 
+def _is_nullish(value: str) -> bool:
+    """True for blank or sentinel-null id tokens (``""``, ``N/A``, ``NA``, ...).
+
+    ERS files carry trailing footer/notes rows and unassigned rows whose identifier is a sentinel
+    rather than a code; these are not data and are skipped during parse.
+    """
+    return value.lower() in _NULLISH
+
+
+def _pad_numeric_id(value: str, width: int) -> str:
+    """Zero-pad a numeric identifier to ``width``; otherwise return it cleaned, unchanged.
+
+    Unlike :func:`normalize_geoid`, this never raises -- a malformed (non-numeric / over-long)
+    identifier is passed through so the batch DQ check (:func:`find_bad_tract_geoids` /
+    :func:`find_bad_zip_codes`) records and fails on it, rather than the parser aborting mid-file
+    (ADR 0009). Callers skip sentinel-null ids first via :func:`_is_nullish`.
+    """
+    s = value.strip()
+    return s.zfill(width) if (s.isdigit() and len(s) <= width) else s
+
+
 # ---------------------------------------------------------------------------
 # Parsing (row dicts in -> records; the entrypoint reads CSV/XLSX into row dicts)
 # ---------------------------------------------------------------------------
@@ -445,9 +466,9 @@ def parse_tract_rows(rows: Iterable[dict[str, Any]], vintage: int) -> list[RucaT
     records: list[RucaTractRecord] = []
     for row in rows:
         raw_geoid = _clean(row.get(cols["geoid"]))
-        if not raw_geoid:
-            continue  # blank trailing row
-        geoid = normalize_tract_geoid(raw_geoid)
+        if _is_nullish(raw_geoid):
+            continue  # blank trailing / footer / unassigned row (e.g. "N/A")
+        geoid = _pad_numeric_id(raw_geoid, TRACT_GEOID_WIDTH)
         records.append(
             RucaTractRecord(
                 geoid=geoid,
@@ -501,11 +522,11 @@ def parse_zip_rows(rows: Iterable[dict[str, Any]], vintage: int) -> list[RucaZip
     records: list[RucaZipRecord] = []
     for row in rows:
         raw_zip = _clean(row.get(cols["zip_code"]))
-        if not raw_zip:
-            continue
+        if _is_nullish(raw_zip):
+            continue  # blank trailing / footer row
         records.append(
             RucaZipRecord(
-                zip_code=normalize_zip_code(raw_zip),
+                zip_code=_pad_numeric_id(raw_zip, ZIP_CODE_WIDTH),
                 vintage=vintage,
                 state=_label(row.get(cols["state"])) if cols["state"] else None,
                 zip_code_type=(
