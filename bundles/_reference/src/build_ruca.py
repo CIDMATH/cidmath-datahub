@@ -592,10 +592,14 @@ def run(
         t_url = tract_url or TRACT_URLS[vintage]
         log.info("Downloading RUCA tract file", extra={"vintage": vintage, "url": t_url})
         raw, t_file = _download(t_url)
-        t_recs = ruca.parse_tract_rows(_read_rows(raw, t_file, sheet=sheet), vintage)
+        t_rows = _read_rows(raw, t_file, sheet=sheet)
+        t_recs = ruca.parse_tract_rows(t_rows, vintage)
         tract_records.extend(t_recs)
         tract_rows_out.extend(_tract_row_dict(r, t_file, now) for r in t_recs)
-        log.info("Parsed RUCA tracts", extra={"vintage": vintage, "rows": len(t_recs)})
+        log.info(
+            "Parsed RUCA tracts",
+            extra={"vintage": vintage, "source_rows": len(t_rows), "rows": len(t_recs)},
+        )
 
         z_url = zip_url or ZIP_URLS.get(vintage)
         if z_url is None:
@@ -603,10 +607,14 @@ def run(
             continue
         log.info("Downloading RUCA ZIP file", extra={"vintage": vintage, "url": z_url})
         raw, z_file = _download(z_url)
-        z_recs = ruca.parse_zip_rows(_read_rows(raw, z_file, sheet=sheet), vintage)
+        z_rows = _read_rows(raw, z_file, sheet=sheet)
+        z_recs = ruca.parse_zip_rows(z_rows, vintage)
         zip_records.extend(z_recs)
         zip_rows_out.extend(_zip_row_dict(r, z_file, now) for r in z_recs)
-        log.info("Parsed RUCA ZIPs", extra={"vintage": vintage, "rows": len(z_recs)})
+        log.info(
+            "Parsed RUCA ZIPs",
+            extra={"vintage": vintage, "source_rows": len(z_rows), "rows": len(z_recs)},
+        )
 
     def _ensure(spark: SparkSession) -> None:
         spark.sql(
