@@ -8,7 +8,8 @@ reproducibility), 0006 (`ingested_at` audit column). Sits in the `geography` sch
 (public HTTPS download, pure parser + thin entrypoint, `snapshot_replace` per vintage). Does **not**
 adopt the still-proposed ADR 0034 `vintage_snapshot` semantics or ADR 0036 shared builder — both are
 unmerged, so this build hand-rolls the skeleton like the current `codes.*` builds and backports when
-those land.
+those land. **(Update 2026-06-22: 0034/0035/0036/0037 have since merged, and 0037 was reworked — see
+"Reconciliation" at the end for the realignment.)**
 
 Per **ADR 0037**'s complexity tiers, RUCA is the **simple tier**: a single-step, flat build writing
 canonical tables directly to the model catalog (no `_raw`/`_processed` layering). None of 0037's
@@ -17,6 +18,9 @@ are two flat coded attributes, not a rolled-up tree), and the tract and ZIP grai
 parallel lookups rather than constituent levels composed into one canonical table. Two flat tables
 from one source is the same simple-tier shape as `codes.ndc_product`/`ndc_package` and
 `codes.loinc`/`loinc_map_to`, and exactly the flat ICD-10-PCS pattern 0037 cites as validated.
+**(Update: the reworked 0037 keeps RUCA "simple" = no processed stage, but places even simple
+*sourced* reference on the source-path — raw in `geography_raw`, canonical promoted to model — not
+straight to the model catalog. See "Reconciliation".)**
 
 ## Context
 The USDA Economic Research Service (ERS) Rural-Urban Commuting Area (RUCA) codes are a sub-county
@@ -113,3 +117,40 @@ were first published in 2010; Puerto Rico was added in 2010 and the other territ
 - When ADR 0034/0036 merge, this build is a backport target: reclassify to `vintage_snapshot`, swap
   `DELETE`+`append` for atomic `replaceWhere`, drop the `_current` views, and fold the parser+spec
   into the shared builder.
+
+## Reconciliation with the now-merged ADRs 0034 / 0035 / 0037 (2026-06-22)
+This ADR was written while 0034/0036/0037 were unmerged and assumed the *earlier* 0037 framing
+("simple tier → built straight into the model catalog"). Those are now filed, and **0037 was
+reworked** so placement no longer follows the tier. **The data model and the decisions below stand
+unchanged** — this is a conventions + placement realignment, not a teardown. Targets:
+
+1. **`vintage_snapshot` + atomic `replaceWhere`, not `snapshot_replace` + DELETE/append** (ADR 0034).
+   `vintage` is the RUCA decennial year; each run atomically replaces only its vintage; vintages are
+   immutable. **Drop the `_current` views** (0034 — "current" is `MAX(vintage)` / the `live` idiom).
+   (This is the 0034 backport the colleague already anticipated, now actionable.)
+2. **Source-path placement, not straight-to-model** (reworked ADR 0037). RUCA is *sourced*, so it
+   lands **raw in the source catalog** and promotes its canonical to the model catalog like all
+   reference data — even though it is *simple* (no processed stage). Because RUCA augments the
+   **geography** subject (its canonicals live in `geography` and join `us_tract`/`us_zcta`), its raw
+   lands in **`geography_raw`** (reworked 0037 decision 4: augmenting inputs land in the consuming
+   subject's `*_raw`); the canonical `geography.us_ruca_tract` / `us_ruca_zip` are promoted to the
+   model catalog. No `_processed` stage (simple). This is the one delta the original ADR could not
+   anticipate.
+3. **`(geoid, geo_vintage)` conformance** (ADR 0035): RUCA's `vintage` *is* the geography vintage it
+   is coded to (decennial tract/ZCTA definitions), so the `(geoid, vintage)` / `(zip_code, vintage)`
+   joins to `us_tract` / `us_zcta` are already 0035-conformant — confirm RUCA's `vintage` values
+   match the geography `vintage` values exactly (e.g. RUCA `2020` ↔ geography vintage `2020`).
+4. **Build on the ADR 0036 shared builder when it lands.** The builder is filed but not yet
+   implemented (the geography block-group/block work builds it first). Until then the hand-rolled
+   skeleton is acceptable; fold `ruca.py`'s parser + a `ReferenceTableSpec` into the builder in the
+   same migration.
+
+**Unchanged and sound** (preserved from the colleague's design): the two per-level tables
+(`us_ruca_tract` keyed `(geoid, vintage)`, `us_ruca_zip` keyed `(zip_code, vintage)`), verbatim
+primary/secondary codes (no derived flag), the ZIP↔ZCTA approximate-FK + `us_ruca_zcta` view,
+alias-tolerant header parsing, code validation, cross-decade non-comparability, and `ingested_at`
+(already correct).
+
+**Migration** is placement + registration, not a rewrite: add the `geography_raw` raw layer and the
+promote to the model catalog, swap the write to atomic `replaceWhere` / `vintage_snapshot`, and drop
+the `_current` views; the builder fold-in follows when the builder exists. Tracked in the backlog.
