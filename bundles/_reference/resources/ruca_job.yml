@@ -1,0 +1,69 @@
+# Job that builds the canonical RUCA geography reference tables (ADR 0020, ADR 0038).
+#
+# Downloads the USDA ERS Rural-Urban Commuting Area (RUCA) files for the requested
+# vintage(s) over public HTTPS (no credential -- U.S. Government work, public domain),
+# reads CSV / XLSX / legacy .xls (xlrd) into row dicts, parses/validates via
+# cidmath_datahub.reference.ruca, and writes two tables in the integrated catalog:
+#   geography.us_ruca_tract  PK (geoid, vintage)   -- attribute extension of us_tract
+#   geography.us_ruca_zip    PK (zip_code, vintage) -- ZIP grain, >= 2010 only
+# using snapshot_replace per vintage (vintages retained; NOT comparable across decades).
+#
+# Thin entrypoint over the run_build seam (ADR 0027). Vintages are re-pullable, so the
+# tables are vintage-reproducible (ADR 0024). primary_ruca (1-10/99) + secondary_ruca
+# stored verbatim; no derived rural/urban flag.
+#
+# Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**) but
+# triggered from the UI. To load more vintages, add years to --vintage (e.g. "2020"
+# "2010"). The ERS download URLs carry a ?v= cache-buster that shifts on re-post; if a
+# default 404s, pass the live link via --tract-url/--zip-url (single vintage) -- grab it
+# from https://www.ers.usda.gov/data-products/rural-urban-commuting-area-codes.
+#
+# See bundles/_reference/src/build_ruca.py and ADR 0020/0038.
+
+resources:
+  jobs:
+    build_ruca_reference:
+      name: "[_reference] build_ruca_reference"
+      description: |
+        Builds geography.us_ruca_tract and geography.us_ruca_zip (USDA ERS Rural-Urban
+        Commuting Area codes) in the integrated catalog. Tract table joins to us_tract on
+        (geoid, vintage); ZIP table keyed (zip_code, vintage), >= 2010. Blocking DQ: PK
+        uniqueness, geoid 11-digit / zip 5-digit, primary code 1-10/99, secondary code in
+        the published set. Reference tables; snapshot_replace per vintage.
+
+      tasks:
+        - task_key: build_ruca
+          spark_python_task:
+            python_file: ../src/build_ruca.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--vintage"
+              - "2020"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: reference_env
+
+      environments:
+        - environment_key: reference_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+              # Source files: 2020/2010 ship CSV/XLSX; 2000/1990 are legacy binary .xls.
+              - pandas
+              - openpyxl
+              - xlrd
+
+      timeout_seconds: 3600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}
