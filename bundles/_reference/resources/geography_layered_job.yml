@@ -1,0 +1,71 @@
+# Job: build us_state via the shared reference builder (ADR 0036/0037) on the
+# layered raw -> processed -> canonical path.
+#
+# Deliberately SEPARATE from build_geography_reference (the legacy whole-geography
+# build): both would write geography.us_state, so keeping them apart lets the
+# migration be validated in dev without the two colliding. The cutover (later)
+# removes us_state from the legacy job once the layered path is proven, then this
+# job grows to cover county/tract/zcta/block-group/block.
+#
+# Lands geography_raw.us_census_state + us_census_state_cenpop (1:1 source copies),
+# derives geography_processed.us_census_state + us_census_state_boundary, and
+# promotes geography.us_state + geography.us_state_boundary. vintage_snapshot with a
+# DQ-gated promote (ADR 0034/0037). Geospatial libs are on this job's environment
+# only (ADR 0020). The IPUMS API key is read at runtime from ${var.ipums_secret_scope}.
+#
+# See bundles/_reference/src/build_geography.py (build_state_layered) and ADR 0036/0037.
+
+resources:
+  jobs:
+    build_geography_layered:
+      name: "[_reference] build_geography_layered (us_state)"
+      description: |
+        Layered us_state build (ADR 0036/0037 proving ground). Lands the TIGER/NHGIS
+        state shapefile + CenPop file 1:1 in geography_raw, derives the attribute and
+        boundary tables in geography_processed, and promotes the source-agnostic
+        geography.us_state + geography.us_state_boundary. Long-running: IPUMS extracts
+        are asynchronous (submit -> poll -> download).
+
+      tasks:
+        - task_key: build_geography_layered_state
+          spark_python_task:
+            python_file: ../src/build_geography.py
+            parameters:
+              - "--layered-state"
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--vintages"
+              - "2010,2020"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+              - "--ipums-secret-scope"
+              - "${var.ipums_secret_scope}"
+              - "--ipums-secret-key"
+              - "${var.ipums_secret_key}"
+          environment_key: geography_layered_env
+
+      environments:
+        - environment_key: geography_layered_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+              - ipumspy>=0.5
+              - geopandas>=1.0
+              - pyogrio>=0.9
+              - shapely>=2.0
+
+      timeout_seconds: 7200
+
+      # Alerting (ADR 0010): Teams primary via notification destination, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}
