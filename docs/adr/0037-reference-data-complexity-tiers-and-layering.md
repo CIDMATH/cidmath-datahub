@@ -82,7 +82,14 @@ promoted canonical.
    **storage/clustering *awareness*** flag, **not** a reason to skip enrichment: cluster well (e.g. by
    `(geo_level, vintage)` / parent geoid), keep geometry in the companion `boundary` table (off the
    enriched row), and accept the bounded denormalization cost — only revisit if a measured cost
-   actually bites.
+   actually bites. (c) **the enrichment join runs in `processed`, against same-source-catalog tables**
+   — never by reading the model catalog (decision 1). So a child level that enriches from parent
+   levels (block group ← tract/county/state, for IDs **and** labels) requires those parents to be
+   present in the **source** catalog: a complex multi-level subject is therefore migrated
+   **parents-first** — each parent's `processed` table must exist before its children build. For such
+   subjects this is a **rebuild**, not a raw-layer backport (see Consequences); do **not** instead
+   join the model-catalog canonicals at promote time (a rejected alternative — it reintroduces a
+   model→source-shaped dependency and splits enrichment across two layers).
 
 8. **Validation: validate the staging, gate the promote — one pattern at every size.** DQ runs as a
    **query-based** check over the raw/processed staging (engineer-only), and the **promote to the
@@ -118,11 +125,19 @@ promoted canonical.
   copy table + `_ops` row + grants for little transformation. Accepted as the price of one coherent
   pattern; the source catalog also now contains internally-generated reference (a semantic stretch we
   take on deliberately).
-- **Migration is a low-stakes backport, not a rebuild:** existing model-only reference — `codes.cvx`,
-  `codes.ndc_*`, `codes.loinc*`, `codes.icd10pcs`, the icd9/10-cm canonicals, **and generated
-  `time`** — gains a `<subject>_raw` landing layer in the source catalog (data reproducible /
-  regenerable; canonicals unaffected). RUCA (being built now via the old methodology) is re-homed
-  under decision 4.
+- **Migration stakes depend on cross-level enrichment:**
+  - **Flat / single-grain subjects = a low-stakes backport, not a rebuild:** existing model-only
+    reference — `codes.cvx`, `codes.ndc_*`, `codes.loinc*`, `codes.icd10pcs`, the icd9/10-cm
+    canonicals, **and generated `time`** — gains a `<subject>_raw` landing layer in the source catalog
+    (data reproducible / regenerable; canonicals unaffected).
+  - **Complex subjects whose children enrich from parents = a rebuild** (decision 7 bound c). Geography
+    is the first: its levels must be migrated **parents-first** into the source catalog (as
+    `<source>_*`, e.g. `us_census_state`), the old non-layered model tables **dropped**, and each level
+    **re-promoted enriched** through the builder. Because this drops and rebuilds the *live* integrated
+    dimension, it needs a **cutover plan**: do the swap **per-level atomically**, and verify the
+    re-promoted canonical matches the pre-migration row counts + keys (no silent loss) before dropping
+    the old table; downstream FK consumers are exposed during the window.
+  - RUCA (being built now via the old methodology) is re-homed under decision 4.
 - **Templates re-simplify** to one sourced/generated reference path (processed stage optional),
   retiring the "simple→task / complex→layered" routing.
 - Amends 0014; amends 0030; extends 0003's framing and 0036.
@@ -140,4 +155,7 @@ Needs a processed stage? (hierarchy / multi-grain / multiple downstream shapes)
 Proving grounds (both prove the processed-stage path): **geography block-group + block** (multi-grain)
 and **ICD-10-CM relayered** (hierarchy). ICD-10-PCS already exercised the no-processed-stage path; it
 + the other model-only tables (incl. `time`) need only the raw-layer backport. Sequence geography
-first (greenfield — it builds the simplified ADR 0036 builder), then the ICD-10-CM relayer reuses it.
+first — it builds the ADR 0036 builder — but note it is **not greenfield**: it is a parents-first
+**migration** of the existing levels (state → county → tract → block-group → block; decision 7 bound c
++ the cutover note above), since block-group/block enrich from their parents same-catalog. Then the
+ICD-10-CM relayer reuses the builder.

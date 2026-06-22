@@ -116,3 +116,11 @@ The line is: enforce mechanical correctness; trust contributors and code review 
 - **CI burden is minimal.** This ADR doesn't add enforcement infrastructure. If the conventions drift in practice, the cost of adding CI checks later is a single workflow.
 - **Some judgment calls remain.** Grain in table names, unit in column names, leading-underscore use — these are contextual. The ADR sets defaults; contributors and reviewers exercise judgment.
 - **Provider codes will accumulate.** The starter list will grow. PRs that add a new provider should update this ADR's table in the same change. If the list becomes unwieldy (say, >50 entries), it migrates to `_ops.provider_codes` and this ADR points there.
+
+## Refinement (2026-06-22, source token on source-catalog reference tables)
+ADR 0037 routes **reference** data through the source catalog (`<subject>_raw` → `<subject>_processed`) before promotion to the model catalog. This refinement settles how those source-catalog reference tables are named, and confirms the canonical is unaffected:
+
+- **Source-catalog reference tables carry the provider token** (the `<provider>_<dataset>` rule above). For **country-specific** reference, the `us_` country prefix is **retained** there too, giving `<country>_<provider>_<entity>` — e.g. `geography_raw.us_census_block_group`, `geography_processed.us_census_tract`. (This extends the country-prefix rule, previously scoped to the integrated catalog, to the source catalog.)
+- **The model-catalog canonical stays source-agnostic** — no provider token: `geography.us_block_group`, `geography.us_tract`, `geography.us_state`. The integrated catalog is the conformed dimension (ADR 0003 / 0015); if a level ever has a second source, both conform to the **one** canonical, so the source identifier belongs on the source layers, not the consumer-facing name.
+- **Existing canonicals are NOT renamed.** `geography.us_state` / `us_county` / `us_tract` keep their names; only the new source-catalog tables gain the provider token. (When a complex subject is migrated onto the layered builder per ADR 0037, the source-catalog tables are *created* as `us_census_*`; the re-promoted canonical keeps its source-agnostic name.)
+- `census` is the provider token for geography (the originating authority, US Census Bureau), not the `ipums`/`nhgis` distributor.
