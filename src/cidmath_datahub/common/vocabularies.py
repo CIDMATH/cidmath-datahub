@@ -26,6 +26,9 @@ class UpdateSemantics(StrEnum):
 
     APPEND_ONLY = "append_only"
     SNAPSHOT_REPLACE = "snapshot_replace"
+    # Retain every stamped vintage; each run atomically replaces only the vintage(s) it rebuilt
+    # via Delta `replaceWhere`; vintages are immutable (revisions = a new vintage key). ADR 0034.
+    VINTAGE_SNAPSHOT = "vintage_snapshot"
     MERGE_UPSERT = "merge_upsert"
     MERGE_SCD2 = "merge_scd2"
     MERGE_SCD2_SIDE = "merge_scd2_side"

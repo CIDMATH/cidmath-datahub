@@ -1,40 +1,42 @@
-"""Build the canonical RUCA geography reference tables (ADR 0020, ADR 0038).
+"""Build the RUCA geography reference on the source->model path (ADR 0020, 0037, 0038).
 
 USDA ERS Rural-Urban Commuting Area (RUCA) codes are a sub-county rural/urban classification
 keyed to census tracts and (from 2010 on) ZIP codes. This entrypoint is the thin IO + Spark
-layer over the pure logic in ``cidmath_datahub.reference.ruca`` (ADR 0011). For each requested
-vintage it downloads the ERS file(s) over public HTTPS, reads them (CSV / XLSX / legacy ``.xls``)
-into row dicts, parses + validates, and writes two tables in the integrated catalog:
+layer over the pure logic in ``cidmath_datahub.reference.ruca`` (ADR 0011).
 
-  - ``geography.us_ruca_tract`` -- PK ``(geoid, vintage)``; an attribute extension of
-    ``geography.us_tract`` (joins ``USING (geoid, vintage)``), carrying primary/secondary RUCA
-    codes plus the source population / land area / density.
-  - ``geography.us_ruca_zip`` -- PK ``(zip_code, vintage)``; ZIP codes are not census GEOIDs and
-    do not join to ``us_zcta``. Only vintages >= 2010 publish a ZIP file.
+Placement follows the reworked ADR 0037 (and the ADR 0038 Reconciliation): RUCA is *sourced*
+and *augments the geography subject*, so it lands **raw in the source catalog** and **promotes a
+canonical table to the model catalog** -- even though it is the *simple* tier (no ``_processed``
+stage; raw -> promote):
 
-Versioned per RUCA vintage (1990/2000/2010/2020), ``snapshot_replace`` per vintage (ADR 0024):
-each run replaces only the vintage(s) it rebuilt and leaves the others intact. Vintages are NOT
-comparable across decades (tract boundaries + methodology change each decade), so ``vintage`` is
-part of the key. Public domain (U.S. Government work) -- plain HTTPS download, no credential.
+  - ``ecdh_<env>.geography_raw.us_ruca_tract`` / ``.us_ruca_zip`` -- fetched-as-is, 1:1 with the
+    source rows, vintage-stamped (engineer-only).
+  - ``ecdh_model_<env>.geography.us_ruca_tract`` / ``.us_ruca_zip`` -- the canonical consumer
+    tables, promoted from raw (tract adds the derived ``state_geoid``/``county_geoid``); reader-tier.
+  - ``geography.us_ruca_zcta`` -- the approximate ZIP->ZCTA bridge view (kept).
 
-The ERS download slugs carry a ``?v=`` cache-buster that shifts when a file is re-posted, so
-``--tract-url`` / ``--zip-url`` accept a live link per vintage (paste from the product page if a
-templated default 404s) -- the same operator-override pattern the ICD-10-PCS build uses.
+Versioned per RUCA decennial vintage (1990/2000/2010/2020) with ``update_semantics="vintage_snapshot"``
+(ADR 0034): each run **atomically** replaces only the vintage(s) it rebuilt via Delta
+``replaceWhere`` (the first build seeds the table); vintages are immutable and not comparable across
+decades. No ``_current`` views -- "current" is ``MAX(vintage)`` (ADR 0034). ``vintage`` *is* the
+geography vintage the codes are coded to, so the ``(geoid, vintage)`` / ``(zip_code, vintage)`` joins
+to ``us_tract`` / ``us_zcta`` are ADR-0035 conformant.
+
+Public domain (U.S. Government work) -- plain HTTPS download, no credential. The ERS slugs carry a
+``?v=`` cache-buster that shifts on re-post, so ``--tract-url`` / ``--zip-url`` accept a live link per
+vintage (single vintage).
 
 Blocking DQ (FAIL, raises): PK uniqueness per table; tract GEOID is 11 digits / ZIP is 5 digits;
-every ``primary_ruca`` is in 1-10/99; every ``secondary_ruca`` is a published code. WARN:
-per-vintage cardinality; tract population present; primary-code distribution.
+every ``primary_ruca`` in 1-10/99; every ``secondary_ruca`` a published code. WARN: per-vintage
+cardinality; tract population present; primary-code distribution.
+
+NOTE (ADR 0038 Reconciliation, delta 6): when the ADR 0036 shared builder lands, fold this build's
+parser + a ``ReferenceTableSpec`` into ``build_reference_table`` (the simple raw->promote path).
+Until then this hand-rolled skeleton carries the placement + ``vintage_snapshot`` realignment.
 
 Usage:
-    build_ruca.py --catalog ecdh_model_dev --vintage 2020 \\
+    build_ruca.py --source-catalog ecdh_dev --model-catalog ecdh_model_dev --vintage 2020 \\
         --data-engineers-group ecdh-data-engineers --analysts-group ecdh-analysts
-
-    # load several vintages (ZIP is loaded only where it exists, >= 2010):
-    build_ruca.py --catalog ecdh_model_dev --vintage 2020 2010 2000 1990 ...
-
-    # paste a live ERS link if a templated default has shifted (single vintage):
-    build_ruca.py --catalog ecdh_model_dev --vintage 2020 \\
-        --tract-url https://www.ers.usda.gov/media/5443/<live>.csv?v=<n>
 """
 
 from __future__ import annotations
@@ -57,7 +59,8 @@ from cidmath_datahub.reference import ruca
 
 log = get_logger(__name__)
 
-SCHEMA = "geography"
+RAW_SCHEMA = "geography_raw"  # source catalog: fetched-as-is landing (ADR 0037)
+MODEL_SCHEMA = "geography"  # model catalog: canonical consumer tables
 TRACT_TABLE = "us_ruca_tract"
 ZIP_TABLE = "us_ruca_zip"
 ZCTA_VIEW = "us_ruca_zcta"  # us_ruca_zip joined to us_zcta (approximate ZIP->ZCTA bridge)
@@ -86,12 +89,12 @@ SUPPORTED_VINTAGES = (1990, 2000, 2010, 2020)
 _TRACT_CARDINALITY_MIN, _TRACT_CARDINALITY_MAX = 50_000, 100_000
 _ZIP_CARDINALITY_MIN, _ZIP_CARDINALITY_MAX = 30_000, 60_000
 
-US_RUCA_TRACT_SPARK_SCHEMA = T.StructType(
+# Raw tract = source-fidelity (1:1 with source rows), no derived parents. The canonical adds the
+# derived state_geoid/county_geoid at promote time.
+RAW_TRACT_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("geoid", T.StringType(), False),
         T.StructField("vintage", T.IntegerType(), False),
-        T.StructField("state_geoid", T.StringType(), False),
-        T.StructField("county_geoid", T.StringType(), False),
         T.StructField("state", T.StringType(), True),
         T.StructField("county", T.StringType(), True),
         T.StructField("primary_ruca", T.IntegerType(), False),
@@ -104,7 +107,11 @@ US_RUCA_TRACT_SPARK_SCHEMA = T.StructType(
     ]
 )
 
-US_RUCA_ZIP_SPARK_SCHEMA = T.StructType(
+# Canonical tract = raw + derived state_geoid/county_geoid; that shape is produced by the promote
+# SELECT in _promote_tract (substring(geoid,...) AS state_geoid/county_geoid), not a StructType here.
+
+# ZIP raw == ZIP canonical (no derived columns); same schema in both catalogs.
+ZIP_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("zip_code", T.StringType(), False),
         T.StructField("vintage", T.IntegerType(), False),
@@ -166,7 +173,9 @@ def _read_rows(raw: bytes, filename: str, *, sheet: Any = 0) -> list[dict[str, A
 
 
 # ---------------------------------------------------------------------------
-# DQ (ADR 0009): blocking PK / id-format / code-vocab; WARN cardinality + distribution
+# DQ (ADR 0009): blocking PK / id-format / code-vocab; WARN cardinality + distribution. Recorded
+# against the canonical (consumer) table names; raw is the same rows landed 1:1, so the canonical
+# gate covers it. (Full TableDQ (ADR 0029) adoption rides with the ADR 0036 builder fold-in.)
 # ---------------------------------------------------------------------------
 
 
@@ -180,7 +189,7 @@ def _dq_checks(
     failures: list[str] = []
 
     # --- us_ruca_tract blocking ---
-    tract_full = f"{SCHEMA}.{TRACT_TABLE}"
+    tract_full = f"{MODEL_SCHEMA}.{TRACT_TABLE}"
     n_tract = len(tract_records)
 
     dup_tract = ruca.find_duplicate_tract_keys(tract_records)
@@ -213,7 +222,7 @@ def _dq_checks(
         failures.append(f"tract secondary out of vocab: {bad_sec_t[:5]}")
 
     # --- us_ruca_zip blocking ---
-    zip_full = f"{SCHEMA}.{ZIP_TABLE}"
+    zip_full = f"{MODEL_SCHEMA}.{ZIP_TABLE}"
     n_zip = len(zip_records)
 
     dup_zip = ruca.find_duplicate_zip_keys(zip_records)
@@ -298,65 +307,86 @@ def _record(
 
 
 # ---------------------------------------------------------------------------
-# Write (snapshot_replace per vintage; ADR 0024 vintage semantics)
+# Write: vintage_snapshot via atomic Delta replaceWhere (ADR 0034). The first build seeds the
+# table; later runs atomically replace only the vintage(s) rebuilt and leave others intact.
 # ---------------------------------------------------------------------------
 
 
-def _table_has_column(spark: SparkSession, full: str, column: str) -> bool:
-    if not spark.catalog.tableExists(full):
-        return False
-    return column in {f.name for f in spark.table(full).schema.fields}
-
-
-def _write_table(
-    spark: SparkSession,
-    full: str,
-    rows: list[dict[str, Any]],
-    schema: T.StructType,
-    vintages: list[int],
-    sort_cols: list[str],
-) -> None:
-    """snapshot_replace: replace only the vintages this run rebuilt; keep other vintages."""
-    df = spark.createDataFrame(rows, schema=schema).sort(*sort_cols)
-    if _table_has_column(spark, full, "vintage"):
+def _vintage_snapshot_write(spark: SparkSession, full: str, df: Any, vintages: list[int]) -> None:
+    """Atomically replace only ``vintages`` in ``full`` (seed the table on first build)."""
+    if spark.catalog.tableExists(full):
         years_sql = ", ".join(str(v) for v in vintages)
-        spark.sql(f"DELETE FROM {full} WHERE vintage IN ({years_sql})")
-        df.write.option("mergeSchema", "true").mode("append").saveAsTable(full)
+        (
+            df.write.format("delta")
+            .mode("overwrite")
+            .option("replaceWhere", f"vintage IN ({years_sql})")
+            .saveAsTable(full)
+        )
     else:
-        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full)
-    log.info("Wrote table", extra={"table": full, "rows": len(rows), "vintages": vintages})
+        df.write.format("delta").mode("overwrite").saveAsTable(full)
+    log.info("vintage_snapshot write", extra={"table": full, "vintages": vintages})
 
 
-def _comment_tables(spark: SparkSession, catalog: str) -> None:
+def _promote_tract(spark: SparkSession, source_catalog: str, model_catalog: str,
+                   vintages: list[int]) -> None:
+    """Promote raw tract -> canonical (model), deriving state_geoid/county_geoid from the GEOID."""
+    raw_full = f"{source_catalog}.{RAW_SCHEMA}.{TRACT_TABLE}"
+    years_sql = ", ".join(str(v) for v in vintages)
+    df = spark.sql(
+        f"SELECT geoid, vintage, "
+        f"substring(geoid, 1, 2) AS state_geoid, substring(geoid, 1, 5) AS county_geoid, "
+        f"state, county, primary_ruca, secondary_ruca, population, land_area_sqmi, "
+        f"population_density, source_file, ingested_at "
+        f"FROM {raw_full} WHERE vintage IN ({years_sql})"
+    ).sort("vintage", "geoid")
+    _vintage_snapshot_write(spark, f"{model_catalog}.{MODEL_SCHEMA}.{TRACT_TABLE}", df, vintages)
+
+
+def _promote_zip(spark: SparkSession, source_catalog: str, model_catalog: str,
+                 vintages: list[int]) -> None:
+    """Promote raw ZIP -> canonical (model); ZIP raw and canonical share one schema."""
+    raw_full = f"{source_catalog}.{RAW_SCHEMA}.{ZIP_TABLE}"
+    years_sql = ", ".join(str(v) for v in vintages)
+    df = spark.sql(f"SELECT * FROM {raw_full} WHERE vintage IN ({years_sql})").sort(
+        "vintage", "zip_code"
+    )
+    _vintage_snapshot_write(spark, f"{model_catalog}.{MODEL_SCHEMA}.{ZIP_TABLE}", df, vintages)
+
+
+def _comment_tables(spark: SparkSession, source_catalog: str, model_catalog: str,
+                    wrote_zip: bool) -> None:
+    raw_t = f"{source_catalog}.{RAW_SCHEMA}.{TRACT_TABLE}"
     spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TRACT_TABLE} IS "
+        f"COMMENT ON TABLE {raw_t} IS 'USDA ERS RUCA census-tract codes, fetched-as-is (1:1 with "
+        f"source rows), vintage-stamped. Raw landing for the canonical geography.us_ruca_tract. "
+        f"vintage_snapshot. ADR 0037/0038.'"
+    )
+    spark.sql(
+        f"COMMENT ON TABLE {model_catalog}.{MODEL_SCHEMA}.{TRACT_TABLE} IS "
         f"'USDA ERS RUCA codes by census tract. Attribute extension of geography.us_tract "
         f"(join USING (geoid, vintage)). primary_ruca (1-10/99) + secondary_ruca (verbatim) + "
-        f"source population/land area/density. PK (geoid, vintage); snapshot_replace. Vintages "
-        f"are NOT comparable across decades. ADR 0020/0038.'"
+        f"source population/land area/density; state_geoid/county_geoid derived from geoid. PK "
+        f"(geoid, vintage); vintage_snapshot. Promoted from {source_catalog}.{RAW_SCHEMA}."
+        f"{TRACT_TABLE}. Vintages NOT comparable across decades. ADR 0020/0037/0038.'"
     )
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.{ZIP_TABLE} IS "
-        f"'USDA ERS RUCA codes by ZIP code (>= 2010 only). primary_ruca (1-10/99) + "
-        f"secondary_ruca (verbatim). ZIP is not a census GEOID, but zip_code is an approximate FK "
-        f"to us_zcta.geoid (5-digit; join on (zip_code = geoid, vintage)); see the us_ruca_zcta "
-        f"view. PK (zip_code, vintage); snapshot_replace. ADR 0020/0038.'"
-    )
-
-
-def _create_current_views(spark: SparkSession, catalog: str) -> None:
-    for table in (TRACT_TABLE, ZIP_TABLE):
-        full = f"{catalog}.{SCHEMA}.{table}"
-        view = f"{catalog}.{SCHEMA}.{table}_current"
+    if wrote_zip:
+        raw_z = f"{source_catalog}.{RAW_SCHEMA}.{ZIP_TABLE}"
         spark.sql(
-            f"CREATE OR REPLACE VIEW {view} AS "
-            f"SELECT * FROM {full} WHERE vintage = (SELECT MAX(vintage) FROM {full})"
+            f"COMMENT ON TABLE {raw_z} IS 'USDA ERS RUCA ZIP codes, fetched-as-is (1:1 with source "
+            f"rows), vintage-stamped (>= 2010). Raw landing for geography.us_ruca_zip. "
+            f"vintage_snapshot. ADR 0037/0038.'"
         )
-        spark.sql(f"COMMENT ON VIEW {view} IS 'geography.{table} restricted to the latest vintage.'")
+        spark.sql(
+            f"COMMENT ON TABLE {model_catalog}.{MODEL_SCHEMA}.{ZIP_TABLE} IS "
+            f"'USDA ERS RUCA codes by ZIP code (>= 2010 only). primary_ruca (1-10/99) + "
+            f"secondary_ruca (verbatim). ZIP is not a census GEOID, but zip_code is an approximate "
+            f"FK to us_zcta.geoid (join on (zip_code = geoid, vintage)); see the us_ruca_zcta view. "
+            f"PK (zip_code, vintage); vintage_snapshot. ADR 0020/0037/0038.'"
+        )
 
 
-def _create_zcta_view(spark: SparkSession, catalog: str) -> bool:
-    """Materialize the approximate ZIP->ZCTA join (us_ruca_zip x us_zcta).
+def _create_zcta_view(spark: SparkSession, model_catalog: str) -> bool:
+    """Materialize the approximate ZIP->ZCTA join (us_ruca_zip x us_zcta) in the model catalog.
 
     ZCTA is the Census areal approximation of ZIP codes, so the 5-digit zip_code is joined to
     us_zcta.geoid on (zip_code = geoid, vintage). INNER join: only ZIP rows with a matching ZCTA
@@ -364,15 +394,16 @@ def _create_zcta_view(spark: SparkSession, catalog: str) -> bool:
     geography build runs first); if absent, skip with a WARN rather than fail. Returns whether the
     view was created (so registration can match).
     """
-    zcta_full = f"{catalog}.{SCHEMA}.{ZCTA_TABLE}"
-    zip_full = f"{catalog}.{SCHEMA}.{ZIP_TABLE}"
+    g = f"{model_catalog}.{MODEL_SCHEMA}"
+    zcta_full = f"{g}.{ZCTA_TABLE}"
+    zip_full = f"{g}.{ZIP_TABLE}"
     if not (spark.catalog.tableExists(zcta_full) and spark.catalog.tableExists(zip_full)):
         log.warning(
             "Skipping us_ruca_zcta view -- us_zcta or us_ruca_zip missing (build geography first)",
             extra={"zcta_table": zcta_full, "zip_table": zip_full},
         )
         return False
-    view = f"{catalog}.{SCHEMA}.{ZCTA_VIEW}"
+    view = f"{g}.{ZCTA_VIEW}"
     spark.sql(
         f"CREATE OR REPLACE VIEW {view} AS "
         f"SELECT r.*, "
@@ -394,7 +425,8 @@ def _create_zcta_view(spark: SparkSession, catalog: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Register (_ops metadata, ADR 0008) -- public domain (open)
+# Register (_ops metadata, ADR 0008): raw -> source catalog (layer raw, engineer-only);
+# canonical + view -> model catalog (layer reference, reader-tier). Public domain (open).
 # ---------------------------------------------------------------------------
 
 _TRACT_KNOWN_LIMITATIONS = (
@@ -415,36 +447,91 @@ _ZIP_KNOWN_LIMITATIONS = (
     "(population-share for area ZIPs; containing-tract for point ZIPs)."
 )
 
+# Provenance fields shared by every RUCA dataset entry (raw + canonical + view).
+_COMMON_META = {
+    "spatial_coverage": "United States",
+    "source_provider_code": "usda_ers",
+    "source_url": ruca.SOURCE_PRODUCT_URL,
+    "source_documentation_url": ruca.SOURCE_DOC_URL,
+    "source_data_dictionary_url": ruca.SOURCE_DOC_URL,
+    "license": "public domain (U.S. Government work, 17 U.S.C. 105)",
+    "dua_required": False,
+    "dua_reference": "No DUA. USDA ERS RUCA files are public domain.",
+    "access_tier": "open",
+    "external_maintainer_name": "USDA Economic Research Service (ERS)",
+    "is_hosted": True,
+    "temporal_resolution": "decennial",
+}
 
-def _register(spark: SparkSession, catalog: str, vintages: list[int], *, create_views: bool) -> None:
-    g = f"{catalog}.{SCHEMA}"
-    common = {
-        "subject": SCHEMA,
-        "spatial_coverage": "United States",
-        "source_provider_code": "usda_ers",
-        "source_url": ruca.SOURCE_PRODUCT_URL,
-        "source_documentation_url": ruca.SOURCE_DOC_URL,
-        "source_data_dictionary_url": ruca.SOURCE_DOC_URL,
-        "license": "public domain (U.S. Government work, 17 U.S.C. 105)",
-        "dua_required": False,
-        "dua_reference": "No DUA. USDA ERS RUCA files are public domain.",
-        "access_tier": "open",
-        "external_maintainer_name": "USDA Economic Research Service (ERS)",
-        "is_hosted": True,
-        "temporal_resolution": "decennial",
-    }
 
+def _register_raw(spark: SparkSession, source_catalog: str, wrote_zip: bool) -> None:
+    """Register the raw landing tables in the SOURCE catalog (layer=raw, vintage_snapshot)."""
+    g = f"{source_catalog}.{RAW_SCHEMA}"
     registration.register_dataset(
-        spark,
-        catalog,
+        spark, source_catalog,
         registration.DatasetCatalogEntry(
             full_table_name=f"{g}.{TRACT_TABLE}",
-            layer="reference",
+            subject="geography", layer="raw",
+            description=(
+                "Raw USDA ERS RUCA census-tract codes, fetched-as-is (1:1 with source rows), "
+                "vintage-stamped. Source landing promoted to geography.us_ruca_tract."
+            ),
+            public_health_relevance=(
+                "Raw landing for the canonical tract RUCA reference; not consumed directly."
+            ),
+            spatial_resolution="us_tract",
+            known_limitations="Fetched-as-is source landing; derivation/validation happen at promote.",
+            derived_from=None,
+            **_COMMON_META,
+        ),
+        registration.DatasetEngineeringEntry(
+            full_table_name=f"{g}.{TRACT_TABLE}",
+            update_semantics="vintage_snapshot", materialization_type="table",
+            cluster_columns=["vintage", "geoid"], pipeline_reference=PIPELINE_REF,
+        ),
+    )
+    if wrote_zip:
+        registration.register_dataset(
+            spark, source_catalog,
+            registration.DatasetCatalogEntry(
+                full_table_name=f"{g}.{ZIP_TABLE}",
+                subject="geography", layer="raw",
+                description=(
+                    "Raw USDA ERS RUCA ZIP-code codes (>= 2010), fetched-as-is (1:1 with source "
+                    "rows), vintage-stamped. Source landing promoted to geography.us_ruca_zip."
+                ),
+                public_health_relevance=(
+                    "Raw landing for the canonical ZIP RUCA reference; not consumed directly."
+                ),
+                spatial_resolution="zip_code",
+                known_limitations="Fetched-as-is source landing; validation happens at promote.",
+                derived_from=None,
+                **_COMMON_META,
+            ),
+            registration.DatasetEngineeringEntry(
+                full_table_name=f"{g}.{ZIP_TABLE}",
+                update_semantics="vintage_snapshot", materialization_type="table",
+                cluster_columns=["vintage", "zip_code"], pipeline_reference=PIPELINE_REF,
+            ),
+        )
+
+
+def _register_canonical(spark: SparkSession, source_catalog: str, model_catalog: str,
+                        wrote_zip: bool) -> None:
+    """Register the canonical tables + the ZIP->ZCTA view in the MODEL catalog (layer=reference)."""
+    g = f"{model_catalog}.{MODEL_SCHEMA}"
+    raw_g = f"{source_catalog}.{RAW_SCHEMA}"
+
+    registration.register_dataset(
+        spark, model_catalog,
+        registration.DatasetCatalogEntry(
+            full_table_name=f"{g}.{TRACT_TABLE}",
+            subject="geography", layer="reference",
             description=(
                 "USDA ERS Rural-Urban Commuting Area (RUCA) codes by census tract. Attribute "
                 "extension of geography.us_tract keyed (geoid, vintage): primary_ruca (1-10, 99), "
                 "secondary_ruca (e.g. 1.0/10.3, verbatim), plus source population, land_area_sqmi, "
-                "population_density and state/county labels."
+                "population_density, state/county labels, and derived state_geoid/county_geoid."
             ),
             public_health_relevance=(
                 "Sub-county rural/urban classification: lets tract-coded surveillance/population "
@@ -453,110 +540,74 @@ def _register(spark: SparkSession, catalog: str, vintages: list[int], *, create_
             ),
             spatial_resolution="us_tract",
             known_limitations=_TRACT_KNOWN_LIMITATIONS,
-            derived_from=[f"USDA ERS RUCA census tract file {v}" for v in vintages],
-            **common,
+            derived_from=[f"{raw_g}.{TRACT_TABLE}"],
+            **_COMMON_META,
         ),
         registration.DatasetEngineeringEntry(
             full_table_name=f"{g}.{TRACT_TABLE}",
-            update_semantics="snapshot_replace",
-            materialization_type="table",
-            cluster_columns=["vintage", "geoid"],
-            pipeline_reference=PIPELINE_REF,
+            update_semantics="vintage_snapshot", materialization_type="table",
+            cluster_columns=["vintage", "geoid"], pipeline_reference=PIPELINE_REF,
         ),
     )
 
-    zip_vintages = [v for v in vintages if v in ZIP_URLS]
-    registration.register_dataset(
-        spark,
-        catalog,
-        registration.DatasetCatalogEntry(
-            full_table_name=f"{g}.{ZIP_TABLE}",
-            layer="reference",
-            description=(
-                "USDA ERS Rural-Urban Commuting Area (RUCA) codes by ZIP code (>= 2010 vintages). "
-                "Keyed (zip_code, vintage): primary_ruca (1-10, 99), secondary_ruca (verbatim), "
-                "plus state, zip_code_type and po_name. ZIP codes are not census GEOIDs."
+    if wrote_zip:
+        registration.register_dataset(
+            spark, model_catalog,
+            registration.DatasetCatalogEntry(
+                full_table_name=f"{g}.{ZIP_TABLE}",
+                subject="geography", layer="reference",
+                description=(
+                    "USDA ERS Rural-Urban Commuting Area (RUCA) codes by ZIP code (>= 2010). Keyed "
+                    "(zip_code, vintage): primary_ruca (1-10, 99), secondary_ruca (verbatim), plus "
+                    "state, zip_code_type and po_name. ZIP is not a census GEOID."
+                ),
+                public_health_relevance=(
+                    "ZIP-grain rural/urban classification for data captured by ZIP rather than "
+                    "tract (claims, registries), approximating the tract RUCA scheme."
+                ),
+                spatial_resolution="zip_code",
+                known_limitations=_ZIP_KNOWN_LIMITATIONS,
+                derived_from=[f"{raw_g}.{ZIP_TABLE}"],
+                **_COMMON_META,
             ),
-            public_health_relevance=(
-                "ZIP-grain rural/urban classification for data captured by ZIP rather than tract "
-                "(claims, registries), approximating the tract RUCA scheme."
+            registration.DatasetEngineeringEntry(
+                full_table_name=f"{g}.{ZIP_TABLE}",
+                update_semantics="vintage_snapshot", materialization_type="table",
+                cluster_columns=["vintage", "zip_code"], pipeline_reference=PIPELINE_REF,
             ),
-            spatial_resolution="zip_code",
-            known_limitations=_ZIP_KNOWN_LIMITATIONS,
-            derived_from=[f"USDA ERS RUCA ZIP code file {v}" for v in zip_vintages or vintages],
-            **common,
-        ),
-        registration.DatasetEngineeringEntry(
-            full_table_name=f"{g}.{ZIP_TABLE}",
-            update_semantics="snapshot_replace",
-            materialization_type="table",
-            cluster_columns=["vintage", "zip_code"],
-            pipeline_reference=PIPELINE_REF,
-        ),
-    )
+        )
 
-    if create_views:
-        for table, desc in (
-            (f"{TRACT_TABLE}_current", "geography.us_ruca_tract restricted to the latest vintage."),
-            (f"{ZIP_TABLE}_current", "geography.us_ruca_zip restricted to the latest vintage."),
-        ):
-            registration.register_dataset(
-                spark,
-                catalog,
-                registration.DatasetCatalogEntry(
-                    full_table_name=f"{g}.{table}",
-                    layer="reference",
-                    description=desc,
-                    public_health_relevance="Latest-vintage convenience view.",
-                    spatial_resolution="us_tract" if table.startswith(TRACT_TABLE) else "zip_code",
-                    known_limitations=None,
-                    derived_from=[f"{g}.{table.removesuffix('_current')}"],
-                    **{**common, "is_hosted": False},
+    # ZIP->ZCTA bridge view (only when it was actually created -- same guard as _create_zcta_view).
+    if spark.catalog.tableExists(f"{g}.{ZCTA_TABLE}") and spark.catalog.tableExists(
+        f"{g}.{ZIP_TABLE}"
+    ):
+        registration.register_dataset(
+            spark, model_catalog,
+            registration.DatasetCatalogEntry(
+                full_table_name=f"{g}.{ZCTA_VIEW}",
+                subject="geography", layer="reference",
+                description=(
+                    "us_ruca_zip joined to us_zcta on (zip_code = geoid, vintage) -- the "
+                    "approximate ZIP->ZCTA bridge with ZCTA geometry attached. INNER join; ZIPs "
+                    "without a matching ZCTA are omitted. Not exact identity."
                 ),
-                registration.DatasetEngineeringEntry(
-                    full_table_name=f"{g}.{table}",
-                    update_semantics="full_refresh",
-                    materialization_type="view",
-                    cluster_columns=None,
-                    pipeline_reference=PIPELINE_REF,
+                public_health_relevance=(
+                    "ZCTA-keyed RUCA classification for joining to census-geography (ZCTA) data "
+                    "without hand-writing the approximate ZIP->ZCTA bridge."
                 ),
-            )
-
-        # Register the ZIP->ZCTA bridge view only when it was actually created (same guard as
-        # _create_zcta_view), so we don't catalog a view that geography hasn't enabled yet.
-        if spark.catalog.tableExists(f"{g}.{ZCTA_TABLE}") and spark.catalog.tableExists(
-            f"{g}.{ZIP_TABLE}"
-        ):
-            registration.register_dataset(
-                spark,
-                catalog,
-                registration.DatasetCatalogEntry(
-                    full_table_name=f"{g}.{ZCTA_VIEW}",
-                    layer="reference",
-                    description=(
-                        "us_ruca_zip joined to us_zcta on (zip_code = geoid, vintage) -- the "
-                        "approximate ZIP->ZCTA bridge with ZCTA geometry attached. INNER join; "
-                        "ZIPs without a matching ZCTA are omitted. Not exact identity."
-                    ),
-                    public_health_relevance=(
-                        "ZCTA-keyed RUCA classification for joining to census-geography (ZCTA) data "
-                        "without hand-writing the approximate ZIP->ZCTA bridge."
-                    ),
-                    spatial_resolution="us_zcta",
-                    known_limitations=(
-                        "Approximate ZIP->ZCTA match (not 1:1); point/PO-box and newer ZIPs absent."
-                    ),
-                    derived_from=[f"{g}.{ZIP_TABLE}", f"{g}.{ZCTA_TABLE}"],
-                    **{**common, "is_hosted": False},
+                spatial_resolution="us_zcta",
+                known_limitations=(
+                    "Approximate ZIP->ZCTA match (not 1:1); point/PO-box and newer ZIPs absent."
                 ),
-                registration.DatasetEngineeringEntry(
-                    full_table_name=f"{g}.{ZCTA_VIEW}",
-                    update_semantics="full_refresh",
-                    materialization_type="view",
-                    cluster_columns=None,
-                    pipeline_reference=PIPELINE_REF,
-                ),
-            )
+                derived_from=[f"{g}.{ZIP_TABLE}", f"{g}.{ZCTA_TABLE}"],
+                **{**_COMMON_META, "is_hosted": False},
+            ),
+            registration.DatasetEngineeringEntry(
+                full_table_name=f"{g}.{ZCTA_VIEW}",
+                update_semantics="full_refresh", materialization_type="view",
+                cluster_columns=None, pipeline_reference=PIPELINE_REF,
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -565,14 +616,14 @@ def _register(spark: SparkSession, catalog: str, vintages: list[int], *, create_
 
 
 def run(
-    catalog: str,
+    source_catalog: str,
+    model_catalog: str,
     vintages: list[int],
     data_engineers_group: str,
     analysts_group: str,
     tract_url: str | None = None,
     zip_url: str | None = None,
     sheet: Any = 0,
-    create_views: bool = True,
 ) -> None:
     requested = sorted(set(vintages))
     for v in requested:
@@ -581,11 +632,12 @@ def run(
     if (tract_url is not None or zip_url is not None) and len(requested) != 1:
         raise ValueError("--tract-url/--zip-url override a single vintage; pass exactly one --vintage")
 
-    # Download + parse every requested vintage before the build lifecycle starts.
+    # Download + parse every requested vintage before the build lifecycle starts. Raw rows are the
+    # source-fidelity projection (canonical derives state_geoid/county_geoid at promote time).
     tract_records: list[ruca.RucaTractRecord] = []
     zip_records: list[ruca.RucaZipRecord] = []
-    tract_rows_out: list[dict[str, Any]] = []
-    zip_rows_out: list[dict[str, Any]] = []
+    raw_tract_rows: list[dict[str, Any]] = []
+    raw_zip_rows: list[dict[str, Any]] = []
     now = datetime.now(tz=UTC)
 
     for vintage in requested:
@@ -595,11 +647,9 @@ def run(
         t_rows = _read_rows(raw, t_file, sheet=sheet)
         t_recs = ruca.parse_tract_rows(t_rows, vintage)
         tract_records.extend(t_recs)
-        tract_rows_out.extend(_tract_row_dict(r, t_file, now) for r in t_recs)
-        log.info(
-            "Parsed RUCA tracts",
-            extra={"vintage": vintage, "source_rows": len(t_rows), "rows": len(t_recs)},
-        )
+        raw_tract_rows.extend(_raw_tract_row(r, t_file, now) for r in t_recs)
+        log.info("Parsed RUCA tracts",
+                 extra={"vintage": vintage, "source_rows": len(t_rows), "rows": len(t_recs)})
 
         z_url = zip_url or ZIP_URLS.get(vintage)
         if z_url is None:
@@ -610,56 +660,81 @@ def run(
         z_rows = _read_rows(raw, z_file, sheet=sheet)
         z_recs = ruca.parse_zip_rows(z_rows, vintage)
         zip_records.extend(z_recs)
-        zip_rows_out.extend(_zip_row_dict(r, z_file, now) for r in z_recs)
-        log.info(
-            "Parsed RUCA ZIPs",
-            extra={"vintage": vintage, "source_rows": len(z_rows), "rows": len(z_recs)},
-        )
+        raw_zip_rows.extend(_raw_zip_row(r, z_file, now) for r in z_recs)
+        log.info("Parsed RUCA ZIPs",
+                 extra={"vintage": vintage, "source_rows": len(z_rows), "rows": len(z_recs)})
+
+    tract_vintages = sorted({r["vintage"] for r in raw_tract_rows})
+    zip_vintages = sorted({r["vintage"] for r in raw_zip_rows})
 
     def _ensure(spark: SparkSession) -> None:
         spark.sql(
-            f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.{RAW_SCHEMA} "
+            f"COMMENT 'Raw, fetched-as-is source landings that augment the geography subject "
+            f"(e.g. USDA ERS RUCA). Engineer-owned; canonicals promote to ecdh_model_*.geography. "
+            f"See ADR 0037.'"
+        )
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {model_catalog}.{MODEL_SCHEMA} "
             f"COMMENT 'Canonical US geography reference: states, counties, tracts, ZCTAs, HHS "
             f"regions, RUCA rural-urban codes, and companion boundaries. Owned by the _reference "
             f"bundle. See ADR 0020.'"
         )
 
     def _work(ctx: BuildContext) -> None:
+        spark = ctx.spark
         _dq_checks(ctx, tract_records, zip_records, requested)
-        _write_table(ctx.spark, f"{catalog}.{SCHEMA}.{TRACT_TABLE}", tract_rows_out,
-                     US_RUCA_TRACT_SPARK_SCHEMA, requested, ["vintage", "geoid"])
-        if zip_rows_out:
-            zip_vintages = sorted({r["vintage"] for r in zip_rows_out})
-            _write_table(ctx.spark, f"{catalog}.{SCHEMA}.{ZIP_TABLE}", zip_rows_out,
-                         US_RUCA_ZIP_SPARK_SCHEMA, zip_vintages, ["vintage", "zip_code"])
-        _comment_tables(ctx.spark, catalog)
-        if create_views:
-            _create_current_views(ctx.spark, catalog)
-            _create_zcta_view(ctx.spark, catalog)
+
+        # 1. Land raw (source catalog), 1:1 with source, vintage_snapshot.
+        raw_t_df = spark.createDataFrame(raw_tract_rows, schema=RAW_TRACT_SPARK_SCHEMA)
+        _vintage_snapshot_write(
+            spark, f"{source_catalog}.{RAW_SCHEMA}.{TRACT_TABLE}", raw_t_df, tract_vintages
+        )
+        if raw_zip_rows:
+            raw_z_df = spark.createDataFrame(raw_zip_rows, schema=ZIP_SPARK_SCHEMA)
+            _vintage_snapshot_write(
+                spark, f"{source_catalog}.{RAW_SCHEMA}.{ZIP_TABLE}", raw_z_df, zip_vintages
+            )
+
+        # 2. Promote canonical (model catalog) from raw, vintage_snapshot.
+        _promote_tract(spark, source_catalog, model_catalog, tract_vintages)
+        if raw_zip_rows:
+            _promote_zip(spark, source_catalog, model_catalog, zip_vintages)
+
+        _comment_tables(spark, source_catalog, model_catalog, wrote_zip=bool(raw_zip_rows))
+        _create_zcta_view(spark, model_catalog)
+
+    def _register(spark: SparkSession) -> None:
+        _register_raw(spark, source_catalog, wrote_zip=bool(raw_zip_rows))
+        _register_canonical(spark, source_catalog, model_catalog, wrote_zip=bool(raw_zip_rows))
 
     def _grant(spark: SparkSession) -> None:
-        # Reference data is canonical and pipeline-owned: both groups get reader-tier (ADR 0018).
-        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
-        grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-        grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
+        # Raw (source catalog) is engineer-owned, not reader-exposed (ADR 0018/0037).
+        grants.grant_schema_engineer(spark, source_catalog, RAW_SCHEMA, data_engineers_group)
+        grants.verify_schema_engineer(spark, source_catalog, RAW_SCHEMA, data_engineers_group)
+        # Canonical reference (model catalog) is reader-tier for both groups (ADR 0018).
+        grants.grant_schema_reader(spark, model_catalog, MODEL_SCHEMA, data_engineers_group)
+        grants.grant_schema_reader(spark, model_catalog, MODEL_SCHEMA, analysts_group)
+        grants.verify_schema_reader(spark, model_catalog, MODEL_SCHEMA, data_engineers_group)
+        grants.verify_schema_reader(spark, model_catalog, MODEL_SCHEMA, analysts_group)
 
+    # DQ + lifecycle are scoped to the model catalog (where the canonical consumer tables + their
+    # _ops live); _work/_register/_grant reach the source catalog explicitly for the raw layer.
     run_build(
-        catalog=catalog,
+        catalog=model_catalog,
         pipeline_reference=PIPELINE_REF,
         ensure=_ensure,
         work=_work,
-        register=lambda spark: _register(spark, catalog, requested, create_views=create_views),
+        register=_register,
         grant=_grant,
     )
 
 
-def _tract_row_dict(r: ruca.RucaTractRecord, source_file: str, now: datetime) -> dict[str, Any]:
+def _raw_tract_row(r: ruca.RucaTractRecord, source_file: str, now: datetime) -> dict[str, Any]:
+    """Source-fidelity raw tract row (no derived parents; those are added at promote)."""
     return {
         "geoid": r.geoid,
         "vintage": r.vintage,
-        "state_geoid": r.state_geoid,
-        "county_geoid": r.county_geoid,
         "state": r.state,
         "county": r.county,
         "primary_ruca": r.primary_ruca,
@@ -672,7 +747,7 @@ def _tract_row_dict(r: ruca.RucaTractRecord, source_file: str, now: datetime) ->
     }
 
 
-def _zip_row_dict(r: ruca.RucaZipRecord, source_file: str, now: datetime) -> dict[str, Any]:
+def _raw_zip_row(r: ruca.RucaZipRecord, source_file: str, now: datetime) -> dict[str, Any]:
     return {
         "zip_code": r.zip_code,
         "vintage": r.vintage,
@@ -688,7 +763,12 @@ def _zip_row_dict(r: ruca.RucaZipRecord, source_file: str, now: datetime) -> dic
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
+    parser.add_argument(
+        "--source-catalog", required=True, help="Source-aligned catalog for raw (ecdh_<env>)."
+    )
+    parser.add_argument(
+        "--model-catalog", required=True, help="Integrated catalog for canonical (ecdh_model_<env>)."
+    )
     parser.add_argument(
         "--vintage",
         type=int,
@@ -711,9 +791,6 @@ def main() -> None:
         default=0,
         help="Excel data sheet (name or 0-based index) for .xlsx/.xls vintages. Default: first sheet.",
     )
-    parser.add_argument(
-        "--no-current-views", action="store_true", help="Skip the *_current latest-vintage views."
-    )
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
     parser.add_argument("--analysts-group", default="ecdh-analysts")
     args = parser.parse_args()
@@ -721,14 +798,14 @@ def main() -> None:
     if isinstance(sheet, str) and sheet.isdigit():
         sheet = int(sheet)
     run(
-        args.catalog,
+        args.source_catalog,
+        args.model_catalog,
         args.vintage,
         args.data_engineers_group,
         args.analysts_group,
         tract_url=args.tract_url,
         zip_url=args.zip_url,
         sheet=sheet,
-        create_views=not args.no_current_views,
     )
 
 

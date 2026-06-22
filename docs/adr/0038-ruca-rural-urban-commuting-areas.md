@@ -154,3 +154,29 @@ alias-tolerant header parsing, code validation, cross-decade non-comparability, 
 **Migration** is placement + registration, not a rewrite: add the `geography_raw` raw layer and the
 promote to the model catalog, swap the write to atomic `replaceWhere` / `vintage_snapshot`, and drop
 the `_current` views; the builder fold-in follows when the builder exists. Tracked in the backlog.
+
+### Applied (2026-06-22) — hand-rolled deltas 1–3, 5; delta 6 deferred
+Deltas 1–3 and 5 are implemented in this PR (the ADR 0036 builder has not landed, so delta 6 — the
+builder fold-in — is deferred to a tracked follow-up, as the sequencing note allows):
+
+- **Delta 1 (placement):** `build_ruca.py` now takes `--source-catalog` + `--model-catalog`. It
+  lands raw in `ecdh_<env>.geography_raw.us_ruca_tract` / `.us_ruca_zip` (fetched-as-is, 1:1 with
+  source, vintage-stamped, engineer-only) and promotes the canonical `geography.us_ruca_tract` /
+  `us_ruca_zip` to the model catalog (tract derives `state_geoid`/`county_geoid` at promote). Simple
+  tier — no `_processed` stage.
+- **Delta 2 (`vintage_snapshot`):** `VINTAGE_SNAPSHOT` added to `UpdateSemantics`
+  (`common/vocabularies.py`); raw + canonical register as `vintage_snapshot` and write via atomic
+  Delta `replaceWhere` (first build seeds), replacing `snapshot_replace` + `DELETE`/`append`.
+- **Delta 3 (`_current` views):** dropped; `us_ruca_zcta` bridge view retained.
+- **Delta 4 (conformance):** confirmed — RUCA `vintage` is the decennial geography vintage, so the
+  `(geoid, vintage)` / `(zip_code, vintage)` joins to `us_tract` / `us_zcta` are 0035-conformant
+  (verified by the runbook's conformance join).
+- **Delta 5 (DQ / audit):** `ingested_at` retained; DQ recorded against the canonical (consumer)
+  table names. Full `TableDQ` (ADR 0029) adoption rides with the delta-6 builder fold-in.
+- **Delta 6 (builder fold-in):** **deferred** — tracked follow-up; fold `ruca.py`'s parser + a
+  `ReferenceTableSpec` into `build_reference_table` when the ADR 0036 builder lands.
+
+Per-layer registration (raw → source `_ops`, engineer-tier grants; canonical/view → model `_ops`,
+reader-tier) and the drop+rebuild runbook (`docs/runbooks/realign-ruca-source-path.sql`, mirroring
+`rename-icd-cm-tables.sql`) are included. The canonical table shapes are unchanged, so consumers are
+unaffected.
