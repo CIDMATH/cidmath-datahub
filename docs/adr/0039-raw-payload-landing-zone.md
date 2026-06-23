@@ -44,7 +44,7 @@ silently, so they warrant archiving **as much as or more than** files.
 
    | Source behavior (→ table semantics) | Volume retention mode | Fetch behavior |
    |---|---|---|
-   | Immutable vintaged (→ `vintage_snapshot`) | **one payload set per vintage**, immutable | fetch once; **skip if present** |
+   | Immutable vintaged (→ `vintage_snapshot`) | **one payload set per vintage**, immutable | fetch once **per `(landing, vintage)`**; skip if that combo is already present |
    | Revise-in-place (→ `snapshot_replace`/SCD2) | **timestamped snapshot per extraction**, never overwrite a date | fetch each run (= 0032's mechanism) |
    | Incremental/append (→ `append_only`/merge) | **payload per extraction batch/window** | fetch each window |
    | Generated (no extraction) | **none** | n/a |

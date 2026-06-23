@@ -466,8 +466,11 @@ def _ensure_and_fetch_volume(
 ) -> None:
     """Phase 0: create the landing Volume and fetch each payload into it (ADR 0039).
 
-    Immutable-vintage payloads already present are skipped (zero re-fetch); snapshot and
-    batch modes fetch every run. No-op when the build has no Volume-backed landings.
+    Fetch is per ``(landing, vintage)``. ``PER_VINTAGE_IMMUTABLE`` skips a fetch only when
+    *that landing's* payload for *that vintage* is already present — so re-running the same
+    landings+vintages does zero fetches, while a new vintage fetches only the missing combos.
+    ``SNAPSHOT_PER_RUN`` and ``PER_BATCH`` fetch every run. No-op when the build has no
+    Volume-backed landings.
     """
     volume_landings = [landing for landing in spec.raw_landings if landing.is_volume_backed]
     if not volume_landings:
