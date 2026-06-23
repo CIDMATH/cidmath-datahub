@@ -941,7 +941,7 @@ def run(
 # token (ADR 0006 refinement); the model canonical stays source-agnostic.
 
 # Raw = 1:1 source copies (stable column names across vintages; values untouched).
-RAW_STATE_SHAPEFILE_SCHEMA = T.StructType(
+RAW_SHAPEFILE_SCHEMA = T.StructType(
     [
         T.StructField("gisjoin", T.StringType(), False),
         T.StructField("vintage", T.IntegerType(), False),
@@ -952,7 +952,7 @@ RAW_STATE_SHAPEFILE_SCHEMA = T.StructType(
     ]
 )
 
-RAW_STATE_CENPOP_SCHEMA = T.StructType(
+RAW_CENPOP_SCHEMA = T.StructType(
     [
         T.StructField("gisjoin", T.StringType(), False),
         T.StructField("vintage", T.IntegerType(), False),
@@ -1009,12 +1009,47 @@ def _state_entity_map(iterator: Any) -> Any:
         yield pd.DataFrame(out, columns=cols)
 
 
-def _state_boundary_map(iterator: Any) -> Any:
-    """mapInPandas: raw shapefile geometry → processed us_state_boundary rows.
+def _county_entity_map(iterator: Any) -> Any:
+    """mapInPandas: raw county shapefile (+ cenpop join) → lean processed county rows.
 
-    Module-level (picklable). ``res_param`` / ``tol_param`` ride in as columns (added
-    by the caller) to avoid closing over driver state — names avoid a leading
-    underscore, which ``DataFrame.itertuples`` would rename away.
+    Reuses the pure ``geo.build_county_row`` (county name from the shapefile; ``state_geoid``
+    derived from the geoid). The state *labels* are joined on in ``process`` from the
+    same-catalog parent ``us_census_state``, not here.
+    """
+    import pandas as pd
+    from shapely import wkb as _wkb
+
+    cols = [f.name for f in COUNTY_SPARK_SCHEMA.fields]
+    for pdf in iterator:
+        out: list[dict[str, Any]] = []
+        for r in pdf.itertuples(index=False):
+            geom = _wkb.loads(bytes(r.geometry_wkb))
+            pt = geom.representative_point()
+            pop_lon = None if pd.isna(r.centroid_pop_lon) else float(r.centroid_pop_lon)
+            pop_lat = None if pd.isna(r.centroid_pop_lat) else float(r.centroid_pop_lat)
+            out.append(
+                geo.build_county_row(
+                    r.gisjoin,
+                    int(r.vintage),
+                    "" if pd.isna(r.src_name) else str(r.src_name),
+                    centroid_geo_lon=float(pt.x),
+                    centroid_geo_lat=float(pt.y),
+                    centroid_pop_lon=pop_lon,
+                    centroid_pop_lat=pop_lat,
+                    area_land_sqm=None if pd.isna(r.area_land_sqm) else float(r.area_land_sqm),
+                    area_water_sqm=None if pd.isna(r.area_water_sqm) else float(r.area_water_sqm),
+                )
+            )
+        yield pd.DataFrame(out, columns=cols)
+
+
+def _boundary_map(iterator: Any) -> Any:
+    """mapInPandas: raw shapefile geometry → processed ``<level>_boundary`` rows (any level).
+
+    Module-level (picklable). ``level_param`` (the bare gisjoin level — ``state`` /
+    ``county`` / ``tract`` / …), ``res_param`` and ``tol_param`` ride in as columns added
+    by the caller, avoiding closed-over driver state — names avoid a leading underscore,
+    which ``DataFrame.itertuples`` would rename away.
     """
     import pandas as pd
     from shapely import wkb as _wkb
@@ -1029,7 +1064,7 @@ def _state_boundary_map(iterator: Any) -> Any:
                 geom = geom.simplify(tol, preserve_topology=True)
             out.append(
                 {
-                    "geoid": geo.gisjoin_to_geoid(r.gisjoin, "state"),
+                    "geoid": geo.gisjoin_to_geoid(r.gisjoin, str(r.level_param)),
                     "vintage": int(r.vintage),
                     "gisjoin": str(r.gisjoin),
                     "geoid_system": gadm.GEOID_SYSTEM_CENSUS,
@@ -1133,7 +1168,7 @@ def build_state_layered(
             for _, rec in gdf.iterrows()
             if rec.geometry is not None and not rec.geometry.is_empty
         ]
-        return ctx.spark.createDataFrame(rows, RAW_STATE_SHAPEFILE_SCHEMA)
+        return ctx.spark.createDataFrame(rows, RAW_SHAPEFILE_SCHEMA)
 
     def _fetch_state_cenpop(v: int, vdir: str) -> None:
         _download_shapefiles(api_key, [CENPOP_SHAPEFILE_NAMES[("us_state", v)]], Path(vdir))
@@ -1145,7 +1180,7 @@ def build_state_layered(
             {"gisjoin": gj, "vintage": int(v), "centroid_pop_lon": lon, "centroid_pop_lat": lat}
             for gj, (lon, lat) in lookup.items()
         ]
-        return ctx.spark.createDataFrame(rows, RAW_STATE_CENPOP_SCHEMA)
+        return ctx.spark.createDataFrame(rows, RAW_CENPOP_SCHEMA)
 
     def _process_entity(ctx: BuildContext, v: int) -> Any:
         raw = ctx.spark.sql(f"SELECT * FROM {raw_state} WHERE vintage = {int(v)}")
@@ -1155,10 +1190,11 @@ def build_state_layered(
 
     def _process_boundary(ctx: BuildContext, v: int) -> Any:
         raw = ctx.spark.sql(
-            f"SELECT *, '{resolution}' AS res_param, CAST({float(tolerance)} AS DOUBLE) "
-            f"AS tol_param FROM {raw_state} WHERE vintage = {int(v)}"
+            f"SELECT *, 'state' AS level_param, '{resolution}' AS res_param, "
+            f"CAST({float(tolerance)} AS DOUBLE) AS tol_param FROM {raw_state} "
+            f"WHERE vintage = {int(v)}"
         )
-        return raw.mapInPandas(_state_boundary_map, schema=BOUNDARY_LEVEL_SPARK_SCHEMA)
+        return raw.mapInPandas(_boundary_map, schema=BOUNDARY_LEVEL_SPARK_SCHEMA)
 
     def _promote_entity(ctx: BuildContext, v: int) -> Any:
         return ctx.spark.sql(f"SELECT * FROM {proc_state} WHERE vintage = {int(v)}")
@@ -1256,6 +1292,252 @@ def build_state_layered(
     return build_reference(spec, vintages=vintages)
 
 
+def build_county_layered(
+    *,
+    source_catalog: str,
+    model_catalog: str,
+    vintages: list[int],
+    data_engineers_group: str,
+    analysts_group: str,
+    api_key: str,
+    simplify_tolerance: float = 0.005,
+    full_resolution: bool = False,
+) -> tuple[str, str]:
+    """Build us_county via the shared builder (ADR 0036) — parents-first, after us_state.
+
+    The processed entity joins the same-catalog ``us_census_state`` for the denormalized
+    state labels (ADR 0037 decision 7), so ``us_state`` must already be built. The enriched
+    canonical ``us_county`` supersedes the ``us_county_enriched`` view (ADR 0028 retired).
+    """
+    resolution = "full" if full_resolution else "generalized"
+    tolerance = 0.0 if full_resolution else simplify_tolerance
+
+    raw_county = f"{source_catalog}.geography_raw.us_census_county"
+    raw_cenpop = f"{source_catalog}.geography_raw.us_census_county_cenpop"
+    proc_county = f"{source_catalog}.geography_processed.us_census_county"
+    proc_boundary = f"{source_catalog}.geography_processed.us_census_county_boundary"
+    proc_state = f"{source_catalog}.geography_processed.us_census_state"  # parent (labels)
+
+    def _ensure_staging(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_raw "
+            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source files). ADR 0037.'"
+        )
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_processed "
+            f"COMMENT 'Source-catalog processed/derived geography (engineer-only). ADR 0037.'"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {raw_county} (gisjoin STRING, vintage INT, src_name STRING, "
+            f"area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) USING DELTA"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {raw_cenpop} (gisjoin STRING, vintage INT, "
+            f"centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE) USING DELTA"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {proc_county} (geoid STRING, vintage INT, state_geoid STRING, "
+            f"gisjoin STRING, name STRING, centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, "
+            f"centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, area_land_sqm DOUBLE, "
+            f"area_water_sqm DOUBLE, state_name STRING, state_stusps STRING, "
+            f"state_hhs_region INT) USING DELTA"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, gisjoin STRING, "
+            f"geoid_system STRING, resolution STRING, geometry_wkb BINARY) USING DELTA"
+        )
+
+    def _ensure_canonical(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {model_catalog}.{SCHEMA} "
+            f"COMMENT 'Canonical US geography reference (source-agnostic). ADR 0020/0037.'"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_county (geoid STRING, "
+            f"vintage INT, state_geoid STRING, gisjoin STRING, name STRING, centroid_geo_lon DOUBLE, "
+            f"centroid_geo_lat DOUBLE, centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, "
+            f"area_land_sqm DOUBLE, area_water_sqm DOUBLE, state_name STRING, state_stusps STRING, "
+            f"state_hhs_region INT) USING DELTA"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_county_boundary (geoid STRING, "
+            f"vintage INT, gisjoin STRING, geoid_system STRING, resolution STRING, "
+            f"geometry_wkb BINARY) USING DELTA"
+        )
+
+    def _fetch_shapefile(v: int, vdir: str) -> None:
+        _download_shapefiles(api_key, [SHAPEFILE_NAMES[("us_county", v)]], Path(vdir))
+
+    def _read_shapefile(ctx: BuildContext, v: int, vdir: str) -> Any:
+        staged = _stage_volume_payload(vdir)
+        gdf = _read_gdf(_find_shapefile(staged, "us_county", v))
+        cols = list(gdf.columns)
+        gj = _first_col(cols, ["GISJOIN", "gisjoin"])
+        name_col = _first_col(cols, ["NAME", "NAMELSAD", "NHGISNAM", "NAME10", "NAME20", "name"])
+        aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
+        awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
+        if gj is None:
+            raise ValueError(f"county shapefile has no GISJOIN column; columns={cols}")
+        rows = [
+            {
+                "gisjoin": str(rec[gj]).strip().upper(),
+                "vintage": int(v),
+                "src_name": str(rec[name_col]) if name_col else None,
+                "area_land_sqm": _num(rec[aland]) if aland else None,
+                "area_water_sqm": _num(rec[awater]) if awater else None,
+                "geometry_wkb": rec.geometry.wkb,
+            }
+            for _, rec in gdf.iterrows()
+            if rec.geometry is not None and not rec.geometry.is_empty
+        ]
+        return ctx.spark.createDataFrame(rows, RAW_SHAPEFILE_SCHEMA)
+
+    def _fetch_cenpop(v: int, vdir: str) -> None:
+        _download_shapefiles(api_key, [CENPOP_SHAPEFILE_NAMES[("us_county", v)]], Path(vdir))
+
+    def _read_cenpop(ctx: BuildContext, v: int, vdir: str) -> Any:
+        staged = _stage_volume_payload(vdir)
+        lookup = _read_cenpop_lookup(staged, "us_county", v)
+        rows = [
+            {"gisjoin": gj, "vintage": int(v), "centroid_pop_lon": lon, "centroid_pop_lat": lat}
+            for gj, (lon, lat) in lookup.items()
+        ]
+        return ctx.spark.createDataFrame(rows, RAW_CENPOP_SCHEMA)
+
+    def _process_entity(ctx: BuildContext, v: int) -> Any:
+        raw = ctx.spark.sql(f"SELECT * FROM {raw_county} WHERE vintage = {int(v)}")
+        cen = ctx.spark.sql(f"SELECT * FROM {raw_cenpop} WHERE vintage = {int(v)}")
+        lean = raw.join(cen, ["gisjoin", "vintage"], "left").mapInPandas(
+            _county_entity_map, schema=COUNTY_SPARK_SCHEMA
+        )
+        # Enrich with state labels from the same-catalog parent (parents-first; ADR 0037 #7).
+        state = ctx.spark.sql(
+            f"SELECT geoid AS state_geoid, name AS state_name, stusps AS state_stusps, "
+            f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
+        )
+        return lean.join(state, ["state_geoid"], "left").select(
+            "geoid", "vintage", "state_geoid", "gisjoin", "name",
+            "centroid_geo_lon", "centroid_geo_lat", "centroid_pop_lon", "centroid_pop_lat",
+            "area_land_sqm", "area_water_sqm", "state_name", "state_stusps", "state_hhs_region",
+        )
+
+    def _process_boundary(ctx: BuildContext, v: int) -> Any:
+        raw = ctx.spark.sql(
+            f"SELECT *, 'county' AS level_param, '{resolution}' AS res_param, "
+            f"CAST({float(tolerance)} AS DOUBLE) AS tol_param FROM {raw_county} "
+            f"WHERE vintage = {int(v)}"
+        )
+        return raw.mapInPandas(_boundary_map, schema=BOUNDARY_LEVEL_SPARK_SCHEMA)
+
+    def _promote_entity(ctx: BuildContext, v: int) -> Any:
+        return ctx.spark.sql(f"SELECT * FROM {proc_county} WHERE vintage = {int(v)}")
+
+    def _promote_boundary(ctx: BuildContext, v: int) -> Any:
+        return ctx.spark.sql(f"SELECT * FROM {proc_boundary} WHERE vintage = {int(v)}")
+
+    def _validate_entity(ctx: BuildContext, staging_fqn: str) -> None:
+        dq = make_staging_dq(ctx, staging_fqn, record_table="geography_processed.us_census_county")
+        dq.unique(keys=["geoid", "vintage"], check_name="us_census_county_pk_unique")
+        dq.not_null(
+            columns=["geoid", "state_geoid", "name"], check_name="us_census_county_core_not_null"
+        )
+        # Parent-FK within vintage: every county's state_geoid resolves in us_census_state.
+        for v in vintages:
+            make_staging_dq(
+                ctx,
+                staging_fqn,
+                record_table="geography_processed.us_census_county",
+                where=f"vintage = {int(v)}",
+            ).fk(
+                key="state_geoid",
+                parent_table=proc_state,
+                parent_key="geoid",
+                parent_where=f"vintage = {int(v)}",
+                check_name=f"us_census_county_state_fk_{v}",
+            )
+
+    def _validate_boundary(ctx: BuildContext, staging_fqn: str) -> None:
+        dq = make_staging_dq(
+            ctx, staging_fqn, record_table="geography_processed.us_census_county_boundary"
+        )
+        dq.unique(keys=["geoid", "vintage"], check_name="us_census_county_boundary_pk_unique")
+        dq.not_null(columns=["geometry_wkb"], check_name="us_census_county_boundary_geom_not_null")
+
+    base_entry = registration.DatasetCatalogEntry(
+        full_table_name="(set per layer by the builder)",
+        subject=SCHEMA,
+        layer="reference",
+        description="US counties, vintaged.",
+        public_health_relevance="Canonical county spatial unit; the standard US surveillance grain.",
+        spatial_resolution="us_county",
+        spatial_coverage="United States",
+        source_provider_code="ipums_nhgis",
+        source_origin_code="census",
+        source_url=NHGIS_SOURCE_URL,
+        source_documentation_url=NHGIS_DOC_URL,
+        license=NHGIS_LICENSE,
+        dua_required=True,
+        dua_reference=NHGIS_DUA_REFERENCE,
+        access_tier="restricted",
+        external_maintainer_name=NHGIS_MAINTAINER,
+        is_hosted=True,
+    )
+
+    spec = ReferenceBuildSpec(
+        subject=SCHEMA,
+        source_catalog=source_catalog,
+        model_catalog=model_catalog,
+        pipeline_reference=PIPELINE_REF,
+        reader_groups=(data_engineers_group, analysts_group),
+        engineer_group=data_engineers_group,
+        base_catalog_entry=base_entry,
+        raw_landings=[
+            RawLanding(
+                table="us_census_county",
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch_shapefile,
+                read_from_volume=_read_shapefile,
+                description="IPUMS NHGIS county boundary shapefile, as-is (attributes + geometry).",
+            ),
+            RawLanding(
+                table="us_census_county_cenpop",
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch_cenpop,
+                read_from_volume=_read_cenpop,
+                description="Census Centers of Population for counties, as-is.",
+            ),
+        ],
+        outputs=[
+            CanonicalOutput(
+                canonical_table="us_county",
+                reads=("us_census_county", "us_census_county_cenpop"),
+                process=_process_entity,
+                processed_table="us_census_county",
+                promote=_promote_entity,
+                validate_staging=_validate_entity,
+                description="US counties, one row per county per vintage, enriched with state labels.",
+                public_health_relevance=(
+                    "Canonical county spatial unit; the standard grain for U.S. infectious-disease "
+                    "surveillance and the spatial backbone other subjects join to."
+                ),
+            ),
+            CanonicalOutput(
+                canonical_table="us_county_boundary",
+                reads=("us_census_county",),
+                process=_process_boundary,
+                processed_table="us_census_county_boundary",
+                promote=_promote_boundary,
+                validate_staging=_validate_boundary,
+                canonical_cluster_columns=["vintage"],
+                description="US county boundary polygons (WKB) by vintage/resolution.",
+            ),
+        ],
+        ensure_staging=_ensure_staging,
+        ensure_canonical=_ensure_canonical,
+    )
+    return build_reference(spec, vintages=vintages)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
@@ -1286,28 +1568,38 @@ def main() -> None:
     parser.add_argument(
         "--layered-state",
         action="store_true",
-        help="Build us_state via the shared reference builder (ADR 0036) on the layered "
+        help="Build us_state only via the shared reference builder (ADR 0036), on the layered "
         "raw/processed/canonical path, instead of the legacy whole-geography build.",
+    )
+    parser.add_argument(
+        "--layered",
+        action="store_true",
+        help="Build the layered geography chain parents-first (us_state -> us_county; more "
+        "levels as migrated) via the shared builder (ADR 0036/0037).",
     )
     args = parser.parse_args()
 
     vintages = [int(v) for v in args.vintages.split(",") if v.strip()]
 
-    if args.layered_state:
+    if args.layered or args.layered_state:
         if not args.ipums_secret_scope:
             raise ValueError("--ipums-secret-scope is required to pull NHGIS shapefiles")
         source_catalog = args.source_catalog or args.catalog.replace("ecdh_model_", "ecdh_")
         api_key = _get_secret(args.ipums_secret_scope, args.ipums_secret_key)
-        build_state_layered(
-            source_catalog=source_catalog,
-            model_catalog=args.catalog,
-            vintages=vintages,
-            data_engineers_group=args.data_engineers_group,
-            analysts_group=args.analysts_group,
-            api_key=api_key,
-            simplify_tolerance=args.simplify_tolerance,
-            full_resolution=args.full_resolution,
-        )
+        level_kwargs = {
+            "source_catalog": source_catalog,
+            "model_catalog": args.catalog,
+            "vintages": vintages,
+            "data_engineers_group": args.data_engineers_group,
+            "analysts_group": args.analysts_group,
+            "api_key": api_key,
+            "simplify_tolerance": args.simplify_tolerance,
+            "full_resolution": args.full_resolution,
+        }
+        # Parents-first: us_state, then the children that join it (us_county, ...).
+        build_state_layered(**level_kwargs)
+        if args.layered:
+            build_county_layered(**level_kwargs)
         return
 
     run(

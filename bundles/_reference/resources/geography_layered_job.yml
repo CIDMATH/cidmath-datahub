@@ -18,7 +18,7 @@
 resources:
   jobs:
     build_geography_layered:
-      name: "[_reference] build_geography_layered (us_state)"
+      name: "[_reference] build_geography_layered (us_state, us_county)"
       description: |
         Layered us_state build (ADR 0036/0037 proving ground). Lands the TIGER/NHGIS
         state shapefile + CenPop file 1:1 in geography_raw, derives the attribute and
@@ -31,7 +31,7 @@ resources:
           spark_python_task:
             python_file: ../src/build_geography.py
             parameters:
-              - "--layered-state"
+              - "--layered"
               - "--catalog"
               - "${var.model_catalog}"
               - "--source-catalog"
