@@ -6,7 +6,8 @@ Proposed. **Amends ADR 0014** (reference now uses the landing→model path, not 
 catalog is the **raw/landing layer**, origin-agnostic — not exclusively externally-sourced);
 **simplifies/extends ADR 0036** (one placement model + an optional processed stage). Relates to 0001
 (layering), 0021/0028 (geography), 0032 (raw Volume snapshots), 0034 (vintage model), 0035
-(`(geoid, geo_vintage)` conformance for augmenting inputs).
+(`(geoid, geo_vintage)` conformance for augmenting inputs), 0039 (Volume payload landing for all
+extracted sources — the raw layer now lands via a Volume first).
 
 ## Context
 Reference builds historically went straight to the **model** catalog in one step. That (a) is a soft
@@ -33,7 +34,10 @@ promoted canonical.
    external source *or* **produced by internal logic** (the generator's output is the raw landing).
    The canonical/enriched table is promoted to `ecdh_model_<env>.<subject>.<table>`. Flow is
    landing→model only, never model→source. Every layer is vintage-stamped (`vintage_snapshot`, ADR
-   0034); the immutable Volume snapshot (ADR 0032) is retained for revise-in-place *sourced* inputs.
+   0034). Per **ADR 0039** the raw layer lands in two steps: every **fetched** source's payload first
+   lands verbatim in a source-catalog **Volume**, and the raw Delta table is built 1:1 from it
+   (generalizing ADR 0032's revise-in-place snapshot to *all* extracted sources, for fetch-avoidance +
+   fidelity); **generated** reference has no Volume (its raw = the generator output).
 
 2. **The processed stage is optional, gated by complexity** — this is the only thing "tier" decides
    (not the catalog):

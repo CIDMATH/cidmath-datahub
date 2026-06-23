@@ -45,8 +45,11 @@ Conventions baked in so adopters can't drift:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from cidmath_datahub.common import grants, registration
@@ -66,20 +69,69 @@ log = get_logger(__name__)
 EnsureFn = Callable[["SparkSession"], None]
 PerVintageFrameFn = Callable[[BuildContext, int], "DataFrame"]
 ValidateFn = Callable[[BuildContext, str], None]
+FetchToVolumeFn = Callable[[int, str], None]  # (vintage, volume_dir) -> writes payload files
+ReadFromVolumeFn = Callable[[BuildContext, int, str], "DataFrame"]  # (ctx, vintage, volume_dir)
+
+
+class LandingRetention(StrEnum):
+    """How a raw source payload is retained in the landing Volume (ADR 0039).
+
+    Mirrors the table's update_semantics, chosen from the same source-behavior call.
+    """
+
+    # one payload per vintage, immutable; fetch once, skip if already present
+    PER_VINTAGE_IMMUTABLE = "per_vintage_immutable"
+    # timestamped snapshot each run, never overwrite a date (revise-in-place; ADR 0032)
+    SNAPSHOT_PER_RUN = "snapshot_per_run"
+    # one payload per extraction batch/window
+    PER_BATCH = "per_batch"
+    # no Volume — generated reference (no extraction), or a not-yet-migrated direct acquire
+    NONE = "none"
 
 
 @dataclass(frozen=True, kw_only=True)
 class RawLanding:
-    """One source file copied 1:1 into ``<source_catalog>.<subject>_raw``.
+    """One source payload landed 1:1 into ``<source_catalog>.<subject>_raw`` (ADR 0039).
 
-    ``acquire(ctx, vintage)`` reads the source file (fetch or generate) and returns
-    a DataFrame for that vintage — a faithful copy, carrying the vintage column. No
-    derivation here; splitting/joining happens in an output's ``process``.
+    Two shapes:
+      - **Volume-backed** (``landing_retention != NONE``): ``fetch_to_volume(vintage, dir)``
+        writes the verbatim extracted payload (file, or an API/query response) into a
+        landing Volume; ``read_from_volume(ctx, vintage, dir)`` reads it into the 1:1 raw
+        DataFrame. The builder fetches once for immutable vintages (skip-if-present) and a
+        fresh snapshot per run otherwise.
+      - **Direct** (``landing_retention == NONE``): ``acquire(ctx, vintage)`` returns the raw
+        DataFrame with no Volume — for purely generated reference (no extraction) or a
+        not-yet-migrated source.
+
+    Either way the raw table is a faithful 1:1 copy; derivation happens in ``process``.
     """
 
     table: str  # source-tokened name, e.g. "us_census_state", "us_census_state_cenpop"
-    acquire: PerVintageFrameFn
+    landing_retention: LandingRetention = LandingRetention.NONE
+    acquire: PerVintageFrameFn | None = None
+    fetch_to_volume: FetchToVolumeFn | None = None
+    read_from_volume: ReadFromVolumeFn | None = None
     description: str | None = None  # _ops row (layer=raw); falls back to the build's base entry
+
+    def __post_init__(self) -> None:
+        if self.landing_retention == LandingRetention.NONE:
+            if self.acquire is None:
+                raise ValueError(f"{self.table}: landing_retention=none needs an `acquire` hook")
+            if self.fetch_to_volume is not None or self.read_from_volume is not None:
+                raise ValueError(
+                    f"{self.table}: a direct (`acquire`) landing must not set Volume hooks"
+                )
+        else:
+            if self.fetch_to_volume is None or self.read_from_volume is None:
+                raise ValueError(
+                    f"{self.table}: Volume landing needs `fetch_to_volume` + `read_from_volume`"
+                )
+            if self.acquire is not None:
+                raise ValueError(f"{self.table}: a Volume-backed landing must not set `acquire`")
+
+    @property
+    def is_volume_backed(self) -> bool:
+        return self.landing_retention != LandingRetention.NONE
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -199,17 +251,23 @@ def build_reference(
 
         spark = _SparkSession.builder.getOrCreate()
 
+    run_date = datetime.now(tz=UTC).date().isoformat()
+
+    # ---- Phase 0: land verbatim source payloads in the Volume (ADR 0039) ------
+    # Fetch each Volume-backed landing's payload into the landing Volume before any
+    # parsing; immutable vintages are skipped if already present (zero re-fetch).
+    _ensure_and_fetch_volume(spec, spark, vintages, run_date)
+
     # ---- Phase A: source-catalog staging -------------------------------------
     def _work_staging(ctx: BuildContext) -> None:
         for v in vintages:
             for landing in spec.raw_landings:
-                _write_vintage(
-                    ctx.spark,
-                    spec.raw_fqn(landing.table),
-                    landing.acquire(ctx, v),
-                    spec.vintage_column,
-                    v,
-                )
+                if landing.is_volume_backed:
+                    vdir = _landing_volume_dir(spec, landing, v, run_date)
+                    df = landing.read_from_volume(ctx, v, vdir)
+                else:
+                    df = landing.acquire(ctx, v)
+                _write_vintage(ctx.spark, spec.raw_fqn(landing.table), df, spec.vintage_column, v)
             for out in spec.outputs:
                 if out.process is not None:
                     _write_vintage(
@@ -372,6 +430,68 @@ def _layer_engineering_entry(
         cluster_columns=list(cluster_columns) if cluster_columns else None,
         pipeline_reference=spec.pipeline_reference,
     )
+
+
+def _landing_volume(spec: ReferenceBuildSpec) -> str:
+    """The fully-qualified landing Volume for a build's raw payloads (ADR 0039)."""
+    return f"{spec.source_catalog}.{spec.raw_schema}._landing"
+
+
+def _landing_volume_dir(
+    spec: ReferenceBuildSpec, landing: RawLanding, vintage: int, run_date: str
+) -> str:
+    """Filesystem path (under the landing Volume) for one landing's payload (ADR 0039)."""
+    root = f"/Volumes/{spec.source_catalog}/{spec.raw_schema}/_landing/{landing.table}"
+    if landing.landing_retention == LandingRetention.PER_VINTAGE_IMMUTABLE:
+        return f"{root}/vintage={int(vintage)}"
+    if landing.landing_retention == LandingRetention.SNAPSHOT_PER_RUN:
+        return f"{root}/snapshot_date={run_date}"
+    # PER_BATCH: use the vintage as the batch-window key for now (not yet exercised).
+    return f"{root}/batch={int(vintage)}"
+
+
+def _volume_dir_has_content(path: str) -> bool:
+    """True if the Volume dir exists and is non-empty (driver FUSE; safe-False on error)."""
+    try:
+        return os.path.isdir(path) and bool(os.listdir(path))
+    except OSError:
+        return False
+
+
+def _ensure_and_fetch_volume(
+    spec: ReferenceBuildSpec,
+    spark: SparkSession,
+    vintages: Sequence[int],
+    run_date: str,
+) -> None:
+    """Phase 0: create the landing Volume and fetch each payload into it (ADR 0039).
+
+    Immutable-vintage payloads already present are skipped (zero re-fetch); snapshot and
+    batch modes fetch every run. No-op when the build has no Volume-backed landings.
+    """
+    volume_landings = [landing for landing in spec.raw_landings if landing.is_volume_backed]
+    if not volume_landings:
+        return
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {spec.source_catalog}.{spec.raw_schema}")
+    spark.sql(
+        f"CREATE VOLUME IF NOT EXISTS {_landing_volume(spec)} "
+        f"COMMENT 'Verbatim raw source payloads — engineer-only landing zone. ADR 0039.'"
+    )
+    for landing in volume_landings:
+        for v in vintages:
+            vdir = _landing_volume_dir(spec, landing, v, run_date)
+            if landing.landing_retention == LandingRetention.PER_VINTAGE_IMMUTABLE and (
+                _volume_dir_has_content(vdir)
+            ):
+                log.info("landing payload present; skipping fetch", extra={"dir": vdir})
+                continue
+            os.makedirs(vdir, exist_ok=True)
+            assert landing.fetch_to_volume is not None  # guaranteed for volume-backed landings
+            landing.fetch_to_volume(v, vdir)
+            log.info(
+                "fetched landing payload",
+                extra={"table": landing.table, "vintage": v, "dir": vdir},
+            )
 
 
 def _write_vintage(

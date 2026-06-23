@@ -43,6 +43,17 @@ def _landing(**overrides):
     return rb.RawLanding(**defaults)
 
 
+def _volume_landing(**overrides):
+    defaults = dict(
+        table="us_census_state",
+        landing_retention=rb.LandingRetention.PER_VINTAGE_IMMUTABLE,
+        fetch_to_volume=lambda _v, _d: None,
+        read_from_volume=lambda _ctx, _v, _d: None,
+    )
+    defaults.update(overrides)
+    return rb.RawLanding(**defaults)
+
+
 def _output(**overrides):
     defaults = dict(
         canonical_table="us_state",
@@ -194,3 +205,60 @@ class TestLayerEntryCloning:
 
     def test_engineering_entry_cluster_columns_optional(self):
         assert rb._layer_engineering_entry(_spec(), "t", None).cluster_columns is None
+
+
+@pytest.mark.unit
+class TestRawLandingValidation:
+    def test_direct_landing_is_not_volume_backed(self):
+        assert _landing().is_volume_backed is False
+
+    def test_direct_landing_needs_acquire(self):
+        with pytest.raises(ValueError, match="needs an `acquire` hook"):
+            rb.RawLanding(table="t")
+
+    def test_direct_landing_rejects_volume_hooks(self):
+        with pytest.raises(ValueError, match="must not set Volume hooks"):
+            rb.RawLanding(
+                table="t", acquire=lambda _c, _v: None, fetch_to_volume=lambda _v, _d: None
+            )
+
+    def test_volume_landing_is_volume_backed(self):
+        assert _volume_landing().is_volume_backed is True
+
+    def test_volume_landing_needs_both_hooks(self):
+        with pytest.raises(ValueError, match="needs `fetch_to_volume`"):
+            rb.RawLanding(
+                table="t",
+                landing_retention=rb.LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=lambda _v, _d: None,
+            )
+
+    def test_volume_landing_rejects_acquire(self):
+        with pytest.raises(ValueError, match="must not set `acquire`"):
+            rb.RawLanding(
+                table="t",
+                landing_retention=rb.LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=lambda _v, _d: None,
+                read_from_volume=lambda _c, _v, _d: None,
+                acquire=lambda _c, _v: None,
+            )
+
+
+@pytest.mark.unit
+class TestVolumePaths:
+    def test_landing_volume_name(self):
+        assert rb._landing_volume(_spec()) == "ecdh_dev.geography_raw._landing"
+
+    def test_per_vintage_immutable_dir(self):
+        lnd = _volume_landing()
+        s = _spec(raw_landings=[lnd], outputs=[_output()])
+        got = rb._landing_volume_dir(s, lnd, 2020, "2026-06-22")
+        want = "/Volumes/ecdh_dev/geography_raw/_landing/us_census_state/vintage=2020"
+        assert got == want
+
+    def test_snapshot_per_run_dir(self):
+        lnd = _volume_landing(landing_retention=rb.LandingRetention.SNAPSHOT_PER_RUN)
+        s = _spec(raw_landings=[lnd], outputs=[_output()])
+        got = rb._landing_volume_dir(s, lnd, 2020, "2026-06-22")
+        want = "/Volumes/ecdh_dev/geography_raw/_landing/us_census_state/snapshot_date=2026-06-22"
+        assert got == want

@@ -7,6 +7,15 @@ per-vintage write, no `_current` views) and the `ingested_at` audit-column stand
 relates to 0035 (the `(geoid, geo_vintage)` conformance contract, for later fact builds). Triggered
 by the I1 review — see `docs/reviews/i1-build-end-to-end-findings.md`.
 
+**Refinement (2026-06-22, as built).** The builder generalized from a one-table `ReferenceTableSpec` +
+`build_reference_table` to a **subject pipeline**: `ReferenceBuildSpec` = `RawLanding[]` (1:1 source
+copies) → optional `processed` → `CanonicalOutput[]`, run via `build_reference` as **two `run_build`
+phases** (source-catalog staging → model-catalog promote; Phase A's gated DQ blocks the promote). Per
+**ADR 0039** a **Phase 0** lands each fetched payload in a source-catalog Volume first
+(`RawLanding.fetch_to_volume` / `read_from_volume` + a `landing_retention` mode); generated sources use
+a direct `acquire`. Proven on `us_state` in dev (2026-06-22). The prose below predates the rename — read
+`ReferenceTableSpec`/`build_reference_table` as `ReferenceBuildSpec`/`build_reference`.
+
 ## Context
 `run_build` (ADR 0027) standardized the build *lifecycle* (`ensure → [DQ] work → register →
 grant`), but everything *between the pure parser and `run_build`* is still hand-rolled per
