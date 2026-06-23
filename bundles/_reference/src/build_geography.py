@@ -34,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -48,6 +49,7 @@ from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.pipeline import BuildContext, run_build
 from cidmath_datahub.common.reference_builder import (
     CanonicalOutput,
+    LandingRetention,
     RawLanding,
     ReferenceBuildSpec,
     build_reference,
@@ -234,6 +236,20 @@ def _extract_all_zips(root: Path) -> None:
             with zipfile.ZipFile(zp) as zf:
                 zf.extractall(out)
             seen.add(zp)
+
+
+def _stage_volume_payload(volume_dir: str) -> Path:
+    """Copy a landing Volume dir's verbatim files to a temp dir and unzip them (ADR 0039).
+
+    The Volume holds the immutable as-fetched payload; reads work on a temp copy so the
+    Volume is never mutated (no ``*_unz`` dirs written into it).
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="nhgis_read_"))
+    for item in Path(volume_dir).glob("*"):
+        if item.is_file():
+            shutil.copy(item, tmp / item.name)
+    _extract_all_zips(tmp)
+    return tmp
 
 
 def _find_shapefile(root: Path, level: str, vintage: int, *, cenpop: bool = False) -> Path | None:
@@ -1039,16 +1055,6 @@ def build_state_layered(
     resolution = "full" if full_resolution else "generalized"
     tolerance = 0.0 if full_resolution else simplify_tolerance
 
-    names = [SHAPEFILE_NAMES[("us_state", v)] for v in vintages]
-    names += [
-        CENPOP_SHAPEFILE_NAMES[("us_state", v)]
-        for v in vintages
-        if ("us_state", v) in CENPOP_SHAPEFILE_NAMES
-    ]
-    workdir = Path(tempfile.mkdtemp(prefix="nhgis_state_"))
-    _download_shapefiles(api_key, names, workdir)
-    _extract_all_zips(workdir)
-
     raw_state = f"{source_catalog}.geography_raw.us_census_state"
     raw_cenpop = f"{source_catalog}.geography_raw.us_census_state_cenpop"
     proc_state = f"{source_catalog}.geography_processed.us_census_state"
@@ -1099,8 +1105,15 @@ def build_state_layered(
             f"geometry_wkb BINARY) USING DELTA"
         )
 
-    def _acquire_shapefile(ctx: BuildContext, v: int) -> Any:
-        gdf = _read_gdf(_find_shapefile(workdir, "us_state", v))
+    # ADR 0039: fetch the verbatim NHGIS extract into the landing Volume (per vintage,
+    # immutable — the builder skips this when the vintage is already present), then read
+    # the 1:1 raw frame from a temp copy of that payload.
+    def _fetch_state_shapefile(v: int, vdir: str) -> None:
+        _download_shapefiles(api_key, [SHAPEFILE_NAMES[("us_state", v)]], Path(vdir))
+
+    def _read_state_shapefile(ctx: BuildContext, v: int, vdir: str) -> Any:
+        staged = _stage_volume_payload(vdir)
+        gdf = _read_gdf(_find_shapefile(staged, "us_state", v))
         cols = list(gdf.columns)
         gj = _first_col(cols, ["GISJOIN", "gisjoin"])
         name_col = _first_col(cols, ["NAME", "NAMELSAD", "NHGISNAM", "NAME10", "NAME20", "name"])
@@ -1122,8 +1135,12 @@ def build_state_layered(
         ]
         return ctx.spark.createDataFrame(rows, RAW_STATE_SHAPEFILE_SCHEMA)
 
-    def _acquire_cenpop(ctx: BuildContext, v: int) -> Any:
-        lookup = _read_cenpop_lookup(workdir, "us_state", v)
+    def _fetch_state_cenpop(v: int, vdir: str) -> None:
+        _download_shapefiles(api_key, [CENPOP_SHAPEFILE_NAMES[("us_state", v)]], Path(vdir))
+
+    def _read_state_cenpop(ctx: BuildContext, v: int, vdir: str) -> Any:
+        staged = _stage_volume_payload(vdir)
+        lookup = _read_cenpop_lookup(staged, "us_state", v)
         rows = [
             {"gisjoin": gj, "vintage": int(v), "centroid_pop_lon": lon, "centroid_pop_lat": lat}
             for gj, (lon, lat) in lookup.items()
@@ -1195,12 +1212,16 @@ def build_state_layered(
         raw_landings=[
             RawLanding(
                 table="us_census_state",
-                acquire=_acquire_shapefile,
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch_state_shapefile,
+                read_from_volume=_read_state_shapefile,
                 description="IPUMS NHGIS state boundary shapefile, as-is (attributes + geometry).",
             ),
             RawLanding(
                 table="us_census_state_cenpop",
-                acquire=_acquire_cenpop,
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch_state_cenpop,
+                read_from_volume=_read_state_cenpop,
                 description="Census Centers of Population for states, as-is.",
             ),
         ],
