@@ -64,9 +64,13 @@ log = get_logger(__name__)
 SCHEMA = "geography"
 PIPELINE_REF = "bundles/_reference/src/build_geography.py"
 
-# Levels built from NHGIS polygon shapefiles, in dependency order (parents first
-# so tract FK checks can run against already-loaded state/county).
-LEVELS = ("us_state", "us_county", "us_tract", "us_zcta")
+# Levels still built by the LEGACY whole-geography build (run(), build_geography_reference).
+# us_state + us_county are migrated to the layered builder (build_geography_layered) and
+# removed here so the two builds stop colliding on geography.us_state / geography.us_county;
+# tract/zcta follow as they migrate, after which this legacy build is retired. tract's FK
+# checks load state/county geoids from the canonical tables (built by the layered job).
+# See docs/runbooks/geography-layered-cutover.md.
+LEVELS = ("us_tract", "us_zcta")
 
 # IPUMS NHGIS boundary shapefile API codes, keyed by (level, vintage). Pattern is
 # us_<level>_<year>_tl<tiger_basis>. Verify/extend against the live catalog with
@@ -679,9 +683,8 @@ def _register_dataset(
 
 
 def _comment_tables(spark: SparkSession, catalog: str) -> None:
+    # us_state + us_county are owned by the layered build now (cutover); not commented here.
     comments = {
-        "us_state": "US states + DC and territories, vintaged. Source IPUMS NHGIS. ADR 0020.",
-        "us_county": "US counties (geoid, vintage); state_geoid FK. Source IPUMS NHGIS. ADR 0020.",
         "us_tract": "US tracts (geoid, vintage); county + state FKs. Source IPUMS NHGIS. ADR 0020.",
         "us_zcta": "US ZCTAs (geoid, vintage); non-nesting. Source IPUMS NHGIS. ADR 0020.",
         "boundary": "Boundary polygons (WKB) by geo_level/vintage/resolution. ADR 0020.",
@@ -764,8 +767,26 @@ def run(
         # state/county geoids. DQ outcomes (uniqueness + FK) are recorded via
         # ctx.recorder and flushed by the run_build seam even on failure (ADR 0009).
         written: set[str] = set()
-        state_geoids: dict[int, set[str]] = {}
-        county_geoids: dict[int, set[str]] = {}
+        # State + county are built by the layered job now; load their geoids from the
+        # canonical tables so tract's FK still validates against the real parents.
+        state_geoids: dict[int, set[str]] = {
+            v: {
+                r["geoid"]
+                for r in spark.sql(
+                    f"SELECT DISTINCT geoid FROM {catalog}.{SCHEMA}.us_state WHERE vintage = {int(v)}"
+                ).collect()
+            }
+            for v in vintages
+        }
+        county_geoids: dict[int, set[str]] = {
+            v: {
+                r["geoid"]
+                for r in spark.sql(
+                    f"SELECT DISTINCT geoid FROM {catalog}.{SCHEMA}.us_county WHERE vintage = {int(v)}"
+                ).collect()
+            }
+            for v in vintages
+        }
 
         # boundary is shared/polymorphic: refresh only this build's geo_levels and
         # always append, so we never overwrite the country / country_subdivision
@@ -786,20 +807,7 @@ def run(
 
                 table_name = f"{SCHEMA}.{lvl}"
                 _check_unique(lvl, v, rows, recorder=ctx.recorder, table_name=table_name)
-                if lvl == "us_state":
-                    state_geoids[v] = {r["geoid"] for r in rows}
-                elif lvl == "us_county":
-                    county_geoids[v] = {r["geoid"] for r in rows}
-                    _check_fk(
-                        "us_county",
-                        rows,
-                        "state_geoid",
-                        state_geoids.get(v, set()),
-                        v,
-                        recorder=ctx.recorder,
-                        table_name=table_name,
-                    )
-                elif lvl == "us_tract":
+                if lvl == "us_tract":
                     _check_fk(
                         "us_tract",
                         rows,
@@ -831,32 +839,7 @@ def run(
     def _register(spark: SparkSession) -> None:
         _comment_tables(spark, catalog)
         _set_clustering(spark, catalog)
-        _register_dataset(
-            spark,
-            catalog=catalog,
-            table="us_state",
-            description="US states and DC (plus territories), one row per state per vintage.",
-            public_health_relevance=(
-                "Canonical state spatial unit that surveillance and modeling data conform "
-                "to; carries HHS region for federal regional rollups."
-            ),
-            spatial_resolution="us_state",
-            cluster_columns=None,
-            pipeline_reference=PIPELINE_REF,
-        )
-        _register_dataset(
-            spark,
-            catalog=catalog,
-            table="us_county",
-            description="US counties, one row per county per vintage, with state FK.",
-            public_health_relevance=(
-                "Canonical county spatial unit; the standard grain for U.S. infectious "
-                "disease surveillance and the spatial backbone other subjects join to."
-            ),
-            spatial_resolution="us_county",
-            cluster_columns=None,
-            pipeline_reference=PIPELINE_REF,
-        )
+        # us_state + us_county are registered by the layered build now (cutover).
         _register_dataset(
             spark,
             catalog=catalog,
