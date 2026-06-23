@@ -1575,13 +1575,21 @@ def main() -> None:
         "--layered",
         action="store_true",
         help="Build the layered geography chain parents-first (us_state -> us_county; more "
-        "levels as migrated) via the shared builder (ADR 0036/0037).",
+        "levels as migrated) in ONE process. Dev convenience; production uses --level + the job DAG.",
+    )
+    parser.add_argument(
+        "--level",
+        choices=["us_state", "us_county"],
+        default=None,
+        help="Build a single geography level via the shared builder (ADR 0036). Its parent levels "
+        "must already be built (their processed tables are joined for enrichment). This is the "
+        "per-level entry the job DAG calls, one task per level, ordered by depends_on.",
     )
     args = parser.parse_args()
 
     vintages = [int(v) for v in args.vintages.split(",") if v.strip()]
 
-    if args.layered or args.layered_state:
+    if args.level or args.layered or args.layered_state:
         if not args.ipums_secret_scope:
             raise ValueError("--ipums-secret-scope is required to pull NHGIS shapefiles")
         source_catalog = args.source_catalog or args.catalog.replace("ecdh_model_", "ecdh_")
@@ -1596,10 +1604,18 @@ def main() -> None:
             "simplify_tolerance": args.simplify_tolerance,
             "full_resolution": args.full_resolution,
         }
-        # Parents-first: us_state, then the children that join it (us_county, ...).
-        build_state_layered(**level_kwargs)
-        if args.layered:
+        # One build function per level; the job DAG (depends_on) enforces parents-first.
+        builders = {
+            "us_state": build_state_layered,
+            "us_county": build_county_layered,
+        }
+        if args.level:
+            builders[args.level](**level_kwargs)
+        elif args.layered:  # whole chain in one process (dev convenience), parents-first
+            build_state_layered(**level_kwargs)
             build_county_layered(**level_kwargs)
+        else:  # --layered-state
+            build_state_layered(**level_kwargs)
         return
 
     run(

@@ -1,37 +1,64 @@
-# Job: build us_state via the shared reference builder (ADR 0036/0037) on the
-# layered raw -> processed -> canonical path.
+# Job: build the layered geography subject (ADR 0036/0037/0039) on the
+# raw -> processed -> canonical path, ONE TASK PER LEVEL wired parents-first via
+# depends_on. The job DAG owns orchestration (ordering, retry, repair-from-failed-task,
+# safe parallelism); each build_<level>_layered owns the per-level computation. This
+# enables granular partial refreshes (re-run a level + its descendants) without
+# rebuilding the whole subject.
 #
 # Deliberately SEPARATE from build_geography_reference (the legacy whole-geography
-# build): both would write geography.us_state, so keeping them apart lets the
-# migration be validated in dev without the two colliding. The cutover (later)
-# removes us_state from the legacy job once the layered path is proven, then this
-# job grows to cover county/tract/zcta/block-group/block.
+# build): both write geography.us_*, so keeping them apart lets the migration be
+# validated in dev without colliding. The cutover (later) removes each migrated level
+# from the legacy job. Tract / zcta / block-group / block are added here as tasks.
 #
-# Lands geography_raw.us_census_state + us_census_state_cenpop (1:1 source copies),
-# derives geography_processed.us_census_state + us_census_state_boundary, and
-# promotes geography.us_state + geography.us_state_boundary. vintage_snapshot with a
-# DQ-gated promote (ADR 0034/0037). Geospatial libs are on this job's environment
-# only (ADR 0020). The IPUMS API key is read at runtime from ${var.ipums_secret_scope}.
+# Each level lands its 1:1 source payloads in the geography_raw landing Volume,
+# derives geography_processed.*, and promotes the source-agnostic geography.*.
+# vintage_snapshot with a DQ-gated promote (ADR 0034/0037/0039). Geospatial libs are
+# on this job's environment only (ADR 0020); the IPUMS key is read at runtime.
 #
-# See bundles/_reference/src/build_geography.py (build_state_layered) and ADR 0036/0037.
+# See bundles/_reference/src/build_geography.py (build_<level>_layered) + ADR 0036/0037/0039.
 
 resources:
   jobs:
     build_geography_layered:
-      name: "[_reference] build_geography_layered (us_state, us_county)"
+      name: "[_reference] build_geography_layered"
       description: |
-        Layered us_state build (ADR 0036/0037 proving ground). Lands the TIGER/NHGIS
-        state shapefile + CenPop file 1:1 in geography_raw, derives the attribute and
-        boundary tables in geography_processed, and promotes the source-agnostic
-        geography.us_state + geography.us_state_boundary. Long-running: IPUMS extracts
-        are asynchronous (submit -> poll -> download).
+        Layered geography build, parents-first per-level DAG (ADR 0036/0037/0039):
+        us_state -> us_county (-> us_tract -> ... as migrated). Each task lands 1:1
+        source payloads in the geography_raw landing Volume, derives geography_processed,
+        and promotes geography.*. Long-running: IPUMS extracts are asynchronous.
 
       tasks:
-        - task_key: build_geography_layered_state
+        - task_key: us_state
           spark_python_task:
             python_file: ../src/build_geography.py
             parameters:
-              - "--layered"
+              - "--level"
+              - "us_state"
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--vintages"
+              - "2010,2020"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+              - "--ipums-secret-scope"
+              - "${var.ipums_secret_scope}"
+              - "--ipums-secret-key"
+              - "${var.ipums_secret_key}"
+          environment_key: geography_layered_env
+
+        # Parents-first: us_county joins us_state's processed table for state labels.
+        - task_key: us_county
+          depends_on:
+            - task_key: us_state
+          spark_python_task:
+            python_file: ../src/build_geography.py
+            parameters:
+              - "--level"
+              - "us_county"
               - "--catalog"
               - "${var.model_catalog}"
               - "--source-catalog"
