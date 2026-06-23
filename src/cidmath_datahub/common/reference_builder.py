@@ -480,6 +480,11 @@ def _ensure_and_fetch_volume(
         f"CREATE VOLUME IF NOT EXISTS {_landing_volume(spec)} "
         f"COMMENT 'Verbatim raw source payloads — engineer-only landing zone. ADR 0039.'"
     )
+    # READ/WRITE VOLUME is a volume-scoped privilege, separate from the schema grants —
+    # the build reads + writes the landing files, so grant the engineer principal on it.
+    grants.grant_volume_engineer(
+        spark, spec.source_catalog, spec.raw_schema, "_landing", spec.engineer_group
+    )
     for landing in volume_landings:
         for v in vintages:
             vdir = _landing_volume_dir(spec, landing, v, run_date)

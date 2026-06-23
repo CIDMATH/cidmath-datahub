@@ -44,6 +44,11 @@ READER_SCHEMA_PRIVILEGES: tuple[str, ...] = (
     "USE SCHEMA",
     "SELECT",
 )
+# Engineer-tier on a UC Volume (ADR 0039 raw landing zone): read + write the files.
+VOLUME_ENGINEER_PRIVILEGES: tuple[str, ...] = (
+    "READ VOLUME",
+    "WRITE VOLUME",
+)
 
 
 def _grant_stmt(securable_type: str, securable_name: str, privilege: str, principal: str) -> str:
@@ -94,6 +99,17 @@ def volume_read_statements(catalog: str, schema: str, volume: str, principal: st
     return [_grant_stmt("VOLUME", name, "READ VOLUME", principal)]
 
 
+def volume_engineer_statements(catalog: str, schema: str, volume: str, principal: str) -> list[str]:
+    """Engineer-tier (READ + WRITE VOLUME) grant statements for a Volume (ADR 0039 landing zone).
+
+    The build writes raw payloads into the landing Volume and reads them back, so the
+    pipeline's engineer principal needs both; readers needing only the files use
+    :func:`volume_read_statements`.
+    """
+    name = f"{catalog}.{schema}.{volume}"
+    return [_grant_stmt("VOLUME", name, p, principal) for p in VOLUME_ENGINEER_PRIVILEGES]
+
+
 # --- Execution convenience wrappers ---
 
 
@@ -123,6 +139,13 @@ def grant_volume_reader(
 ) -> None:
     """Grant READ VOLUME on ``catalog.schema.volume`` to ``principal`` (ADR 0032)."""
     apply(spark, volume_read_statements(catalog, schema, volume, principal))
+
+
+def grant_volume_engineer(
+    spark: SparkSession, catalog: str, schema: str, volume: str, principal: str
+) -> None:
+    """Grant engineer-tier (READ + WRITE VOLUME) on a Volume to ``principal`` (ADR 0039)."""
+    apply(spark, volume_engineer_statements(catalog, schema, volume, principal))
 
 
 # --- Verification (read-back of applied grants) ---
