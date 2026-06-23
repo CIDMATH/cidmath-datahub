@@ -57,11 +57,13 @@ silently, so they warrant archiving **as much as or more than** files.
    the *source* catalog, consistent with reference data now landing source-first.)
 
 4. **Builder API (ADR 0036).** A `RawLanding` splits its single `acquire` into
-   `fetch_to_volume(ctx, vintage)` (idempotent; honors the retention mode — skips when an
-   immutable vintage's payload is already present) and `read_from_volume(ctx, vintage) →
-   DataFrame`, plus a `landing_retention` mode. `build_reference` gains a **Phase 0**
-   (ensure Volume payloads) before Phase A (write raw Delta); the raw Delta write reads from
-   the Volume. Phase 0 is skipped for generated sources.
+   `fetch_to_volume(vintage, dir)` (writes the verbatim payload into the landing dir) and
+   `read_from_volume(ctx, vintage, dir) → DataFrame`, plus a `landing_retention` mode.
+   `build_reference` gains a **Phase 0** (ensure Volume + grant + fetch) before Phase A (write
+   raw Delta); the raw Delta write reads from the Volume. A fetch is **skipped only when its
+   dir holds a completed payload** — a `_FETCH_COMPLETE` marker written as the last step — so a
+   partial/failed fetch is retried rather than read as complete, and a re-fetch clears the dir
+   first. Phase 0 is skipped for generated sources.
 
 5. **Two representations of raw, deliberately** — Volume bytes (archive / fidelity / replay /
    refetch-avoidance) and the raw Delta table (queryable / validatable bronze). Both are 1:1

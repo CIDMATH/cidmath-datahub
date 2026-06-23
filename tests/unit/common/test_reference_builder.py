@@ -7,6 +7,8 @@ two-phase build flow needs Spark and is exercised by the build jobs.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from cidmath_datahub.common import reference_builder as rb
@@ -262,3 +264,28 @@ class TestVolumePaths:
         got = rb._landing_volume_dir(s, lnd, 2020, "2026-06-22")
         want = "/Volumes/ecdh_dev/geography_raw/_landing/us_census_state/snapshot_date=2026-06-22"
         assert got == want
+
+
+@pytest.mark.unit
+class TestVolumeCompletion:
+    def test_nonempty_dir_without_marker_is_incomplete(self, tmp_path):
+        d = tmp_path / "vintage=2020"
+        d.mkdir()
+        (d / "partial.zip").write_text("x")  # non-empty, but no completion marker
+        assert rb._volume_dir_is_complete(str(d)) is False
+
+    def test_marker_makes_dir_complete(self, tmp_path):
+        d = tmp_path / "vintage=2020"
+        d.mkdir()
+        rb._mark_fetch_complete(str(d))
+        assert rb._volume_dir_is_complete(str(d)) is True
+
+    def test_missing_dir_is_incomplete(self, tmp_path):
+        assert rb._volume_dir_is_complete(str(tmp_path / "nope")) is False
+
+    def test_reset_clears_partial_leftovers(self, tmp_path):
+        d = tmp_path / "vintage=2020"
+        d.mkdir()
+        (d / "partial.zip").write_text("x")
+        rb._reset_volume_dir(str(d))
+        assert d.is_dir() and not os.listdir(d)

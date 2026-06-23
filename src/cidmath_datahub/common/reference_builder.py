@@ -46,6 +46,7 @@ Conventions baked in so adopters can't drift:
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -450,12 +451,30 @@ def _landing_volume_dir(
     return f"{root}/batch={int(vintage)}"
 
 
-def _volume_dir_has_content(path: str) -> bool:
-    """True if the Volume dir exists and is non-empty (driver FUSE; safe-False on error)."""
+# Written as the LAST step of a successful fetch; its presence means the payload is
+# complete. skip-if-present checks for this marker, not mere non-emptiness, so a fetch
+# that partially writes then fails is re-fetched rather than mistaken for a finished one.
+_FETCH_COMPLETE_MARKER = "_FETCH_COMPLETE"
+
+
+def _volume_dir_is_complete(path: str) -> bool:
+    """True if ``path`` holds a *completed* fetch (the completion marker is present)."""
     try:
-        return os.path.isdir(path) and bool(os.listdir(path))
+        return os.path.isfile(os.path.join(path, _FETCH_COMPLETE_MARKER))
     except OSError:
         return False
+
+
+def _reset_volume_dir(path: str) -> None:
+    """Clear any partial leftovers and recreate ``path`` empty (idempotent re-fetch)."""
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+
+
+def _mark_fetch_complete(path: str) -> None:
+    """Write the completion marker — the last step of a successful fetch."""
+    with open(os.path.join(path, _FETCH_COMPLETE_MARKER), "w", encoding="utf-8") as marker:
+        marker.write(f"fetched_at={datetime.now(tz=UTC).isoformat()}\n")
 
 
 def _ensure_and_fetch_volume(
@@ -466,11 +485,13 @@ def _ensure_and_fetch_volume(
 ) -> None:
     """Phase 0: create the landing Volume and fetch each payload into it (ADR 0039).
 
-    Fetch is per ``(landing, vintage)``. ``PER_VINTAGE_IMMUTABLE`` skips a fetch only when
-    *that landing's* payload for *that vintage* is already present — so re-running the same
-    landings+vintages does zero fetches, while a new vintage fetches only the missing combos.
-    ``SNAPSHOT_PER_RUN`` and ``PER_BATCH`` fetch every run. No-op when the build has no
-    Volume-backed landings.
+    A fetch is skipped only when its target dir already holds a **completed** payload (the
+    ``_FETCH_COMPLETE`` marker) — never mere non-emptiness — so a partial/failed fetch is
+    retried, not mistaken for a finished one. The retention mode sets the dir, which yields
+    the right skip semantics for free: ``PER_VINTAGE_IMMUTABLE`` reuses a per-``vintage`` dir
+    (fetch-once per ``(landing, vintage)``); ``SNAPSHOT_PER_RUN`` a per-``snapshot_date`` dir
+    (same-day re-run skips; a new day fetches a fresh snapshot); ``PER_BATCH`` a per-window
+    dir. No-op when the build has no Volume-backed landings.
     """
     volume_landings = [landing for landing in spec.raw_landings if landing.is_volume_backed]
     if not volume_landings:
@@ -480,22 +501,26 @@ def _ensure_and_fetch_volume(
         f"CREATE VOLUME IF NOT EXISTS {_landing_volume(spec)} "
         f"COMMENT 'Verbatim raw source payloads — engineer-only landing zone. ADR 0039.'"
     )
-    # READ/WRITE VOLUME is a volume-scoped privilege, separate from the schema grants —
-    # the build reads + writes the landing files, so grant the engineer principal on it.
-    grants.grant_volume_engineer(
-        spark, spec.source_catalog, spec.raw_schema, "_landing", spec.engineer_group
-    )
+    # READ/WRITE VOLUME is volume-scoped (separate from schema grants) and is NOT conferred
+    # by ownership for FUSE file access — so grant it explicitly to the running build
+    # principal (so its own fetch/read works) and to the engineer group (for inspection).
+    build_principal = spark.sql("SELECT current_user()").collect()[0][0]
+    for principal in {build_principal, spec.engineer_group}:
+        grants.grant_volume_engineer(
+            spark, spec.source_catalog, spec.raw_schema, "_landing", principal
+        )
     for landing in volume_landings:
         for v in vintages:
             vdir = _landing_volume_dir(spec, landing, v, run_date)
-            if landing.landing_retention == LandingRetention.PER_VINTAGE_IMMUTABLE and (
-                _volume_dir_has_content(vdir)
-            ):
-                log.info("landing payload present; skipping fetch", extra={"dir": vdir})
+            if _volume_dir_is_complete(vdir):
+                log.info("landing payload complete; skipping fetch", extra={"dir": vdir})
                 continue
-            os.makedirs(vdir, exist_ok=True)
+            # (Re)fetch: clear any partial leftovers, fetch, then write the marker LAST so a
+            # failed fetch leaves no marker and is retried (not skipped) on the next run.
+            _reset_volume_dir(vdir)
             assert landing.fetch_to_volume is not None  # guaranteed for volume-backed landings
             landing.fetch_to_volume(v, vdir)
+            _mark_fetch_complete(vdir)
             log.info(
                 "fetched landing payload",
                 extra={"table": landing.table, "vintage": v, "dir": vdir},
