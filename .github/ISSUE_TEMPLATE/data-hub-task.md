@@ -22,7 +22,7 @@ Routing: building a REFERENCE dataset (sourced OR generated)? Use the "Reference
 
 ## Context / pointers
 <!-- Link the relevant ADR(s), the file(s)/module(s) involved, and any prior work to mirror.
-e.g. "Follow ADR 0028 / build_geography_views.py for the views pattern." -->
+e.g. "Follow ADR 0036 / build_reference for the layered reference pattern." -->
 
 ## Approach
 <!-- The intended change. Keep logic in src/cidmath_datahub/ (unit-tested) and entrypoints thin

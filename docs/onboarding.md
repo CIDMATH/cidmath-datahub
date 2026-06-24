@@ -128,7 +128,7 @@ If you use Claude Code (or another AI assistant), the most reliable workflow is:
 4. Work the **acceptance-criteria checklist** in the issue; don't expand scope beyond it (open a follow-up issue instead).
 5. Before the PR: `ruff format src tests && ruff check src tests` (CI's lint scope — also run `ruff` on any bundle files you changed, since `bundles/` is outside the automated scope), `pytest -q`, and `databricks bundle validate --target dev` for bundle changes. The shortcut for all of this is `just check` (then `just validate-all` for bundle config). The pre-commit hooks and CI enforce the same.
 
-The issue + the standing docs (CLAUDE.md, ADRs, authoring guide) together give the assistant enough context to produce code that matches the existing patterns. When in doubt, mirror the worked example: the `weather` bundle (`bundles/weather/`, ADR 0025) and `build_geography_views.py` (ADR 0028, the `run_build` exemplar).
+The issue + the standing docs (CLAUDE.md, ADRs, authoring guide) together give the assistant enough context to produce code that matches the existing patterns. When in doubt, mirror the worked example: the `weather` bundle (`bundles/weather/`, ADR 0025) and `build_icd10cm.py` (an early `run_build` adopter, ADR 0027), or the shared reference builder (`build_reference`, ADR 0036) for the layered raw→processed→canonical pattern.
 
 ## 8. How deploys work
 

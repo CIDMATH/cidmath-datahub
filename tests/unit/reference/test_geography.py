@@ -352,26 +352,3 @@ class TestNormalizeCrosswalkRows:
 
     def test_weight_kinds_vocabulary(self):
         assert set(geo.NHGIS_WEIGHT_COLUMNS.values()) <= set(geo.CROSSWALK_WEIGHT_KINDS)
-
-
-@pytest.mark.unit
-class TestUsEnrichedViewDefinitions:
-    CAT = "ecdh_model_dev"
-
-    def test_returns_county_view_only(self):
-        # us_tract_enriched retired: us_tract is now an enriched canonical (ADR 0037 d7 / 0040).
-        defs = geo.us_enriched_view_definitions(self.CAT)
-        assert set(defs) == {f"{self.CAT}.geography.us_county_enriched"}
-
-    def test_county_view_joins_state_on_geoid_and_vintage(self):
-        sql = geo.us_enriched_view_definitions(self.CAT)[f"{self.CAT}.geography.us_county_enriched"]
-        assert f"CREATE OR REPLACE VIEW {self.CAT}.geography.us_county_enriched AS" in sql
-        assert f"FROM {self.CAT}.geography.us_county c" in sql
-        assert f"JOIN {self.CAT}.geography.us_state s ON " in sql
-        assert "c.state_geoid = s.geoid AND c.vintage = s.vintage" in sql
-        assert "s.stusps AS state_stusps" in sql
-        assert "s.name AS state_name" in sql
-
-    def test_zcta_is_not_enriched(self):
-        defs = geo.us_enriched_view_definitions(self.CAT)
-        assert not any("zcta" in name for name in defs)

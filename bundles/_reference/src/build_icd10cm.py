@@ -24,9 +24,8 @@ suffix). ``--midyear-update`` controls the overlay (``auto`` / ``require`` /
 download -- with ``skip``, adjacency degrades to the prefix rule and chapter/block
 are null. Pre-FY2025 editions have no mid-year update and are loaded base-only.
 
-Second adopter of the ``run_build`` seam (ADR 0027/0028) after
-``build_geography_views.py`` -- the canonical phase order is
-``ensure -> [DQ context: work] -> register -> grant``. Editions are
+An early adopter of the ``run_build`` seam (ADR 0027) -- the canonical phase
+order is ``ensure -> [DQ context: work] -> register -> grant``. Editions are
 re-pullable, so the table is vintage-reproducible: no SCD2/snapshot needed
 (ADR 0007). Each requested edition is fully replaced in place (DELETE the
 edition's rows, then append), leaving other loaded editions intact -- the same

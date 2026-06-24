@@ -49,17 +49,9 @@ In CI, `deploy-reference.yml` (added when this bundle is wired into the deploy m
 
 The default coverage is **1900 through 2099** (calendar dates and epi-weeks) — `calendar_date` runs 1900-01-01 to 2099-12-31. That's ~73k calendar rows, trivial for Delta, and wide enough for any historical or forward-looking analysis. The range is a job parameter, adjustable without code changes. Both tables are written sorted ascending (by `date` / `start_date`).
 
-## Hierarchical-filter views (ADR 0028)
+## Hierarchical-filter views (ADR 0028 — retired)
 
-`build_geography_views.py` (job `build_geography_views_reference`) creates a convenience view that denormalizes stable parent display attributes onto a child level, so analysts can filter by the human-readable parent without hierarchy joins:
-
-| View | Adds | Example |
-|---|---|---|
-| `geography.us_county_enriched` | `state_name`, `state_stusps`, `state_hhs_region` | `WHERE vintage=2020 AND state_stusps='GA'` |
-
-`us_tract_enriched` was **retired** once `us_tract` became an enriched canonical carrying `county_name` + state labels directly (ADR 0037 decision 7 / 0040) — query `geography.us_tract` (e.g. `WHERE vintage=2020 AND county_name='Fulton County'`). The same supersession now applies to `us_county_enriched` (county is also an enriched canonical), so this views entrypoint is slated for retirement once the county view + its consumers migrate to `geography.us_county`.
-
-The view (not denormalized base columns) — the canonical entity tables stay normalized; the join is vintage-keyed and INNER, with a blocking rowcount-parity DQ check. Deploy order: after `build_geography`. First entrypoint on the `run_build` seam (ADR 0027). ZCTAs are excluded (no single nesting parent). Code-based filtering on the base tables (`state_geoid`/`county_geoid`) is unchanged and needs no view.
+The `_enriched` convenience views (`us_county_enriched`, `us_tract_enriched`) are **retired**: the layered builder denormalizes the parent display labels directly onto the canonical entity tables (ADR 0037 decision 7 / 0040), so `geography.us_county` and `geography.us_tract` already carry `state_name`/`state_stusps`/`state_hhs_region` (and `county_name` on tract). Filter the canonical tables directly, e.g. `WHERE vintage=2020 AND state_stusps='GA'`. `build_geography_views.py`, its job, and `us_enriched_view_definitions` have been removed. ZCTAs carry an approximate primary county (largest land-area overlap) on `geography.us_zcta` plus the full `us_zcta_county_xwalk` (see ADR 0028 for the historical view design).
 
 ## ICD-10-CM code system (ADR 0014/0015/0030)
 

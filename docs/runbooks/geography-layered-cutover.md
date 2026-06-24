@@ -104,8 +104,9 @@ All shapefile levels (state/county/tract/zcta) are now migrated; the legacy `run
    `run_build` seam, then delete legacy `run()` + the dead helpers and the
    `build_geography_reference` job.
 2. Migrate `us_block_group` + `us_block` onto the layered builder (same pattern).
-3. Retire `build_geography_views` (both `_enriched` views are dropped — county + tract): remove
-   `build_geography_views.py`, `geography_views_job.yml` (+ its bundle include), and
-   `us_enriched_view_definitions` + its tests.
+3. ~~Retire `build_geography_views`~~ ✅ **done 2026-06-24** — both `_enriched` views dropped (county
+   + tract); `build_geography_views.py` + `geography_views_job.yml` removed (git rm), and
+   `us_enriched_view_definitions` + its tests deleted. Exemplar references repointed to
+   `build_icd10cm.py` / `build_reference`. ADR 0028 marked retired-in-code.
 4. Owner-context: `DROP TABLE geography.boundary` once nothing consumes the polymorphic US
    rows (the per-level `us_<lvl>_boundary` tables replace them).
