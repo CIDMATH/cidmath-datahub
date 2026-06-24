@@ -2496,6 +2496,14 @@ def build_block_group_layered(
         lean = raw.join(cen, ["gisjoin", "vintage"], "left").mapInPandas(
             _block_group_entity_map, schema=BLOCK_GROUP_SPARK_SCHEMA
         )
+        # Scope to tracts in our universe (left_semi): NHGIS erases coastal water, so a few
+        # all-water tracts come back empty and are dropped by the tract build; their (sliver)
+        # block groups would otherwise dangle. The drop count is recorded in _validate_entity
+        # (accepted gap, cf. zcta Island Areas / GADM subnational_rows_dropped).
+        tract_keys = ctx.spark.sql(
+            f"SELECT geoid AS tract_geoid FROM {proc_tract} WHERE vintage = {int(v)}"
+        )
+        lean = lean.join(tract_keys, ["tract_geoid"], "left_semi")
         county = ctx.spark.sql(
             f"SELECT geoid AS county_geoid, name AS county_name "
             f"FROM {proc_county} WHERE vintage = {int(v)}"
@@ -2516,7 +2524,11 @@ def build_block_group_layered(
             f"CAST({float(tolerance)} AS DOUBLE) AS tol_param FROM {raw_bg} "
             f"WHERE vintage = {int(v)}"
         )
-        return raw.mapInPandas(_boundary_map, schema=BOUNDARY_LEVEL_SPARK_SCHEMA)
+        bdf = raw.mapInPandas(_boundary_map, schema=BOUNDARY_LEVEL_SPARK_SCHEMA)
+        # Scope to the entity (drops the same off-universe all-water BGs; boundary ⊆ entity).
+        # The builder writes the entity processed table before the boundary, per vintage.
+        entity_keys = ctx.spark.sql(f"SELECT geoid FROM {proc_bg} WHERE vintage = {int(v)}")
+        return bdf.join(entity_keys, ["geoid"], "left_semi")
 
     def _promote_entity(ctx: BuildContext, v: int) -> Any:
         return ctx.spark.sql(f"SELECT * FROM {proc_bg} WHERE vintage = {int(v)}")
@@ -2557,6 +2569,25 @@ def build_block_group_layered(
                 parent_key="geoid",
                 parent_where=where,
                 check_name=f"us_census_block_group_state_fk_{v}",
+            )
+            # Accepted gap (non-blocking WARN): BG rows dropped in process for nesting in an
+            # off-universe tract (all-water tract erased by NHGIS). raw - kept = dropped.
+            raw_n = ctx.spark.sql(
+                f"SELECT count(*) AS n FROM {raw_bg} WHERE {where}"
+            ).collect()[0]["n"]
+            kept_n = ctx.spark.sql(
+                f"SELECT count(*) AS n FROM {staging_fqn} WHERE {where}"
+            ).collect()[0]["n"]
+            dropped = int(raw_n) - int(kept_n)
+            ctx.recorder.record(
+                table_name=rec,
+                check_name=f"us_census_block_group_offscope_tract_dropped_{v}",
+                category=DQCategory.REFERENTIAL,
+                severity=DQSeverity.WARN,
+                passed=dropped == 0,
+                failing_row_count=dropped,
+                total_row_count=int(raw_n),
+                details={"dropped_bg_offscope_tract": dropped} if dropped else None,
             )
 
     def _validate_boundary(ctx: BuildContext, staging_fqn: str) -> None:
@@ -2624,7 +2655,9 @@ def build_block_group_layered(
                 promote=_promote_entity,
                 validate_staging=_validate_entity,
                 description=(
-                    "US census block groups per vintage, enriched with county + state labels."
+                    "US census block groups per vintage, enriched with county + state labels; "
+                    "every BG nests in a us_tract (a few all-water BGs whose tract NHGIS "
+                    "water-erased are dropped + recorded)."
                 ),
                 public_health_relevance=(
                     "Finest standard tabulation unit; the grain for neighborhood SDOH and "
