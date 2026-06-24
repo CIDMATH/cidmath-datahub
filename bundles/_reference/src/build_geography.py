@@ -64,11 +64,12 @@ log = get_logger(__name__)
 SCHEMA = "geography"
 PIPELINE_REF = "bundles/_reference/src/build_geography.py"
 
-# Levels still built by the LEGACY whole-geography build (run(), build_geography_reference).
-# us_state + us_county + us_tract are migrated to the layered builder (build_geography_layered)
-# and removed here; only us_zcta remains, after which this legacy build is retired.
+# All shapefile levels (us_state/us_county/us_tract/us_zcta) are migrated to the layered
+# builder (build_geography_layered). The legacy build (run(), build_geography_reference) now
+# builds ONLY the static us_hhs_region; its shapefile/boundary machinery below is dead pending
+# full retirement (extract us_hhs_region to its own entrypoint, then delete run() + helpers).
 # See docs/runbooks/geography-layered-cutover.md.
-LEVELS = ("us_zcta",)
+LEVELS: tuple[str, ...] = ()
 
 # IPUMS NHGIS boundary shapefile API codes, keyed by (level, vintage). Pattern is
 # us_<level>_<year>_tl<tiger_basis>. Verify/extend against the live catalog with
@@ -183,6 +184,77 @@ ENTITY_SCHEMAS: dict[str, T.StructType] = {
     "us_zcta": ZCTA_SPARK_SCHEMA,
 }
 
+# --- ZCTA↔county relationship files (Census, provider=census; a 2nd source in this build) ---
+# ZCTAs do not nest in counties, so there is no parent GISJOIN. We approximate a parent by
+# the county of largest land-area overlap, from Census's published ZCTA-to-county
+# relationship files (land-area overlap per ZCTA×county part). Format differs by vintage
+# (2010 comma-delimited vs 2020 pipe-delimited; different column names) so the reader sniffs
+# the delimiter and resolves columns alias-tolerantly, failing loud on an unmatched column.
+# See docs/reviews + the dataset_catalog source_documentation_url.
+ZCTA_COUNTY_REL_URLS: dict[int, str] = {
+    2010: "https://www2.census.gov/geo/docs/maps-data/data/rel/zcta_county_rel_10.txt",
+    2020: (
+        "https://www2.census.gov/geo/docs/maps-data/data/rel2020/"
+        "zcta520/tab20_zcta520_county20_natl.txt"
+    ),
+}
+ZCTA_COUNTY_REL_DOC_URL = (
+    "https://www.census.gov/programs-surveys/geography/technical-documentation/"
+    "records-layout/2020-zcta-record-layout.html"
+)
+# Canonical field -> accepted source header names across the 2010 / 2020 layouts.
+_REL_ZCTA5_ALIASES = ["GEOID_ZCTA5_20", "GEOID_ZCTA5_10", "ZCTA5", "ZCTA5CE10", "ZCTA5CE20"]
+_REL_COUNTY_GEOID_ALIASES = ["GEOID_COUNTY_20", "GEOID_COUNTY_10", "GEOID", "COUNTY_GEOID"]
+_REL_AREALAND_PART_ALIASES = ["AREALAND_PART", "AREALANDPT"]
+_REL_ZCTA_AREALAND_ALIASES = ["AREALAND_ZCTA5_20", "AREALAND_ZCTA5_10", "ZAREALAND"]
+
+ZCTA_REL_RAW_SCHEMA = T.StructType(
+    [
+        T.StructField("zcta5", T.StringType(), False),
+        T.StructField("vintage", T.IntegerType(), False),
+        T.StructField("county_geoid", T.StringType(), False),
+        T.StructField("area_land_part_sqm", T.DoubleType(), True),
+        T.StructField("zcta_area_land_sqm", T.DoubleType(), True),
+    ]
+)
+
+# Enriched us_zcta = lean ZCTA + approximate primary county (largest land overlap) + that
+# county's state labels + overlap diagnostics. Preserves 1 row per ZCTA (granularity).
+ZCTA_ENRICHED_COLS = (
+    "geoid STRING, vintage INT, gisjoin STRING, centroid_geo_lon DOUBLE, "
+    "centroid_geo_lat DOUBLE, area_land_sqm DOUBLE, area_water_sqm DOUBLE, "
+    "primary_county_geoid STRING, primary_county_name STRING, state_geoid STRING, "
+    "state_name STRING, state_stusps STRING, state_hhs_region INT, "
+    "primary_county_overlap_land_sqm DOUBLE, primary_county_overlap_fraction DOUBLE, "
+    "county_overlap_count INT, spans_multiple_counties BOOLEAN"
+)
+# Final projection order for the enriched entity (must match ZCTA_ENRICHED_COLS).
+_ZCTA_ENRICHED_SELECT = [
+    "geoid",
+    "vintage",
+    "gisjoin",
+    "centroid_geo_lon",
+    "centroid_geo_lat",
+    "area_land_sqm",
+    "area_water_sqm",
+    "primary_county_geoid",
+    "primary_county_name",
+    "state_geoid",
+    "state_name",
+    "state_stusps",
+    "state_hhs_region",
+    "primary_county_overlap_land_sqm",
+    "primary_county_overlap_fraction",
+    "county_overlap_count",
+    "spans_multiple_counties",
+]
+# Full "any overlap" crosswalk (does not preserve 1:1) — every ZCTA×county overlap part.
+ZCTA_XWALK_COLS = (
+    "geoid STRING, vintage INT, county_geoid STRING, county_name STRING, "
+    "state_geoid STRING, overlap_land_sqm DOUBLE, overlap_fraction DOUBLE, "
+    "is_primary BOOLEAN"
+)
+
 
 def _get_secret(scope: str, key: str) -> str:
     try:
@@ -252,6 +324,73 @@ def _stage_volume_payload(volume_dir: str) -> Path:
             shutil.copy(item, tmp / item.name)
     _extract_all_zips(tmp)
     return tmp
+
+
+def _download_census_rel_file(url: str, workdir: Path) -> None:
+    """Download a Census relationship file (.txt) verbatim into the landing dir (ADR 0039).
+
+    NOTE (ops): the job environment's network allowlist must include ``www2.census.gov``
+    (separate from the NHGIS API host). Without it this raises at fetch time — loud, not
+    silent. The payload is stored as-is; parsing happens on a temp copy at read time.
+    """
+    import urllib.request
+
+    dest = workdir / url.rsplit("/", 1)[-1]
+    workdir.mkdir(parents=True, exist_ok=True)
+    log.info("Downloading Census relationship file", extra={"url": url, "dest": str(dest)})
+    urllib.request.urlretrieve(url, dest)  # noqa: S310 - fixed census.gov URL, not user input
+
+
+def _read_zcta_county_rel(ctx: BuildContext, v: int, vdir: str) -> Any:
+    """Parse a ZCTA↔county relationship file into the 1:1 raw frame (ZCTA_REL_RAW_SCHEMA).
+
+    Delimiter is sniffed (2010 comma vs 2020 pipe) and columns are resolved alias-tolerantly
+    across the 2010/2020 layouts; an unmatched required column raises (fail loud, do not
+    guess). Keeps only the fields the crosswalk needs; the Volume holds the verbatim file.
+    """
+    import csv
+
+    staged = _stage_volume_payload(vdir)
+    txts = [p for p in staged.glob("*") if p.suffix.lower() in (".txt", ".csv")]
+    if not txts:
+        raise FileNotFoundError(f"no ZCTA-county relationship .txt in {vdir}")
+    path = txts[0]
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        sample = fh.read(8192)
+        fh.seek(0)
+        delimiter = "|" if sample.count("|") > sample.count(",") else ","
+        reader = csv.DictReader(fh, delimiter=delimiter)
+        header = reader.fieldnames or []
+        zc = _first_col(header, _REL_ZCTA5_ALIASES)
+        cc = _first_col(header, _REL_COUNTY_GEOID_ALIASES)
+        ap = _first_col(header, _REL_AREALAND_PART_ALIASES)
+        zl = _first_col(header, _REL_ZCTA_AREALAND_ALIASES)
+        missing = [
+            name
+            for name, col in [("zcta5", zc), ("county_geoid", cc), ("area_land_part", ap)]
+            if col is None
+        ]
+        if missing:
+            raise ValueError(
+                f"ZCTA-county rel {path.name} missing required columns {missing}; header={header}"
+            )
+        rows: list[dict[str, Any]] = []
+        for rec in reader:
+            z = str(rec[zc]).strip()
+            c = str(rec[cc]).strip()
+            if not z or not c:
+                continue
+            rows.append(
+                {
+                    "zcta5": z.zfill(5),
+                    "vintage": int(v),
+                    "county_geoid": c.zfill(5),
+                    "area_land_part_sqm": _num(rec[ap]),
+                    "zcta_area_land_sqm": _num(rec[zl]) if zl else None,
+                }
+            )
+    log.info("Parsed ZCTA-county relationship file", extra={"vintage": v, "rows": len(rows)})
+    return ctx.spark.createDataFrame(rows, ZCTA_REL_RAW_SCHEMA)
 
 
 def _find_shapefile(root: Path, level: str, vintage: int, *, cenpop: bool = False) -> Path | None:
@@ -733,84 +872,13 @@ def run(
         )
 
     def _work(ctx: BuildContext) -> None:
-        spark = ctx.spark
-        _build_hhs_region(spark, catalog)
-
-        if not ipums_secret_scope:
-            raise ValueError("--ipums-secret-scope is required to pull NHGIS shapefiles")
-        api_key = _get_secret(ipums_secret_scope, ipums_secret_key or "nhgis_api_key")
-
-        missing = [(lvl, v) for v in vintages for lvl in LEVELS if (lvl, v) not in SHAPEFILE_NAMES]
-        if missing:
-            raise ValueError(f"no known NHGIS shapefile code for {missing}; extend SHAPEFILE_NAMES")
-        boundary_names = [SHAPEFILE_NAMES[(lvl, v)] for v in vintages for lvl in LEVELS]
-        cenpop_names = [
-            CENPOP_SHAPEFILE_NAMES[(lvl, v)]
-            for v in vintages
-            for lvl in LEVELS
-            if (lvl, v) in CENPOP_SHAPEFILE_NAMES
-        ]
-        shapefile_names = boundary_names + cenpop_names
-
-        resolution = "full" if full_resolution else "generalized"
-        tolerance = 0.0 if full_resolution else simplify_tolerance
-
-        workdir = Path(tempfile.mkdtemp(prefix="nhgis_"))
-        _download_shapefiles(api_key, shapefile_names, workdir)
-        _extract_all_zips(workdir)
-
-        # Process and write per (level, vintage) chunk to bound driver memory.
-        # Levels run parents-first so tract FK checks see already-loaded
-        # state/county geoids. DQ outcomes (uniqueness + FK) are recorded via
-        # ctx.recorder and flushed by the run_build seam even on failure (ADR 0009).
-        written: set[str] = set()
-
-        # boundary is shared/polymorphic: refresh only this build's geo_levels and
-        # always append, so we never overwrite the country / country_subdivision
-        # rows. Pre-marking it "written" forces _write_chunk into append mode from
-        # the first chunk (ADR 0023 review -- boundary-overwrite landmine fix).
-        _reset_us_boundaries(spark, catalog)
-        written.add("boundary")
-
-        for lvl in LEVELS:
-            for v in vintages:
-                gdf = _read_gdf(_find_shapefile(workdir, lvl, v))
-                cenpop = (
-                    _read_cenpop_lookup(workdir, lvl, v)
-                    if (lvl, v) in CENPOP_SHAPEFILE_NAMES
-                    else {}
-                )
-                rows, boundary = BUILDERS[lvl](gdf, v, tolerance, resolution, cenpop)
-
-                table_name = f"{SCHEMA}.{lvl}"
-                _check_unique(lvl, v, rows, recorder=ctx.recorder, table_name=table_name)
-
-                _write_chunk(spark, catalog, lvl, rows, ENTITY_SCHEMAS[lvl], written)
-                _write_chunk(
-                    spark, catalog, "boundary", boundary, gadm.boundary_spark_schema(), written
-                )
-                log.info(
-                    "Processed",
-                    extra={"level": lvl, "vintage": v, "rows": len(rows), "cenpop": len(cenpop)},
-                )
+        # All shapefile levels are on the layered builder now; the legacy build's sole
+        # remaining output is the static us_hhs_region (no shapefiles, no vintage). The
+        # per-level us_<lvl>_boundary tables replace this build's writes to the polymorphic
+        # geography.boundary (its stale US rows are removed by the cutover runbook).
+        _build_hhs_region(ctx.spark, catalog)
 
     def _register(spark: SparkSession) -> None:
-        _comment_tables(spark, catalog)
-        _set_clustering(spark, catalog)
-        # us_state + us_county + us_tract are registered by the layered build now (cutover).
-        _register_dataset(
-            spark,
-            catalog=catalog,
-            table="us_zcta",
-            description="US ZIP Code Tabulation Areas, one row per ZCTA per vintage (non-nesting).",
-            public_health_relevance=(
-                "Approximate ZIP-code geography for joining address- or ZIP-coded health "
-                "data; non-nesting, so used directly rather than via county/state."
-            ),
-            spatial_resolution="us_zcta",
-            cluster_columns=["vintage"],
-            pipeline_reference=PIPELINE_REF,
-        )
         _register_dataset(
             spark,
             catalog=catalog,
@@ -821,19 +889,6 @@ def run(
             ),
             spatial_resolution="hhs_region",
             cluster_columns=None,
-            pipeline_reference=PIPELINE_REF,
-        )
-        _register_dataset(
-            spark,
-            catalog=catalog,
-            table="boundary",
-            description="Companion boundary polygons (WKB) for all levels by vintage.",
-            public_health_relevance=(
-                "Geometry for choropleth mapping and spatial-adjacency models; kept off "
-                "the lean attribute tables so attribute joins stay cheap."
-            ),
-            spatial_resolution="multi",
-            cluster_columns=["geo_level", "vintage"],
             pipeline_reference=PIPELINE_REF,
         )
 
@@ -1004,6 +1059,36 @@ def _tract_entity_map(iterator: Any) -> Any:
         yield pd.DataFrame(out, columns=cols)
 
 
+def _zcta_entity_map(iterator: Any) -> Any:
+    """mapInPandas: raw ZCTA shapefile → lean processed us_zcta rows.
+
+    Reuses the pure ``geo.build_zcta_row`` (geoid from the GISJOIN; no parent geoids — ZCTAs
+    do not nest — and no population centroid, as Census publishes no ZCTA Center of
+    Population). The approximate primary-county + state labels are joined on in ``process``
+    from the same-catalog parents + the Census ZCTA↔county relationship file, not here.
+    """
+    import pandas as pd
+    from shapely import wkb as _wkb
+
+    cols = [f.name for f in ZCTA_SPARK_SCHEMA.fields]
+    for pdf in iterator:
+        out: list[dict[str, Any]] = []
+        for r in pdf.itertuples(index=False):
+            geom = _wkb.loads(bytes(r.geometry_wkb))
+            pt = geom.representative_point()
+            out.append(
+                geo.build_zcta_row(
+                    r.gisjoin,
+                    int(r.vintage),
+                    centroid_geo_lon=float(pt.x),
+                    centroid_geo_lat=float(pt.y),
+                    area_land_sqm=None if pd.isna(r.area_land_sqm) else float(r.area_land_sqm),
+                    area_water_sqm=None if pd.isna(r.area_water_sqm) else float(r.area_water_sqm),
+                )
+            )
+        yield pd.DataFrame(out, columns=cols)
+
+
 def _boundary_map(iterator: Any) -> Any:
     """mapInPandas: raw shapefile geometry → processed ``<level>_boundary`` rows (any level).
 
@@ -1059,15 +1144,17 @@ def build_state_layered(
     def _ensure_staging(spark: SparkSession) -> None:
         spark.sql(
             f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_raw "
-            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source files). ADR 0037.'"
+            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source "
+            f"files). ADR 0037.'"
         )
         spark.sql(
             f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_processed "
             f"COMMENT 'Source-catalog processed/derived geography (engineer-only). ADR 0037.'"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {raw_state} (gisjoin STRING, vintage INT, src_name STRING, "
-            f"area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) USING DELTA"
+            f"CREATE TABLE IF NOT EXISTS {raw_state} (gisjoin STRING, vintage INT, "
+            f"src_name STRING, area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) "
+            f"USING DELTA"
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {raw_cenpop} (gisjoin STRING, vintage INT, "
@@ -1080,8 +1167,9 @@ def build_state_layered(
             f"area_land_sqm DOUBLE, area_water_sqm DOUBLE) USING DELTA"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, gisjoin STRING, "
-            f"geoid_system STRING, resolution STRING, geometry_wkb BINARY) USING DELTA"
+            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, "
+            f"gisjoin STRING, geoid_system STRING, resolution STRING, "
+            f"geometry_wkb BINARY) USING DELTA"
         )
 
     def _ensure_canonical(spark: SparkSession) -> None:
@@ -1282,30 +1370,34 @@ def build_county_layered(
     def _ensure_staging(spark: SparkSession) -> None:
         spark.sql(
             f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_raw "
-            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source files). ADR 0037.'"
+            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source "
+            f"files). ADR 0037.'"
         )
         spark.sql(
             f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_processed "
             f"COMMENT 'Source-catalog processed/derived geography (engineer-only). ADR 0037.'"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {raw_county} (gisjoin STRING, vintage INT, src_name STRING, "
-            f"area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) USING DELTA"
+            f"CREATE TABLE IF NOT EXISTS {raw_county} (gisjoin STRING, vintage INT, "
+            f"src_name STRING, area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) "
+            f"USING DELTA"
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {raw_cenpop} (gisjoin STRING, vintage INT, "
             f"centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE) USING DELTA"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {proc_county} (geoid STRING, vintage INT, state_geoid STRING, "
-            f"gisjoin STRING, name STRING, centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, "
+            f"CREATE TABLE IF NOT EXISTS {proc_county} (geoid STRING, vintage INT, "
+            f"state_geoid STRING, gisjoin STRING, name STRING, centroid_geo_lon DOUBLE, "
+            f"centroid_geo_lat DOUBLE, "
             f"centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, area_land_sqm DOUBLE, "
             f"area_water_sqm DOUBLE, state_name STRING, state_stusps STRING, "
             f"state_hhs_region INT) USING DELTA"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, gisjoin STRING, "
-            f"geoid_system STRING, resolution STRING, geometry_wkb BINARY) USING DELTA"
+            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, "
+            f"gisjoin STRING, geoid_system STRING, resolution STRING, "
+            f"geometry_wkb BINARY) USING DELTA"
         )
 
     def _ensure_canonical(spark: SparkSession) -> None:
@@ -1315,14 +1407,15 @@ def build_county_layered(
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_county (geoid STRING, "
-            f"vintage INT, state_geoid STRING, gisjoin STRING, name STRING, centroid_geo_lon DOUBLE, "
-            f"centroid_geo_lat DOUBLE, centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, "
+            f"vintage INT, state_geoid STRING, gisjoin STRING, name STRING, "
+            f"centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, centroid_pop_lon DOUBLE, "
+            f"centroid_pop_lat DOUBLE, "
             f"area_land_sqm DOUBLE, area_water_sqm DOUBLE, state_name STRING, state_stusps STRING, "
             f"state_hhs_region INT) USING DELTA"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_county_boundary (geoid STRING, "
-            f"vintage INT, gisjoin STRING, geoid_system STRING, resolution STRING, "
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_county_boundary "
+            f"(geoid STRING, vintage INT, gisjoin STRING, geoid_system STRING, resolution STRING, "
             f"geometry_wkb BINARY) USING DELTA"
         )
 
@@ -1377,9 +1470,20 @@ def build_county_layered(
             f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
         )
         return lean.join(state, ["state_geoid"], "left").select(
-            "geoid", "vintage", "state_geoid", "gisjoin", "name",
-            "centroid_geo_lon", "centroid_geo_lat", "centroid_pop_lon", "centroid_pop_lat",
-            "area_land_sqm", "area_water_sqm", "state_name", "state_stusps", "state_hhs_region",
+            "geoid",
+            "vintage",
+            "state_geoid",
+            "gisjoin",
+            "name",
+            "centroid_geo_lon",
+            "centroid_geo_lat",
+            "centroid_pop_lon",
+            "centroid_pop_lat",
+            "area_land_sqm",
+            "area_water_sqm",
+            "state_name",
+            "state_stusps",
+            "state_hhs_region",
         )
 
     def _process_boundary(ctx: BuildContext, v: int) -> Any:
@@ -1429,7 +1533,9 @@ def build_county_layered(
         subject=SCHEMA,
         layer="reference",
         description="US counties, vintaged.",
-        public_health_relevance="Canonical county spatial unit; the standard US surveillance grain.",
+        public_health_relevance=(
+            "Canonical county spatial unit; the standard US surveillance grain."
+        ),
         spatial_resolution="us_county",
         spatial_coverage="United States",
         source_provider_code="ipums_nhgis",
@@ -1476,7 +1582,9 @@ def build_county_layered(
                 processed_table="us_census_county",
                 promote=_promote_entity,
                 validate_staging=_validate_entity,
-                description="US counties, one row per county per vintage, enriched with state labels.",
+                description=(
+                    "US counties, one row per county per vintage, enriched with state labels."
+                ),
                 public_health_relevance=(
                     "Canonical county spatial unit; the standard grain for U.S. infectious-disease "
                     "surveillance and the spatial backbone other subjects join to."
@@ -1530,30 +1638,34 @@ def build_tract_layered(
     def _ensure_staging(spark: SparkSession) -> None:
         spark.sql(
             f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_raw "
-            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source files). ADR 0037.'"
+            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source "
+            f"files). ADR 0037.'"
         )
         spark.sql(
             f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_processed "
             f"COMMENT 'Source-catalog processed/derived geography (engineer-only). ADR 0037.'"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {raw_tract} (gisjoin STRING, vintage INT, src_name STRING, "
-            f"area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) USING DELTA"
+            f"CREATE TABLE IF NOT EXISTS {raw_tract} (gisjoin STRING, vintage INT, "
+            f"src_name STRING, area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) "
+            f"USING DELTA"
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {raw_cenpop} (gisjoin STRING, vintage INT, "
             f"centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE) USING DELTA"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {proc_tract} (geoid STRING, vintage INT, state_geoid STRING, "
-            f"county_geoid STRING, gisjoin STRING, centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, "
+            f"CREATE TABLE IF NOT EXISTS {proc_tract} (geoid STRING, vintage INT, "
+            f"state_geoid STRING, county_geoid STRING, gisjoin STRING, centroid_geo_lon DOUBLE, "
+            f"centroid_geo_lat DOUBLE, "
             f"centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, area_land_sqm DOUBLE, "
             f"area_water_sqm DOUBLE, county_name STRING, state_name STRING, state_stusps STRING, "
             f"state_hhs_region INT) USING DELTA"
         )
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, gisjoin STRING, "
-            f"geoid_system STRING, resolution STRING, geometry_wkb BINARY) USING DELTA"
+            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, "
+            f"gisjoin STRING, geoid_system STRING, resolution STRING, "
+            f"geometry_wkb BINARY) USING DELTA"
         )
 
     def _ensure_canonical(spark: SparkSession) -> None:
@@ -1634,9 +1746,20 @@ def build_tract_layered(
             lean.join(county, ["county_geoid"], "left")
             .join(state, ["state_geoid"], "left")
             .select(
-                "geoid", "vintage", "state_geoid", "county_geoid", "gisjoin",
-                "centroid_geo_lon", "centroid_geo_lat", "centroid_pop_lon", "centroid_pop_lat",
-                "area_land_sqm", "area_water_sqm", "county_name", "state_name", "state_stusps",
+                "geoid",
+                "vintage",
+                "state_geoid",
+                "county_geoid",
+                "gisjoin",
+                "centroid_geo_lon",
+                "centroid_geo_lat",
+                "centroid_pop_lon",
+                "centroid_pop_lat",
+                "area_land_sqm",
+                "area_water_sqm",
+                "county_name",
+                "state_name",
+                "state_stusps",
                 "state_hhs_region",
             )
         )
@@ -1665,18 +1788,28 @@ def build_tract_layered(
         # Parent-FK within vintage: tract.county_geoid -> county, tract.state_geoid -> state.
         for v in vintages:
             make_staging_dq(
-                ctx, staging_fqn, record_table="geography_processed.us_census_tract",
+                ctx,
+                staging_fqn,
+                record_table="geography_processed.us_census_tract",
                 where=f"vintage = {int(v)}",
             ).fk(
-                key="county_geoid", parent_table=proc_county, parent_key="geoid",
-                parent_where=f"vintage = {int(v)}", check_name=f"us_census_tract_county_fk_{v}",
+                key="county_geoid",
+                parent_table=proc_county,
+                parent_key="geoid",
+                parent_where=f"vintage = {int(v)}",
+                check_name=f"us_census_tract_county_fk_{v}",
             )
             make_staging_dq(
-                ctx, staging_fqn, record_table="geography_processed.us_census_tract",
+                ctx,
+                staging_fqn,
+                record_table="geography_processed.us_census_tract",
                 where=f"vintage = {int(v)}",
             ).fk(
-                key="state_geoid", parent_table=proc_state, parent_key="geoid",
-                parent_where=f"vintage = {int(v)}", check_name=f"us_census_tract_state_fk_{v}",
+                key="state_geoid",
+                parent_table=proc_state,
+                parent_key="geoid",
+                parent_where=f"vintage = {int(v)}",
+                check_name=f"us_census_tract_state_fk_{v}",
             )
 
     def _validate_boundary(ctx: BuildContext, staging_fqn: str) -> None:
@@ -1761,6 +1894,376 @@ def build_tract_layered(
     return build_reference(spec, vintages=vintages)
 
 
+def build_zcta_layered(
+    *,
+    source_catalog: str,
+    model_catalog: str,
+    vintages: list[int],
+    data_engineers_group: str,
+    analysts_group: str,
+    api_key: str,
+    simplify_tolerance: float = 0.005,
+    full_resolution: bool = False,
+) -> tuple[str, str]:
+    """Build us_zcta via the shared builder (ADR 0036) — non-nesting, after us_county.
+
+    ZCTAs do not nest in counties/states, so there is no parent GISJOIN. We approximate a
+    parent by the county of **largest land-area overlap**, from Census's published ZCTA↔county
+    relationship file (a 2nd source, provider=census, alongside the NHGIS shapefile). The
+    enriched ``us_zcta`` keeps one row per ZCTA with that primary county + its state labels +
+    overlap diagnostics (``spans_multiple_counties``); a separate ``us_zcta_county_xwalk``
+    preserves **every** ZCTA×county overlap (any overlap, not 1:1) for spatial allocation.
+    Parents-first: ``process`` joins same-catalog ``us_census_county`` + ``us_census_state``.
+    """
+    resolution = "full" if full_resolution else "generalized"
+    tolerance = 0.0 if full_resolution else simplify_tolerance
+
+    raw_zcta = f"{source_catalog}.geography_raw.us_census_zcta"
+    raw_rel = f"{source_catalog}.geography_raw.us_census_zcta_county_rel"
+    proc_zcta = f"{source_catalog}.geography_processed.us_census_zcta"
+    proc_boundary = f"{source_catalog}.geography_processed.us_census_zcta_boundary"
+    proc_xwalk = f"{source_catalog}.geography_processed.us_census_zcta_county_xwalk"
+    proc_county = f"{source_catalog}.geography_processed.us_census_county"  # parent
+    proc_state = f"{source_catalog}.geography_processed.us_census_state"  # parent (state labels)
+
+    def _ensure_staging(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_raw "
+            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source "
+            f"files). ADR 0037.'"
+        )
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_processed "
+            f"COMMENT 'Source-catalog processed/derived geography (engineer-only). ADR 0037.'"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {raw_zcta} (gisjoin STRING, vintage INT, src_name STRING, "
+            f"area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) USING DELTA"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {raw_rel} (zcta5 STRING, vintage INT, "
+            f"county_geoid STRING, area_land_part_sqm DOUBLE, zcta_area_land_sqm DOUBLE) USING DELTA"
+        )
+        spark.sql(f"CREATE TABLE IF NOT EXISTS {proc_zcta} ({ZCTA_ENRICHED_COLS}) USING DELTA")
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, "
+            f"gisjoin STRING, geoid_system STRING, resolution STRING, "
+            f"geometry_wkb BINARY) USING DELTA"
+        )
+        spark.sql(f"CREATE TABLE IF NOT EXISTS {proc_xwalk} ({ZCTA_XWALK_COLS}) USING DELTA")
+
+    def _ensure_canonical(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {model_catalog}.{SCHEMA} "
+            f"COMMENT 'Canonical US geography reference (source-agnostic). ADR 0020/0037.'"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_zcta ({ZCTA_ENRICHED_COLS}) "
+            f"USING DELTA"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_zcta_boundary (geoid STRING, "
+            f"vintage INT, gisjoin STRING, geoid_system STRING, resolution STRING, "
+            f"geometry_wkb BINARY) USING DELTA"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_zcta_county_xwalk "
+            f"({ZCTA_XWALK_COLS}) USING DELTA"
+        )
+
+    def _fetch_zcta_shapefile(v: int, vdir: str) -> None:
+        _download_shapefiles(api_key, [SHAPEFILE_NAMES[("us_zcta", v)]], Path(vdir))
+
+    def _read_zcta_shapefile(ctx: BuildContext, v: int, vdir: str) -> Any:
+        staged = _stage_volume_payload(vdir)
+        gdf = _read_gdf(_find_shapefile(staged, "us_zcta", v))
+        cols = list(gdf.columns)
+        gj = _first_col(cols, ["GISJOIN", "gisjoin"])
+        name_col = _first_col(cols, ["NAME", "NAMELSAD", "NHGISNAM", "NAME10", "NAME20", "name"])
+        aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
+        awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
+        if gj is None:
+            raise ValueError(f"zcta shapefile has no GISJOIN column; columns={cols}")
+        rows = [
+            {
+                "gisjoin": str(rec[gj]).strip().upper(),
+                "vintage": int(v),
+                "src_name": str(rec[name_col]) if name_col else None,
+                "area_land_sqm": _num(rec[aland]) if aland else None,
+                "area_water_sqm": _num(rec[awater]) if awater else None,
+                "geometry_wkb": rec.geometry.wkb,
+            }
+            for _, rec in gdf.iterrows()
+            if rec.geometry is not None and not rec.geometry.is_empty
+        ]
+        return ctx.spark.createDataFrame(rows, RAW_SHAPEFILE_SCHEMA)
+
+    def _fetch_zcta_rel(v: int, vdir: str) -> None:
+        if v not in ZCTA_COUNTY_REL_URLS:
+            raise ValueError(f"no ZCTA↔county relationship file URL configured for vintage {v}")
+        _download_census_rel_file(ZCTA_COUNTY_REL_URLS[v], Path(vdir))
+
+    def _rel_primary_and_counts(ctx: BuildContext, v: int) -> tuple[Any, Any]:
+        """(primary-county-per-ZCTA, distinct-county-count-per-ZCTA) from the rel raw."""
+        from pyspark.sql import Window
+        from pyspark.sql import functions as F
+
+        rel = ctx.spark.sql(
+            f"SELECT zcta5 AS geoid, county_geoid, area_land_part_sqm, zcta_area_land_sqm "
+            f"FROM {raw_rel} WHERE vintage = {int(v)}"
+        )
+        counts = rel.groupBy("geoid").agg(
+            F.countDistinct("county_geoid").alias("county_overlap_count")
+        )
+        w = Window.partitionBy("geoid").orderBy(
+            F.col("area_land_part_sqm").desc_nulls_last(), F.col("county_geoid")
+        )
+        primary = (
+            rel.withColumn("rn", F.row_number().over(w))
+            .filter("rn = 1")
+            .select(
+                "geoid",
+                F.col("county_geoid").alias("primary_county_geoid"),
+                F.col("area_land_part_sqm").alias("primary_county_overlap_land_sqm"),
+                F.when(
+                    F.col("zcta_area_land_sqm") > 0,
+                    F.col("area_land_part_sqm") / F.col("zcta_area_land_sqm"),
+                ).alias("primary_county_overlap_fraction"),
+            )
+        )
+        return primary, counts
+
+    def _process_entity(ctx: BuildContext, v: int) -> Any:
+        from pyspark.sql import functions as F
+
+        lean = ctx.spark.sql(f"SELECT * FROM {raw_zcta} WHERE vintage = {int(v)}").mapInPandas(
+            _zcta_entity_map, schema=ZCTA_SPARK_SCHEMA
+        )
+        primary, counts = _rel_primary_and_counts(ctx, v)
+        county = ctx.spark.sql(
+            f"SELECT geoid AS primary_county_geoid, name AS primary_county_name, state_geoid "
+            f"FROM {proc_county} WHERE vintage = {int(v)}"
+        )
+        state = ctx.spark.sql(
+            f"SELECT geoid AS state_geoid, name AS state_name, stusps AS state_stusps, "
+            f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
+        )
+        return (
+            lean.join(primary, ["geoid"], "left")
+            .join(counts, ["geoid"], "left")
+            .join(county, ["primary_county_geoid"], "left")
+            .join(state, ["state_geoid"], "left")
+            .withColumn(
+                "spans_multiple_counties",
+                F.coalesce(F.col("county_overlap_count") > 1, F.lit(False)),
+            )
+            .select(*_ZCTA_ENRICHED_SELECT)
+        )
+
+    def _process_xwalk(ctx: BuildContext, v: int) -> Any:
+        from pyspark.sql import Window
+        from pyspark.sql import functions as F
+
+        rel = ctx.spark.sql(
+            f"SELECT zcta5 AS geoid, vintage, county_geoid, area_land_part_sqm, zcta_area_land_sqm "
+            f"FROM {raw_rel} WHERE vintage = {int(v)}"
+        )
+        county = ctx.spark.sql(
+            f"SELECT geoid AS county_geoid, name AS county_name, state_geoid "
+            f"FROM {proc_county} WHERE vintage = {int(v)}"
+        )
+        w = Window.partitionBy("geoid").orderBy(
+            F.col("area_land_part_sqm").desc_nulls_last(), F.col("county_geoid")
+        )
+        return (
+            rel.withColumn(
+                "overlap_fraction",
+                F.when(
+                    F.col("zcta_area_land_sqm") > 0,
+                    F.col("area_land_part_sqm") / F.col("zcta_area_land_sqm"),
+                ),
+            )
+            .withColumn("is_primary", F.row_number().over(w) == 1)
+            .join(county, ["county_geoid"], "left")
+            .select(
+                "geoid",
+                "vintage",
+                "county_geoid",
+                "county_name",
+                "state_geoid",
+                F.col("area_land_part_sqm").alias("overlap_land_sqm"),
+                "overlap_fraction",
+                "is_primary",
+            )
+        )
+
+    def _process_boundary(ctx: BuildContext, v: int) -> Any:
+        raw = ctx.spark.sql(
+            f"SELECT *, 'zcta' AS level_param, '{resolution}' AS res_param, "
+            f"CAST({float(tolerance)} AS DOUBLE) AS tol_param FROM {raw_zcta} "
+            f"WHERE vintage = {int(v)}"
+        )
+        return raw.mapInPandas(_boundary_map, schema=BOUNDARY_LEVEL_SPARK_SCHEMA)
+
+    def _promote_entity(ctx: BuildContext, v: int) -> Any:
+        return ctx.spark.sql(f"SELECT * FROM {proc_zcta} WHERE vintage = {int(v)}")
+
+    def _promote_xwalk(ctx: BuildContext, v: int) -> Any:
+        return ctx.spark.sql(f"SELECT * FROM {proc_xwalk} WHERE vintage = {int(v)}")
+
+    def _promote_boundary(ctx: BuildContext, v: int) -> Any:
+        return ctx.spark.sql(f"SELECT * FROM {proc_boundary} WHERE vintage = {int(v)}")
+
+    def _validate_entity(ctx: BuildContext, staging_fqn: str) -> None:
+        dq = make_staging_dq(ctx, staging_fqn, record_table="geography_processed.us_census_zcta")
+        dq.unique(keys=["geoid", "vintage"], check_name="us_census_zcta_pk_unique")
+        dq.not_null(columns=["geoid"], check_name="us_census_zcta_geoid_not_null")
+        # Approximate-parent FK (non-null only — a few all-water ZCTAs may have no overlap):
+        # primary_county_geoid -> county, within vintage.
+        for v in vintages:
+            make_staging_dq(
+                ctx,
+                staging_fqn,
+                record_table="geography_processed.us_census_zcta",
+                where=f"vintage = {int(v)} AND primary_county_geoid IS NOT NULL",
+            ).fk(
+                key="primary_county_geoid",
+                parent_table=proc_county,
+                parent_key="geoid",
+                parent_where=f"vintage = {int(v)}",
+                check_name=f"us_census_zcta_primary_county_fk_{v}",
+            )
+
+    def _validate_xwalk(ctx: BuildContext, staging_fqn: str) -> None:
+        dq = make_staging_dq(
+            ctx, staging_fqn, record_table="geography_processed.us_census_zcta_county_xwalk"
+        )
+        dq.unique(
+            keys=["geoid", "county_geoid", "vintage"],
+            check_name="us_census_zcta_county_xwalk_pk_unique",
+        )
+        dq.not_null(
+            columns=["geoid", "county_geoid"],
+            check_name="us_census_zcta_county_xwalk_keys_not_null",
+        )
+        for v in vintages:
+            make_staging_dq(
+                ctx,
+                staging_fqn,
+                record_table="geography_processed.us_census_zcta_county_xwalk",
+                where=f"vintage = {int(v)}",
+            ).fk(
+                key="county_geoid",
+                parent_table=proc_county,
+                parent_key="geoid",
+                parent_where=f"vintage = {int(v)}",
+                check_name=f"us_census_zcta_county_xwalk_county_fk_{v}",
+            )
+
+    def _validate_boundary(ctx: BuildContext, staging_fqn: str) -> None:
+        dq = make_staging_dq(
+            ctx, staging_fqn, record_table="geography_processed.us_census_zcta_boundary"
+        )
+        dq.unique(keys=["geoid", "vintage"], check_name="us_census_zcta_boundary_pk_unique")
+        dq.not_null(columns=["geometry_wkb"], check_name="us_census_zcta_boundary_geom_not_null")
+
+    base_entry = registration.DatasetCatalogEntry(
+        full_table_name="(set per layer by the builder)",
+        subject=SCHEMA,
+        layer="reference",
+        description="US ZIP Code Tabulation Areas, vintaged (non-nesting).",
+        public_health_relevance=(
+            "ZCTA spatial unit for ZIP-keyed health data; carries an approximate primary "
+            "county (largest land-area overlap) + state for rollups and readable filtering."
+        ),
+        spatial_resolution="us_zcta",
+        spatial_coverage="United States",
+        source_provider_code="ipums_nhgis",
+        source_origin_code="census",
+        source_url=NHGIS_SOURCE_URL,
+        source_documentation_url=NHGIS_DOC_URL,
+        license=NHGIS_LICENSE,
+        dua_required=True,
+        dua_reference=NHGIS_DUA_REFERENCE,
+        access_tier="restricted",
+        external_maintainer_name=NHGIS_MAINTAINER,
+        is_hosted=True,
+    )
+
+    spec = ReferenceBuildSpec(
+        subject=SCHEMA,
+        source_catalog=source_catalog,
+        model_catalog=model_catalog,
+        pipeline_reference=PIPELINE_REF,
+        reader_groups=(data_engineers_group, analysts_group),
+        engineer_group=data_engineers_group,
+        base_catalog_entry=base_entry,
+        raw_landings=[
+            RawLanding(
+                table="us_census_zcta",
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch_zcta_shapefile,
+                read_from_volume=_read_zcta_shapefile,
+                description="IPUMS NHGIS ZCTA boundary shapefile, as-is (attributes + geometry).",
+            ),
+            RawLanding(
+                table="us_census_zcta_county_rel",
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch_zcta_rel,
+                read_from_volume=_read_zcta_county_rel,
+                description=(
+                    "Census ZCTA↔county relationship file (land-area overlap per part), as-is. "
+                    f"Provider=census; layout {ZCTA_COUNTY_REL_DOC_URL}"
+                ),
+            ),
+        ],
+        outputs=[
+            CanonicalOutput(
+                canonical_table="us_zcta",
+                reads=("us_census_zcta", "us_census_zcta_county_rel"),
+                process=_process_entity,
+                processed_table="us_census_zcta",
+                promote=_promote_entity,
+                validate_staging=_validate_entity,
+                description=(
+                    "US ZCTAs per vintage (1 row/ZCTA), enriched with the approximate primary "
+                    "county (largest land-area overlap) + that county's state labels."
+                ),
+                public_health_relevance=(
+                    "ZIP-keyed health data conforms here; the primary county/state give "
+                    "readable rollups, with spans_multiple_counties flagging the approximation."
+                ),
+            ),
+            CanonicalOutput(
+                canonical_table="us_zcta_county_xwalk",
+                reads=("us_census_zcta_county_rel",),
+                process=_process_xwalk,
+                processed_table="us_census_zcta_county_xwalk",
+                promote=_promote_xwalk,
+                validate_staging=_validate_xwalk,
+                canonical_cluster_columns=["vintage"],
+                description=(
+                    "Every ZCTA×county land-area overlap (any overlap, not 1:1) with fraction "
+                    "and is_primary flag, for spatial allocation/apportionment. Source=census."
+                ),
+            ),
+            CanonicalOutput(
+                canonical_table="us_zcta_boundary",
+                reads=("us_census_zcta",),
+                process=_process_boundary,
+                processed_table="us_census_zcta_boundary",
+                promote=_promote_boundary,
+                validate_staging=_validate_boundary,
+                canonical_cluster_columns=["vintage"],
+                description="US ZCTA boundary polygons (WKB) by vintage/resolution.",
+            ),
+        ],
+        ensure_staging=_ensure_staging,
+        ensure_canonical=_ensure_canonical,
+    )
+    return build_reference(spec, vintages=vintages)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
@@ -1798,11 +2301,12 @@ def main() -> None:
         "--layered",
         action="store_true",
         help="Build the layered geography chain parents-first (us_state -> us_county; more "
-        "levels as migrated) in ONE process. Dev convenience; production uses --level + the job DAG.",
+        "levels as migrated) in ONE process. Dev convenience; production uses --level + the "
+        "job DAG.",
     )
     parser.add_argument(
         "--level",
-        choices=["us_state", "us_county", "us_tract"],
+        choices=["us_state", "us_county", "us_tract", "us_zcta"],
         default=None,
         help="Build a single geography level via the shared builder (ADR 0036). Its parent levels "
         "must already be built (their processed tables are joined for enrichment). This is the "
@@ -1832,6 +2336,7 @@ def main() -> None:
             "us_state": build_state_layered,
             "us_county": build_county_layered,
             "us_tract": build_tract_layered,
+            "us_zcta": build_zcta_layered,
         }
         if args.level:
             builders[args.level](**level_kwargs)
@@ -1839,6 +2344,7 @@ def main() -> None:
             build_state_layered(**level_kwargs)
             build_county_layered(**level_kwargs)
             build_tract_layered(**level_kwargs)
+            build_zcta_layered(**level_kwargs)
         else:  # --layered-state
             build_state_layered(**level_kwargs)
         return

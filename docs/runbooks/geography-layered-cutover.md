@@ -61,16 +61,24 @@ For each level `<lvl>` (and its `<lvl>_boundary`):
 
 - **`us_state`** — layered build proven in dev; schema matched legacy (no drop needed);
   removed from the legacy build. ✅ (dev)
-- **`us_county`** — layered Phase A proven in dev (enrichment + parent-FK green); removed
-  from the legacy build. **Do now to finish dev:**
+- **`us_county`** — layered proven in dev (enrichment + parent-FK green); table dropped +
+  rebuilt enriched; `us_county_enriched` view dropped; removed from the legacy build. ✅ (dev)
+- **`us_tract`** — layered proven in dev (county_name + state labels populated both vintages;
+  4 parent-FK checks 0 orphans; 73,669 / 85,060 rows); `us_tract_enriched` view dropped +
+  removed from `build_geography_views.py`; removed from legacy. ✅ (dev)
+- **`us_zcta`** — non-nesting; built on the layered builder (entity + boundary +
+  `us_zcta_county_xwalk`), enriched with the approximate **primary county** (largest
+  land-area overlap, Census ZCTA↔county relationship file). Removed from legacy (legacy now
+  builds only `us_hhs_region`). **Do to finish dev:**
   ```sql
-  DROP TABLE IF EXISTS ecdh_model_dev.geography.us_county;
-  -- then repair-run the us_county task; ensure_canonical recreates the 14-col enriched table
-  DROP VIEW  IF EXISTS ecdh_model_dev.geography.us_county_enriched;   -- after removing from build_geography_views
-  DELETE FROM ecdh_model_dev.geography.boundary WHERE geo_level = 'us_county';  -- once consumers use us_county_boundary
+  DROP TABLE IF EXISTS ecdh_model_dev.geography.us_zcta;  -- legacy lean 7-col -> enriched 17-col
+  -- then run the us_zcta task; ensure_canonical recreates us_zcta enriched + us_zcta_county_xwalk
+  DELETE FROM ecdh_model_dev.geography.boundary WHERE geo_level = 'us_zcta';  -- owner-context; optional
   ```
-- **`us_tract` / `us_zcta` / `us_block_group` / `us_block`** — pending migration; same
-  checklist.
+  **Prereq:** the job network allowlist must permit `www2.census.gov` (the relationship-file
+  host), in addition to the NHGIS API. Confirm the 2010 header resolves (different column
+  names + comma delimiter vs 2020 pipe) — the parser fails loud on an unmatched column.
+- **`us_block_group` / `us_block`** — pending migration; same checklist.
 
 ## Validate after each level
 
@@ -87,7 +95,17 @@ WHERE check_name LIKE 'us_census_%_fk_%' ORDER BY checked_at DESC;
 
 ## Final retirement
 
-Once **all** levels are migrated: delete the legacy `run()` / `main()` legacy path and the
-`build_geography_reference` job (and `build_geography_views`), leaving only the layered
-builder + the `build_geography_layered` DAG. Drop the polymorphic `geography.boundary`'s
-remaining US rows if nothing consumes them.
+All shapefile levels (state/county/tract/zcta) are now migrated; the legacy `run()` builds
+**only `us_hhs_region`**, and its shapefile/boundary machinery (`BUILDERS`,
+`_build_*_frames`, `_write_chunk`, `_check_unique`, `_reset_us_boundaries`, `_comment_tables`,
+`_set_clustering`) is dead code pending retirement. To finish:
+
+1. Extract `us_hhs_region` into its own small entrypoint (static, no shapefiles) on the
+   `run_build` seam, then delete legacy `run()` + the dead helpers and the
+   `build_geography_reference` job.
+2. Migrate `us_block_group` + `us_block` onto the layered builder (same pattern).
+3. Retire `build_geography_views` (both `_enriched` views are dropped — county + tract): remove
+   `build_geography_views.py`, `geography_views_job.yml` (+ its bundle include), and
+   `us_enriched_view_definitions` + its tests.
+4. Owner-context: `DROP TABLE geography.boundary` once nothing consumes the polymorphic US
+   rows (the per-level `us_<lvl>_boundary` tables replace them).
