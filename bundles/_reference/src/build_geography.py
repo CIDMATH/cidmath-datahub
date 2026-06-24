@@ -2013,7 +2013,9 @@ def build_zcta_layered(
             f"FROM {raw_rel} WHERE vintage = {int(v)}"
         )
         counts = rel.groupBy("geoid").agg(
-            F.countDistinct("county_geoid").alias("county_overlap_count")
+            # countDistinct returns BIGINT; the DDL declares county_overlap_count INT, and the
+            # per-vintage write won't silently widen — cast to match (counts are tiny).
+            F.countDistinct("county_geoid").cast("int").alias("county_overlap_count")
         )
         w = Window.partitionBy("geoid").orderBy(
             F.col("area_land_part_sqm").desc_nulls_last(), F.col("county_geoid")
