@@ -473,6 +473,41 @@ def build_zcta_row(
     }
 
 
+def build_block_group_row(
+    gisjoin: str,
+    vintage: int,
+    *,
+    centroid_geo_lon: float | None = None,
+    centroid_geo_lat: float | None = None,
+    centroid_pop_lon: float | None = None,
+    centroid_pop_lat: float | None = None,
+    area_land_sqm: float | None = None,
+    area_water_sqm: float | None = None,
+) -> dict[str, Any]:
+    """Assemble a ``geography.us_block_group`` row.
+
+    ``geoid`` (12-digit) and the parent ``tract_geoid`` (11) + ``county_geoid`` (5) +
+    ``state_geoid`` (2) FKs are derived from the GISJOIN (``gisjoin_to_geoid`` level
+    ``"bg"``). Block groups nest within tracts and have a Center of Population, so both
+    a geographic interior point and a population-weighted center are stored.
+    """
+    geoid = gisjoin_to_geoid(gisjoin, "bg")
+    return {
+        "geoid": geoid,
+        "vintage": int(vintage),
+        "state_geoid": geoid[:STATE_GEOID_WIDTH],
+        "county_geoid": geoid[:COUNTY_GEOID_WIDTH],
+        "tract_geoid": geoid[:TRACT_GEOID_WIDTH],
+        "gisjoin": gisjoin.strip().upper(),
+        "centroid_geo_lon": centroid_geo_lon,
+        "centroid_geo_lat": centroid_geo_lat,
+        "centroid_pop_lon": centroid_pop_lon,
+        "centroid_pop_lat": centroid_pop_lat,
+        "area_land_sqm": area_land_sqm,
+        "area_water_sqm": area_water_sqm,
+    }
+
+
 # --- Crosswalk weight validation -------------------------------------------
 
 

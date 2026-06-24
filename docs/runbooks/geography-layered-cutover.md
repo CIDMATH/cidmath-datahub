@@ -78,7 +78,16 @@ For each level `<lvl>` (and its `<lvl>_boundary`):
   **Prereq:** the job network allowlist must permit `www2.census.gov` (the relationship-file
   host), in addition to the NHGIS API. Confirm the 2010 header resolves (different column
   names + comma delimiter vs 2020 pipe) — the parser fails loud on an unmatched column.
-- **`us_block_group` / `us_block`** — pending migration; same checklist.
+- **`us_block_group`** — nests in tract; built on the layered builder (entity + boundary),
+  enriched with county_name + state labels, FK-validated against tract/county/state. NHGIS
+  national file `us_blck_grp_<year>_tl<year>` + national cenpop. **Do to finish dev:**
+  ```sql
+  -- no pre-existing legacy table (BG was never in the legacy build), so no DROP needed;
+  -- just run the us_block_group task. ~217k/242k rows per vintage.
+  ```
+- **`us_block`** — pending; **differs**: NHGIS has no national block file (per-state only,
+  `<stfips>_block_<year>_tl<year>`), so the fetch/read must loop over ~51 states + concat,
+  and at ~8M rows the per-(level,vintage) chunked write + compute sizing matter most.
 
 ## Validate after each level
 

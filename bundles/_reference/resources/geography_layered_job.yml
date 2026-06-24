@@ -129,6 +129,33 @@ resources:
               - "${var.ipums_secret_key}"
           environment_key: geography_layered_env
 
+        # Nests in tract: us_block_group joins us_county + us_state for labels and FK-validates
+        # against tract/county/state. ~217k (2010) / ~242k (2020) rows per vintage — written
+        # per-(level,vintage) chunk (ADR 0020). NHGIS national file us_blck_grp_<year>.
+        - task_key: us_block_group
+          depends_on:
+            - task_key: us_tract
+          spark_python_task:
+            python_file: ../src/build_geography.py
+            parameters:
+              - "--level"
+              - "us_block_group"
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--vintages"
+              - "2010,2020"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+              - "--ipums-secret-scope"
+              - "${var.ipums_secret_scope}"
+              - "--ipums-secret-key"
+              - "${var.ipums_secret_key}"
+          environment_key: geography_layered_env
+
       environments:
         - environment_key: geography_layered_env
           spec:

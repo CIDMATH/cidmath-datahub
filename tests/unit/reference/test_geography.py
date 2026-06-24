@@ -250,6 +250,22 @@ class TestRowBuilders:
         assert row["centroid_geo_lon"] == -84.3
         assert "centroid_pop_lon" not in row
 
+    def test_build_block_group_row(self):
+        # tract GISJOIN G1800910040900 + a block-group digit (1) -> 12-digit BG geoid.
+        row = geo.build_block_group_row(
+            "G18009100409001",
+            2020,
+            centroid_geo_lon=-86.5,
+            centroid_geo_lat=39.1,
+            centroid_pop_lon=-86.4,
+            centroid_pop_lat=39.2,
+        )
+        assert row["geoid"] == "180910409001"
+        assert row["state_geoid"] == "18"
+        assert row["county_geoid"] == "18091"
+        assert row["tract_geoid"] == "18091040900"
+        assert row["centroid_pop_lon"] == -86.4
+
 
 @pytest.mark.unit
 class TestCrosswalkWeights:
