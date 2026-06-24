@@ -2889,8 +2889,12 @@ def build_block_layered(
         _download_shapefiles(api_key, _block_shapefile_names(v), Path(vdir))
 
     def _read_block(ctx: BuildContext, v: int, vdir: str) -> Any:
-        # Per-state read + UNION: one state's rows materialize in the driver at a time, then
-        # parallelize via createDataFrame; the union is lazy/distributed.
+        # ~8M block rows can't go through createDataFrame: Spark Connect inlines a local
+        # relation into the query plan, which blows past spark.rpc.message.maxSize (a single
+        # big state ~1.4GB). Instead, stage each state to Parquet on the Volume (vectorized,
+        # one state in driver memory at a time) and read it back DISTRIBUTED.
+        import pandas as pd
+
         staged = _stage_volume_payload(vdir)
         shps = sorted(
             p
@@ -2902,8 +2906,12 @@ def build_block_layered(
         if not shps:
             names = [p.name for p in staged.rglob("*.shp")]
             raise FileNotFoundError(f"no block shapefiles for vintage={v}; found {names}")
-        frames: list[Any] = []
-        for shp in shps:
+        # Volume staging dir (engineer-only landing volume; rewritten each run).
+        pq_dir = Path(vdir).parent.parent / "_read_parquet" / "us_census_block" / f"vintage={int(v)}"
+        if pq_dir.exists():
+            shutil.rmtree(pq_dir)
+        pq_dir.mkdir(parents=True, exist_ok=True)
+        for i, shp in enumerate(shps):
             gdf = _read_gdf(shp)
             cols = list(gdf.columns)
             gj = _first_col(cols, ["GISJOIN", "gisjoin"])
@@ -2911,23 +2919,30 @@ def build_block_layered(
             awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
             if gj is None:
                 raise ValueError(f"block shapefile {shp.name} has no GISJOIN; columns={cols}")
-            rows = [
+            keep = gdf.geometry.notna() & ~gdf.geometry.is_empty
+            g = gdf[keep]
+            pd.DataFrame(
                 {
-                    "gisjoin": str(rec[gj]).strip().upper(),
+                    "gisjoin": g[gj].astype(str).str.strip().str.upper(),
                     "vintage": int(v),
                     "src_name": None,
-                    "area_land_sqm": _num(rec[aland]) if aland else None,
-                    "area_water_sqm": _num(rec[awater]) if awater else None,
-                    "geometry_wkb": rec.geometry.wkb,
+                    "area_land_sqm": pd.to_numeric(g[aland], errors="coerce")
+                    if aland
+                    else None,
+                    "area_water_sqm": pd.to_numeric(g[awater], errors="coerce")
+                    if awater
+                    else None,
+                    "geometry_wkb": g.geometry.to_wkb(),
                 }
-                for _, rec in gdf.iterrows()
-                if rec.geometry is not None and not rec.geometry.is_empty
-            ]
-            frames.append(ctx.spark.createDataFrame(rows, RAW_SHAPEFILE_SCHEMA))
-        out = frames[0]
-        for f in frames[1:]:
-            out = out.union(f)
-        return out
+            ).to_parquet(pq_dir / f"part_{i:03d}.parquet", index=False)
+        return ctx.spark.read.parquet(str(pq_dir)).selectExpr(
+            "CAST(gisjoin AS STRING) AS gisjoin",
+            "CAST(vintage AS INT) AS vintage",
+            "CAST(src_name AS STRING) AS src_name",
+            "CAST(area_land_sqm AS DOUBLE) AS area_land_sqm",
+            "CAST(area_water_sqm AS DOUBLE) AS area_water_sqm",
+            "CAST(geometry_wkb AS BINARY) AS geometry_wkb",
+        )
 
     def _process_entity(ctx: BuildContext, v: int) -> Any:
         lean = ctx.spark.sql(f"SELECT * FROM {raw_block} WHERE vintage = {int(v)}").mapInPandas(
