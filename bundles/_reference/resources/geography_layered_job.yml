@@ -156,6 +156,35 @@ resources:
               - "${var.ipums_secret_key}"
           environment_key: geography_layered_env
 
+        # Atomic level: us_block nests in us_block_group (FK-validates against
+        # block_group/county/state). NHGIS has no national block file, so it fetches ~51
+        # per-state shapefiles and reads them per-state + UNION. ~8M rows/vintage — the
+        # heaviest task (large states load into the driver during read; bump the driver if it
+        # OOMs). Geometry simplification on ~8M polygons is the slow part.
+        - task_key: us_block
+          depends_on:
+            - task_key: us_block_group
+          spark_python_task:
+            python_file: ../src/build_geography.py
+            parameters:
+              - "--level"
+              - "us_block"
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--vintages"
+              - "2010,2020"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+              - "--ipums-secret-scope"
+              - "${var.ipums_secret_scope}"
+              - "--ipums-secret-key"
+              - "${var.ipums_secret_key}"
+          environment_key: geography_layered_env
+
       environments:
         - environment_key: geography_layered_env
           spec:

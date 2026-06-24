@@ -85,9 +85,13 @@ For each level `<lvl>` (and its `<lvl>_boundary`):
   -- no pre-existing legacy table (BG was never in the legacy build), so no DROP needed;
   -- just run the us_block_group task. ~217k/242k rows per vintage.
   ```
-- **`us_block`** — pending; **differs**: NHGIS has no national block file (per-state only,
-  `<stfips>_block_<year>_tl<year>`), so the fetch/read must loop over ~51 states + concat,
-  and at ~8M rows the per-(level,vintage) chunked write + compute sizing matter most.
+- **`us_block`** — atomic level; built on the layered builder (entity + boundary). **Differs:**
+  NHGIS has no national block file, so it fetches ~51 per-state shapefiles
+  (`<stfips>0_block_<year>_tl<year>`) in one extract and reads them **per-state + UNION**
+  (driver holds one state at a time). Nests in `us_block_group` (FK block_group/county/state;
+  all-water gap scoped + recorded WARN like BG). No cenpop. ~8M rows/vintage. **No DROP**
+  (never in legacy). **Watch:** large-state read (CA/TX) loads into the driver — bump the
+  driver if it OOMs; ~8M-polygon geometry simplification is the slow part.
 
 ## Validate after each level
 

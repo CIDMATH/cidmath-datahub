@@ -28,6 +28,7 @@ COUNTY_GEOID_WIDTH = 5
 TRACT_GEOID_WIDTH = 11
 ZCTA_GEOID_WIDTH = 5
 BG_GEOID_WIDTH = 12
+BLOCK_GEOID_WIDTH = 15
 
 
 def normalize_geoid(value: str | int, width: int) -> str:
@@ -86,6 +87,11 @@ def validate_bg_geoid(value: str | int) -> str:
     return normalize_geoid(value, BG_GEOID_WIDTH)
 
 
+def validate_block_geoid(value: str | int) -> str:
+    """Return a normalized 15-digit census block GEOID (see :func:`normalize_geoid`)."""
+    return normalize_geoid(value, BLOCK_GEOID_WIDTH)
+
+
 def state_geoid_of_county(county_geoid: str | int) -> str:
     """Return the 2-digit state GEOID that a 5-digit county GEOID belongs to.
 
@@ -123,6 +129,7 @@ def gisjoin_to_geoid(gisjoin: str, level: str) -> str:
         tract   G + SS + 0 + CCC + 0 + TTTTTT       -> 11-digit GEOID
         zcta    G + ZZZZZ                           -> 5-digit GEOID (non-nested)
         bg      G + SS + 0 + CCC + 0 + TTTTTT + B   -> 12-digit GEOID
+        block   G + SS + 0 + CCC + 0 + TTTTTT + BBBB -> 15-digit GEOID
 
     The GEOID is recovered by position (separators dropped), so this is correct
     even when the differentiator digit is non-zero. State/county/tract are
@@ -165,8 +172,14 @@ def gisjoin_to_geoid(gisjoin: str, level: str) -> str:
         if len(body) != 14 or not body.isdigit():
             raise ValueError(f"bg GISJOIN {gisjoin!r} is malformed")
         return body[0:2] + body[3:6] + body[7:13] + body[13:14]  # SS [sep] CCC [sep] TTTTTT B
+    if level == "block":
+        if len(body) != 17 or not body.isdigit():
+            raise ValueError(f"block GISJOIN {gisjoin!r} is malformed")
+        # SS [sep] CCC [sep] TTTTTT BBBB -> 15-digit GEOID; confirmed on first extract.
+        return body[0:2] + body[3:6] + body[7:13] + body[13:17]
     raise ValueError(
-        f"unsupported level {level!r} (expected 'state', 'county', 'tract', 'zcta', or 'bg')"
+        f"unsupported level {level!r} "
+        f"(expected 'state', 'county', 'tract', 'zcta', 'bg', or 'block')"
     )
 
 
@@ -503,6 +516,38 @@ def build_block_group_row(
         "centroid_geo_lat": centroid_geo_lat,
         "centroid_pop_lon": centroid_pop_lon,
         "centroid_pop_lat": centroid_pop_lat,
+        "area_land_sqm": area_land_sqm,
+        "area_water_sqm": area_water_sqm,
+    }
+
+
+def build_block_row(
+    gisjoin: str,
+    vintage: int,
+    *,
+    centroid_geo_lon: float | None = None,
+    centroid_geo_lat: float | None = None,
+    area_land_sqm: float | None = None,
+    area_water_sqm: float | None = None,
+) -> dict[str, Any]:
+    """Assemble a ``geography.us_block`` row.
+
+    ``geoid`` (15-digit) and the parent ``block_group_geoid`` (12) + ``tract_geoid`` (11) +
+    ``county_geoid`` (5) + ``state_geoid`` (2) FKs are derived from the GISJOIN
+    (``gisjoin_to_geoid`` level ``"block"``). Census blocks are the atomic tabulation unit
+    and have no Center of Population, so only the geographic interior point is stored.
+    """
+    geoid = gisjoin_to_geoid(gisjoin, "block")
+    return {
+        "geoid": geoid,
+        "vintage": int(vintage),
+        "state_geoid": geoid[:STATE_GEOID_WIDTH],
+        "county_geoid": geoid[:COUNTY_GEOID_WIDTH],
+        "tract_geoid": geoid[:TRACT_GEOID_WIDTH],
+        "block_group_geoid": geoid[:BG_GEOID_WIDTH],
+        "gisjoin": gisjoin.strip().upper(),
+        "centroid_geo_lon": centroid_geo_lon,
+        "centroid_geo_lat": centroid_geo_lat,
         "area_land_sqm": area_land_sqm,
         "area_water_sqm": area_water_sqm,
     }

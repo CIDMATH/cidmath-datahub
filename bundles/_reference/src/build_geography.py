@@ -201,6 +201,24 @@ BLOCK_GROUP_SPARK_SCHEMA = T.StructType(
     ]
 )
 
+# Lean block (mapInPandas output): block group's shape + block_group_geoid; no pop centroid
+# (blocks are the atomic unit, Census publishes no block Center of Population).
+BLOCK_SPARK_SCHEMA = T.StructType(
+    [
+        T.StructField("geoid", T.StringType(), False),
+        T.StructField("vintage", T.IntegerType(), False),
+        T.StructField("state_geoid", T.StringType(), False),
+        T.StructField("county_geoid", T.StringType(), False),
+        T.StructField("tract_geoid", T.StringType(), False),
+        T.StructField("block_group_geoid", T.StringType(), False),
+        T.StructField("gisjoin", T.StringType(), False),
+        T.StructField("centroid_geo_lon", T.DoubleType(), False),
+        T.StructField("centroid_geo_lat", T.DoubleType(), False),
+        T.StructField("area_land_sqm", T.DoubleType(), True),
+        T.StructField("area_water_sqm", T.DoubleType(), True),
+    ]
+)
+
 # geography.boundary schema is shared via gadm.boundary_spark_schema() (ADR 0023).
 
 ENTITY_SCHEMAS: dict[str, T.StructType] = {
@@ -209,11 +227,76 @@ ENTITY_SCHEMAS: dict[str, T.StructType] = {
     "us_tract": TRACT_SPARK_SCHEMA,
     "us_zcta": ZCTA_SPARK_SCHEMA,
     "us_block_group": BLOCK_GROUP_SPARK_SCHEMA,
+    "us_block": BLOCK_SPARK_SCHEMA,
 }
 
 # NHGIS abbreviates some level names in shapefile filenames (us_block_group -> us_blck_grp);
 # _find_shapefile matches on this token. Levels not listed derive the token from the name.
 _NHGIS_FILE_TOKEN: dict[str, str] = {"us_block_group": "blck_grp"}
+
+# Census blocks are NOT distributed as a national NHGIS file — only per-state (e.g.
+# "010_block_2020_tl2020" for Alabama). State code = 2-digit FIPS + "0". 50 states + DC + PR.
+_BLOCK_STATE_FIPS: tuple[str, ...] = (
+    "01",
+    "02",
+    "04",
+    "05",
+    "06",
+    "08",
+    "09",
+    "10",
+    "11",
+    "12",
+    "13",
+    "15",
+    "16",
+    "17",
+    "18",
+    "19",
+    "20",
+    "21",
+    "22",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "29",
+    "30",
+    "31",
+    "32",
+    "33",
+    "34",
+    "35",
+    "36",
+    "37",
+    "38",
+    "39",
+    "40",
+    "41",
+    "42",
+    "44",
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50",
+    "51",
+    "53",
+    "54",
+    "55",
+    "56",
+    "72",
+)
+
+
+def _block_shapefile_names(vintage: int) -> list[str]:
+    """NHGIS per-state block shapefile names for a vintage (one per state, ``NN0_block_…``)."""
+    y = int(vintage)
+    return [f"{fips}0_block_{y}_tl{y}" for fips in _BLOCK_STATE_FIPS]
+
 
 # --- ZCTA↔county relationship files (Census, provider=census; a 2nd source in this build) ---
 # ZCTAs do not nest in counties, so there is no parent GISJOIN. We approximate a parent by
@@ -1084,6 +1167,35 @@ def _tract_entity_map(iterator: Any) -> Any:
                     centroid_geo_lat=float(pt.y),
                     centroid_pop_lon=pop_lon,
                     centroid_pop_lat=pop_lat,
+                    area_land_sqm=None if pd.isna(r.area_land_sqm) else float(r.area_land_sqm),
+                    area_water_sqm=None if pd.isna(r.area_water_sqm) else float(r.area_water_sqm),
+                )
+            )
+        yield pd.DataFrame(out, columns=cols)
+
+
+def _block_entity_map(iterator: Any) -> Any:
+    """mapInPandas: raw block shapefile → lean processed block rows.
+
+    Reuses the pure ``geo.build_block_row`` (15-digit geoid + parent block_group/tract/county/
+    state geoids derived from the GISJOIN; no Center of Population for blocks). county_name +
+    state labels are joined on in ``process`` from the same-catalog parents, not here.
+    """
+    import pandas as pd
+    from shapely import wkb as _wkb
+
+    cols = [f.name for f in BLOCK_SPARK_SCHEMA.fields]
+    for pdf in iterator:
+        out: list[dict[str, Any]] = []
+        for r in pdf.itertuples(index=False):
+            geom = _wkb.loads(bytes(r.geometry_wkb))
+            pt = geom.representative_point()
+            out.append(
+                geo.build_block_row(
+                    r.gisjoin,
+                    int(r.vintage),
+                    centroid_geo_lon=float(pt.x),
+                    centroid_geo_lat=float(pt.y),
                     area_land_sqm=None if pd.isna(r.area_land_sqm) else float(r.area_land_sqm),
                     area_water_sqm=None if pd.isna(r.area_water_sqm) else float(r.area_water_sqm),
                 )
@@ -2572,9 +2684,9 @@ def build_block_group_layered(
             )
             # Accepted gap (non-blocking WARN): BG rows dropped in process for nesting in an
             # off-universe tract (all-water tract erased by NHGIS). raw - kept = dropped.
-            raw_n = ctx.spark.sql(
-                f"SELECT count(*) AS n FROM {raw_bg} WHERE {where}"
-            ).collect()[0]["n"]
+            raw_n = ctx.spark.sql(f"SELECT count(*) AS n FROM {raw_bg} WHERE {where}").collect()[0][
+                "n"
+            ]
             kept_n = ctx.spark.sql(
                 f"SELECT count(*) AS n FROM {staging_fqn} WHERE {where}"
             ).collect()[0]["n"]
@@ -2681,6 +2793,316 @@ def build_block_group_layered(
     return build_reference(spec, vintages=vintages)
 
 
+def build_block_layered(
+    *,
+    source_catalog: str,
+    model_catalog: str,
+    vintages: list[int],
+    data_engineers_group: str,
+    analysts_group: str,
+    api_key: str,
+    simplify_tolerance: float = 0.005,
+    full_resolution: bool = False,
+) -> tuple[str, str]:
+    """Build us_block via the shared builder (ADR 0036) — the atomic level, after us_block_group.
+
+    Census blocks have no national NHGIS file, so the raw landing is the ~51 per-state
+    shapefiles fetched in one extract and read per-state then UNION-ed (driver memory is
+    bounded to one state at a time — big states like CA may still need a sizeable driver).
+    ~8M rows/vintage, written per-(level,vintage) chunk. No Center of Population for blocks.
+    Every block nests in a us_block_group; the all-water gap (cf. block group) is scoped +
+    recorded. ``process`` joins same-catalog ``us_census_county`` + ``us_census_state``.
+    """
+    resolution = "full" if full_resolution else "generalized"
+    tolerance = 0.0 if full_resolution else simplify_tolerance
+
+    raw_block = f"{source_catalog}.geography_raw.us_census_block"
+    proc_block = f"{source_catalog}.geography_processed.us_census_block"
+    proc_boundary = f"{source_catalog}.geography_processed.us_census_block_boundary"
+    proc_bg = f"{source_catalog}.geography_processed.us_census_block_group"  # parent (nesting)
+    proc_county = f"{source_catalog}.geography_processed.us_census_county"  # parent (county_name)
+    proc_state = f"{source_catalog}.geography_processed.us_census_state"  # parent (state labels)
+
+    block_cols = (
+        "geoid STRING, vintage INT, state_geoid STRING, county_geoid STRING, "
+        "tract_geoid STRING, block_group_geoid STRING, gisjoin STRING, "
+        "centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, area_land_sqm DOUBLE, "
+        "area_water_sqm DOUBLE, county_name STRING, state_name STRING, state_stusps STRING, "
+        "state_hhs_region INT"
+    )
+    block_select = [
+        "geoid",
+        "vintage",
+        "state_geoid",
+        "county_geoid",
+        "tract_geoid",
+        "block_group_geoid",
+        "gisjoin",
+        "centroid_geo_lon",
+        "centroid_geo_lat",
+        "area_land_sqm",
+        "area_water_sqm",
+        "county_name",
+        "state_name",
+        "state_stusps",
+        "state_hhs_region",
+    ]
+
+    def _ensure_staging(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_raw "
+            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source "
+            f"files). ADR 0037.'"
+        )
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_processed "
+            f"COMMENT 'Source-catalog processed/derived geography (engineer-only). ADR 0037.'"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {raw_block} (gisjoin STRING, vintage INT, "
+            f"src_name STRING, area_land_sqm DOUBLE, area_water_sqm DOUBLE, geometry_wkb BINARY) "
+            f"USING DELTA"
+        )
+        spark.sql(f"CREATE TABLE IF NOT EXISTS {proc_block} ({block_cols}) USING DELTA")
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, "
+            f"gisjoin STRING, geoid_system STRING, resolution STRING, "
+            f"geometry_wkb BINARY) USING DELTA"
+        )
+
+    def _ensure_canonical(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {model_catalog}.{SCHEMA} "
+            f"COMMENT 'Canonical US geography reference (source-agnostic). ADR 0020/0037.'"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_block ({block_cols}) "
+            f"USING DELTA"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_block_boundary "
+            f"(geoid STRING, vintage INT, gisjoin STRING, geoid_system STRING, "
+            f"resolution STRING, geometry_wkb BINARY) USING DELTA"
+        )
+
+    def _fetch_block(v: int, vdir: str) -> None:
+        _download_shapefiles(api_key, _block_shapefile_names(v), Path(vdir))
+
+    def _read_block(ctx: BuildContext, v: int, vdir: str) -> Any:
+        # Per-state read + UNION: one state's rows materialize in the driver at a time, then
+        # parallelize via createDataFrame; the union is lazy/distributed.
+        staged = _stage_volume_payload(vdir)
+        shps = sorted(
+            p
+            for p in staged.rglob("*.shp")
+            if "block" in p.name.lower()
+            and "blck_grp" not in p.name.lower()
+            and str(int(v)) in p.name.lower()
+        )
+        if not shps:
+            names = [p.name for p in staged.rglob("*.shp")]
+            raise FileNotFoundError(f"no block shapefiles for vintage={v}; found {names}")
+        frames: list[Any] = []
+        for shp in shps:
+            gdf = _read_gdf(shp)
+            cols = list(gdf.columns)
+            gj = _first_col(cols, ["GISJOIN", "gisjoin"])
+            aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
+            awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
+            if gj is None:
+                raise ValueError(f"block shapefile {shp.name} has no GISJOIN; columns={cols}")
+            rows = [
+                {
+                    "gisjoin": str(rec[gj]).strip().upper(),
+                    "vintage": int(v),
+                    "src_name": None,
+                    "area_land_sqm": _num(rec[aland]) if aland else None,
+                    "area_water_sqm": _num(rec[awater]) if awater else None,
+                    "geometry_wkb": rec.geometry.wkb,
+                }
+                for _, rec in gdf.iterrows()
+                if rec.geometry is not None and not rec.geometry.is_empty
+            ]
+            frames.append(ctx.spark.createDataFrame(rows, RAW_SHAPEFILE_SCHEMA))
+        out = frames[0]
+        for f in frames[1:]:
+            out = out.union(f)
+        return out
+
+    def _process_entity(ctx: BuildContext, v: int) -> Any:
+        lean = ctx.spark.sql(f"SELECT * FROM {raw_block} WHERE vintage = {int(v)}").mapInPandas(
+            _block_entity_map, schema=BLOCK_SPARK_SCHEMA
+        )
+        # Scope to block groups in our universe (left_semi): the all-water block groups dropped
+        # by the BG build would otherwise leave their (all-water) blocks dangling. Recorded in
+        # _validate_entity as an accepted gap.
+        bg_keys = ctx.spark.sql(
+            f"SELECT geoid AS block_group_geoid FROM {proc_bg} WHERE vintage = {int(v)}"
+        )
+        lean = lean.join(bg_keys, ["block_group_geoid"], "left_semi")
+        county = ctx.spark.sql(
+            f"SELECT geoid AS county_geoid, name AS county_name "
+            f"FROM {proc_county} WHERE vintage = {int(v)}"
+        )
+        state = ctx.spark.sql(
+            f"SELECT geoid AS state_geoid, name AS state_name, stusps AS state_stusps, "
+            f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
+        )
+        return (
+            lean.join(county, ["county_geoid"], "left")
+            .join(state, ["state_geoid"], "left")
+            .select(*block_select)
+        )
+
+    def _process_boundary(ctx: BuildContext, v: int) -> Any:
+        raw = ctx.spark.sql(
+            f"SELECT *, 'block' AS level_param, '{resolution}' AS res_param, "
+            f"CAST({float(tolerance)} AS DOUBLE) AS tol_param FROM {raw_block} "
+            f"WHERE vintage = {int(v)}"
+        )
+        bdf = raw.mapInPandas(_boundary_map, schema=BOUNDARY_LEVEL_SPARK_SCHEMA)
+        # Scope to the entity (boundary ⊆ entity); entity processed table is written first.
+        entity_keys = ctx.spark.sql(f"SELECT geoid FROM {proc_block} WHERE vintage = {int(v)}")
+        return bdf.join(entity_keys, ["geoid"], "left_semi")
+
+    def _promote_entity(ctx: BuildContext, v: int) -> Any:
+        return ctx.spark.sql(f"SELECT * FROM {proc_block} WHERE vintage = {int(v)}")
+
+    def _promote_boundary(ctx: BuildContext, v: int) -> Any:
+        return ctx.spark.sql(f"SELECT * FROM {proc_boundary} WHERE vintage = {int(v)}")
+
+    def _validate_entity(ctx: BuildContext, staging_fqn: str) -> None:
+        dq = make_staging_dq(ctx, staging_fqn, record_table="geography_processed.us_census_block")
+        dq.unique(keys=["geoid", "vintage"], check_name="us_census_block_pk_unique")
+        dq.not_null(
+            columns=["geoid", "state_geoid", "county_geoid", "tract_geoid", "block_group_geoid"],
+            check_name="us_census_block_core_not_null",
+        )
+        rec = "geography_processed.us_census_block"
+        for v in vintages:
+            where = f"vintage = {int(v)}"
+            make_staging_dq(ctx, staging_fqn, record_table=rec, where=where).fk(
+                key="block_group_geoid",
+                parent_table=proc_bg,
+                parent_key="geoid",
+                parent_where=where,
+                check_name=f"us_census_block_block_group_fk_{v}",
+            )
+            make_staging_dq(ctx, staging_fqn, record_table=rec, where=where).fk(
+                key="county_geoid",
+                parent_table=proc_county,
+                parent_key="geoid",
+                parent_where=where,
+                check_name=f"us_census_block_county_fk_{v}",
+            )
+            make_staging_dq(ctx, staging_fqn, record_table=rec, where=where).fk(
+                key="state_geoid",
+                parent_table=proc_state,
+                parent_key="geoid",
+                parent_where=where,
+                check_name=f"us_census_block_state_fk_{v}",
+            )
+            # Accepted gap (non-blocking WARN): blocks dropped for nesting in an off-universe
+            # (all-water) block group. raw - kept = dropped.
+            raw_n = ctx.spark.sql(f"SELECT count(*) AS n FROM {raw_block} WHERE {where}").collect()[
+                0
+            ]["n"]
+            kept_n = ctx.spark.sql(
+                f"SELECT count(*) AS n FROM {staging_fqn} WHERE {where}"
+            ).collect()[0]["n"]
+            dropped = int(raw_n) - int(kept_n)
+            ctx.recorder.record(
+                table_name=rec,
+                check_name=f"us_census_block_offscope_bg_dropped_{v}",
+                category=DQCategory.REFERENTIAL,
+                severity=DQSeverity.WARN,
+                passed=dropped == 0,
+                failing_row_count=dropped,
+                total_row_count=int(raw_n),
+                details={"dropped_block_offscope_bg": dropped} if dropped else None,
+            )
+
+    def _validate_boundary(ctx: BuildContext, staging_fqn: str) -> None:
+        dq = make_staging_dq(
+            ctx, staging_fqn, record_table="geography_processed.us_census_block_boundary"
+        )
+        dq.unique(keys=["geoid", "vintage"], check_name="us_census_block_boundary_pk_unique")
+        dq.not_null(columns=["geometry_wkb"], check_name="us_census_block_boundary_geom_not_null")
+
+    base_entry = registration.DatasetCatalogEntry(
+        full_table_name="(set per layer by the builder)",
+        subject=SCHEMA,
+        layer="reference",
+        description="US census blocks, vintaged (the atomic tabulation unit; nest in BGs).",
+        public_health_relevance=(
+            "Atomic census geography; the building block for custom aggregations and the "
+            "finest spatial resolution for allocation/apportionment."
+        ),
+        spatial_resolution="us_block",
+        spatial_coverage="United States",
+        source_provider_code="ipums_nhgis",
+        source_origin_code="census",
+        source_url=NHGIS_SOURCE_URL,
+        source_documentation_url=NHGIS_DOC_URL,
+        license=NHGIS_LICENSE,
+        dua_required=True,
+        dua_reference=NHGIS_DUA_REFERENCE,
+        access_tier="restricted",
+        external_maintainer_name=NHGIS_MAINTAINER,
+        is_hosted=True,
+    )
+
+    spec = ReferenceBuildSpec(
+        subject=SCHEMA,
+        source_catalog=source_catalog,
+        model_catalog=model_catalog,
+        pipeline_reference=PIPELINE_REF,
+        reader_groups=(data_engineers_group, analysts_group),
+        engineer_group=data_engineers_group,
+        base_catalog_entry=base_entry,
+        raw_landings=[
+            RawLanding(
+                table="us_census_block",
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch_block,
+                read_from_volume=_read_block,
+                description="IPUMS NHGIS per-state block boundary shapefiles, as-is (~51 files).",
+            ),
+        ],
+        outputs=[
+            CanonicalOutput(
+                canonical_table="us_block",
+                reads=("us_census_block",),
+                process=_process_entity,
+                processed_table="us_census_block",
+                promote=_promote_entity,
+                validate_staging=_validate_entity,
+                description=(
+                    "US census blocks per vintage, enriched with county + state labels; every "
+                    "block nests in a us_block_group (all-water orphans dropped + recorded)."
+                ),
+                public_health_relevance=(
+                    "Atomic tabulation unit; the grain for building custom geographies and "
+                    "high-resolution spatial allocation."
+                ),
+            ),
+            CanonicalOutput(
+                canonical_table="us_block_boundary",
+                reads=("us_census_block",),
+                process=_process_boundary,
+                processed_table="us_census_block_boundary",
+                promote=_promote_boundary,
+                validate_staging=_validate_boundary,
+                canonical_cluster_columns=["vintage"],
+                description="US block boundary polygons (WKB) by vintage/resolution.",
+            ),
+        ],
+        ensure_staging=_ensure_staging,
+        ensure_canonical=_ensure_canonical,
+    )
+    return build_reference(spec, vintages=vintages)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
@@ -2723,7 +3145,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--level",
-        choices=["us_state", "us_county", "us_tract", "us_zcta", "us_block_group"],
+        choices=["us_state", "us_county", "us_tract", "us_zcta", "us_block_group", "us_block"],
         default=None,
         help="Build a single geography level via the shared builder (ADR 0036). Its parent levels "
         "must already be built (their processed tables are joined for enrichment). This is the "
@@ -2755,6 +3177,7 @@ def main() -> None:
             "us_tract": build_tract_layered,
             "us_zcta": build_zcta_layered,
             "us_block_group": build_block_group_layered,
+            "us_block": build_block_layered,
         }
         if args.level:
             builders[args.level](**level_kwargs)
@@ -2764,6 +3187,7 @@ def main() -> None:
             build_tract_layered(**level_kwargs)
             build_zcta_layered(**level_kwargs)
             build_block_group_layered(**level_kwargs)
+            build_block_layered(**level_kwargs)
         else:  # --layered-state
             build_state_layered(**level_kwargs)
         return
