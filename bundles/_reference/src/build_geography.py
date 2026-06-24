@@ -2086,7 +2086,11 @@ def build_zcta_layered(
                 ),
             )
             .withColumn("is_primary", F.row_number().over(w) == 1)
-            .join(county, ["county_geoid"], "left")
+            # INNER join scopes the xwalk to our county universe (50 states + DC + PR). The
+            # Census rel file also covers the Island Areas (AS/GU/MP/VI) that NHGIS's
+            # us_county/us_zcta exclude; those overlaps are dropped here and recorded as a
+            # non-blocking accepted gap in _validate_xwalk (cf. GADM subnational_rows_dropped).
+            .join(county, ["county_geoid"], "inner")
             .select(
                 "geoid",
                 "vintage",
@@ -2160,6 +2164,23 @@ def build_zcta_layered(
                 parent_key="geoid",
                 parent_where=f"vintage = {int(v)}",
                 check_name=f"us_census_zcta_county_xwalk_county_fk_{v}",
+            )
+            # Accepted gap: record (non-blocking WARN) how many raw rel overlaps reference an
+            # off-scope county (Island Areas AS/GU/MP/VI) that the INNER join dropped, so the
+            # gap is tracked in _ops, not silent. Counts the rel rows, not the kept xwalk rows.
+            make_staging_dq(
+                ctx,
+                raw_rel,
+                record_table="geography_processed.us_census_zcta_county_xwalk",
+                where=f"vintage = {int(v)}",
+            ).fk(
+                key="county_geoid",
+                parent_table=proc_county,
+                parent_key="geoid",
+                parent_where=f"vintage = {int(v)}",
+                check_name=f"us_census_zcta_county_xwalk_offscope_county_dropped_{v}",
+                severity=DQSeverity.WARN,
+                raise_on_fail=False,
             )
 
     def _validate_boundary(ctx: BuildContext, staging_fqn: str) -> None:
@@ -2246,7 +2267,9 @@ def build_zcta_layered(
                 canonical_cluster_columns=["vintage"],
                 description=(
                     "Every ZCTA×county land-area overlap (any overlap, not 1:1) with fraction "
-                    "and is_primary flag, for spatial allocation/apportionment. Source=census."
+                    "and is_primary flag, for spatial allocation/apportionment. Source=census; "
+                    "scoped to our county universe (50 states + DC + PR) — the rel file's Island "
+                    "Areas (AS/GU/MP/VI) are dropped to match us_county/us_zcta coverage."
                 ),
             ),
             CanonicalOutput(

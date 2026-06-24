@@ -90,6 +90,26 @@ a vintage. Without the mechanisms here, those breakages surface as **silent stal
 - Jobs whose capture has revise-in-place semantics set `max_concurrent_runs: 1` so
   overlapping triggers cannot interleave or double-capture snapshots.
 
+### D7 — Skip provably-unchanged rebuilds (a payoff of D2/D3)
+- The Volume already skips the *fetch* when the payload for a `(table, vintage[, revision])`
+  is complete. The same idea extends one layer down to the *derive*: skip the
+  process/write/promote of `(output, vintage)` iff a stored **build signature** equals the
+  current one. The signature is a hash of everything that determines the output:
+  `{source-payload fingerprint(s) (D3), derive code/version, upstream parent versions (D2)}`.
+  Deterministic derive + identical inputs ⇒ identical output, so the skip is provably
+  equivalent to rewriting — not a heuristic.
+- **Why not "skip if the vintage rows already exist":** immutable *source* ≠ immutable
+  *output*. A derive code change (new enriched column, fixed row-builder, changed tolerance)
+  or an upstream parent rebuild changes the correct output while the source vintage is
+  unchanged; a rows-exist skip would silently freeze the build against those changes — the
+  wrong-but-green failure this ADR exists to prevent.
+- The signature is recorded **only after a successful promote** (mirroring `_FETCH_COMPLETE`
+  being written only after a complete fetch), so a half-finished run is never skipped.
+- **Not** an operator `--skip-unchanged`/`--force` flag: that pushes the "did anything
+  change?" judgment onto whoever runs the job (who won't know a parent rebuilt). The
+  signature decides. Most valuable at block-group/block scale, where reprocessing 8M-row
+  geometry is real compute; inert/cheap below it.
+
 ## Consequences
 - **Geography (now) is unaffected** — intra-job, immutable, single source. D1–D6 are inert
   until the first cross-job consumer (RUCA) and the first revise-in-place source (a fact).
