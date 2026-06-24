@@ -2907,7 +2907,9 @@ def build_block_layered(
             names = [p.name for p in staged.rglob("*.shp")]
             raise FileNotFoundError(f"no block shapefiles for vintage={v}; found {names}")
         # Volume staging dir (engineer-only landing volume; rewritten each run).
-        pq_dir = Path(vdir).parent.parent / "_read_parquet" / "us_census_block" / f"vintage={int(v)}"
+        pq_dir = (
+            Path(vdir).parent.parent / "_read_parquet" / "us_census_block" / f"vintage={int(v)}"
+        )
         if pq_dir.exists():
             shutil.rmtree(pq_dir)
         pq_dir.mkdir(parents=True, exist_ok=True)
