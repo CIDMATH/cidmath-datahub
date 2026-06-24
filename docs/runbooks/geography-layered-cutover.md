@@ -44,6 +44,13 @@ For each level `<lvl>` (and its `<lvl>_boundary`):
    ```sql
    DELETE FROM ecdh_model_dev.geography.boundary WHERE geo_level = '<lvl>';
    ```
+   **NOTE (perms):** `geography.boundary` is owned by the build identity; interactive users
+   have `SELECT`, not `MODIFY` (grants model working as intended — humans don't mutate
+   build-owned tables), so this `DELETE` is `PERMISSION_DENIED` when run interactively.
+   Either run it as the build owner (notebook/job as the service principal) **or, preferred,
+   defer it** — the stale rows are harmless once consumers use `<lvl>_boundary`, and the
+   wholesale `DROP TABLE geography.boundary` at Final retirement removes every level's
+   leftovers in one owner-context step. Treat the per-level `DELETE` as optional.
 6. **Prod.** Steps 1–5 above are dev. Repeat in prod **only after** the layered build is
    deployed and run in prod for `<lvl>` — otherwise prod stops rebuilding `<lvl>` with
    nothing replacing it. (Tolerable for immutable vintages, but prod keeps the lean

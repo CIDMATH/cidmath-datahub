@@ -607,7 +607,11 @@ def us_enriched_view_definitions(catalog: str) -> dict[str, str]:
     """Return ``{fully_qualified_view_name: CREATE OR REPLACE VIEW sql}`` (ADR 0028).
 
     - ``us_county_enriched`` = ``us_county`` + state name / USPS / HHS region.
-    - ``us_tract_enriched``  = ``us_tract`` + county name + state name / USPS / HHS region.
+
+    (``us_tract_enriched`` was retired once ``us_tract`` became an enriched canonical
+    carrying ``county_name`` + state labels directly -- ADR 0037 decision 7 / 0040. The
+    same supersession applies to ``us_county_enriched`` now that ``us_county`` is enriched;
+    this whole views path is slated for retirement once county's view + consumers migrate.)
 
     ZCTAs are intentionally excluded: they cross county/state lines and have no
     single nesting parent. ``<child>.*`` keeps every base column (the county's
@@ -623,18 +627,6 @@ def us_enriched_view_definitions(catalog: str) -> dict[str, str]:
         f"FROM {g}.us_county c\n"
         f"JOIN {g}.us_state s ON c.state_geoid = s.geoid AND c.vintage = s.vintage"
     )
-    tract = (
-        f"CREATE OR REPLACE VIEW {g}.us_tract_enriched AS\n"
-        "SELECT t.*,\n"
-        "       co.name AS county_name,\n"
-        "       s.name AS state_name,\n"
-        "       s.stusps AS state_stusps,\n"
-        "       s.hhs_region AS state_hhs_region\n"
-        f"FROM {g}.us_tract t\n"
-        f"JOIN {g}.us_county co ON t.county_geoid = co.geoid AND t.vintage = co.vintage\n"
-        f"JOIN {g}.us_state s ON t.state_geoid = s.geoid AND t.vintage = s.vintage"
-    )
     return {
         f"{g}.us_county_enriched": county,
-        f"{g}.us_tract_enriched": tract,
     }

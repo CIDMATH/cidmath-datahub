@@ -1,18 +1,21 @@
 """Build the geography hierarchical-filter views (ADR 0028).
 
-Creates ``geography.us_county_enriched`` and ``geography.us_tract_enriched`` --
-convenience views that denormalize stable parent *display* attributes (state
-name / USPS / HHS region; county name) onto the child levels, so analysts can
-filter by the human-readable parent ("counties in Georgia", "tracts in Fulton
-County") without hand-writing the hierarchy joins. The parent geoids already
-live on the child tables; these views add the labels, leaving the canonical
-entity tables normalized (ADR 0028).
+Creates ``geography.us_county_enriched`` -- a convenience view that denormalizes
+stable parent *display* attributes (state name / USPS / HHS region) onto
+``us_county``, so analysts can filter by the human-readable parent ("counties in
+Georgia") without hand-writing the hierarchy joins.
+
+``us_tract_enriched`` has been retired: ``us_tract`` is now an enriched canonical
+carrying ``county_name`` + state labels directly (ADR 0037 decision 7 / 0040). The
+same supersession applies to ``us_county_enriched`` now that ``us_county`` is enriched,
+so this entire entrypoint (and its job + ``us_enriched_view_definitions``) is slated for
+retirement once the county view + its consumers migrate to the enriched canonical.
 
 View SQL is single-sourced (and unit-tested) in
 ``cidmath_datahub.reference.geography.us_enriched_view_definitions``. This is a
 thin entrypoint (ADR 0011) over the shared ``run_build`` seam (ADR 0027) --
 ensure -> [DQ: work] -> register -> grant. Deploy order: after build_geography
-(the us_state/us_county/us_tract entity tables must exist).
+(the us_state/us_county entity tables must exist).
 
 Usage:
     build_geography_views.py --catalog ecdh_model_dev \\
@@ -49,7 +52,8 @@ NHGIS_MAINTAINER = "IPUMS NHGIS, University of Minnesota"
 
 # enriched view (short name) -> the base table whose row count it must equal
 # (INNER join to parents must not drop a child; FK integrity guarantees it).
-_VIEW_BASE = {"us_county_enriched": "us_county", "us_tract_enriched": "us_tract"}
+# us_tract_enriched retired: us_tract is now an enriched canonical (ADR 0037 d7 / 0040).
+_VIEW_BASE = {"us_county_enriched": "us_county"}
 
 
 def _ensure(spark: SparkSession, catalog: str) -> None:
@@ -98,15 +102,6 @@ def _register(spark: SparkSession, catalog: str) -> None:
             ),
             "spatial_resolution": "us_county",
             "derived_from": [f"{g}.us_county", f"{g}.us_state"],
-        },
-        "us_tract_enriched": {
-            "description": (
-                "us_tract enriched with county name + state name / USPS / HHS region for "
-                "hierarchical filtering (select tracts in a county by name). View over "
-                "us_tract + us_county + us_state, vintage-keyed. ADR 0028."
-            ),
-            "spatial_resolution": "us_tract",
-            "derived_from": [f"{g}.us_tract", f"{g}.us_county", f"{g}.us_state"],
         },
     }
     for short, s in specs.items():

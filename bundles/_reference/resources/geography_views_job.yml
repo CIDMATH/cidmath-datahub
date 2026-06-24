@@ -1,15 +1,19 @@
-# Job that builds the geography hierarchical-filter views (ADR 0028):
-# geography.us_county_enriched and geography.us_tract_enriched.
+# Job that builds the geography hierarchical-filter view (ADR 0028):
+# geography.us_county_enriched.
 #
-# Convenience views denormalizing stable parent display attributes (state
-# name/USPS/HHS region; county name) onto the child levels so analysts can
-# filter by the human-readable parent without hierarchy joins. The parent
-# geoids already live on the child tables; these add the labels. No
-# base-table denormalization (canonical entity tables stay normalized).
+# Convenience view denormalizing stable parent display attributes (state
+# name/USPS/HHS region) onto us_county so analysts can filter by the
+# human-readable parent without hierarchy joins. The parent geoids already
+# live on the child table; this adds the labels. No base-table denormalization
+# (canonical entity tables stay normalized).
+#
+# us_tract_enriched is retired (us_tract is now an enriched canonical, ADR 0037
+# decision 7 / 0040); us_county_enriched is similarly superseded, so this whole
+# job is slated for retirement once the county view + consumers migrate.
 #
 # Thin entrypoint over the run_build seam (ADR 0027). Pure SQL over existing
 # tables, so the env needs only the shared wheel (no geospatial deps). Deploy
-# order: after build_geography (the us_state/us_county/us_tract entity tables).
+# order: after build_geography (the us_state/us_county entity tables).
 #
 # See bundles/_reference/src/build_geography_views.py and ADR 0028.
 
@@ -18,9 +22,10 @@ resources:
     build_geography_views_reference:
       name: "[_reference] build_geography_views_reference"
       description: |
-        Builds geography.us_county_enriched + us_tract_enriched (parent
-        name/USPS/HHS region denormalized via vintage-keyed joins) for
-        hierarchical filtering. Views; blocking rowcount-parity DQ. ADR 0028.
+        Builds geography.us_county_enriched (state name/USPS/HHS region
+        denormalized via vintage-keyed join) for hierarchical filtering.
+        View; blocking rowcount-parity DQ. ADR 0028. (us_tract_enriched
+        retired -- us_tract is an enriched canonical, ADR 0037 d7 / 0040.)
 
       tasks:
         - task_key: build_geography_views

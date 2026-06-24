@@ -358,12 +358,10 @@ class TestNormalizeCrosswalkRows:
 class TestUsEnrichedViewDefinitions:
     CAT = "ecdh_model_dev"
 
-    def test_returns_county_and_tract_views(self):
+    def test_returns_county_view_only(self):
+        # us_tract_enriched retired: us_tract is now an enriched canonical (ADR 0037 d7 / 0040).
         defs = geo.us_enriched_view_definitions(self.CAT)
-        assert set(defs) == {
-            f"{self.CAT}.geography.us_county_enriched",
-            f"{self.CAT}.geography.us_tract_enriched",
-        }
+        assert set(defs) == {f"{self.CAT}.geography.us_county_enriched"}
 
     def test_county_view_joins_state_on_geoid_and_vintage(self):
         sql = geo.us_enriched_view_definitions(self.CAT)[f"{self.CAT}.geography.us_county_enriched"]
@@ -373,12 +371,6 @@ class TestUsEnrichedViewDefinitions:
         assert "c.state_geoid = s.geoid AND c.vintage = s.vintage" in sql
         assert "s.stusps AS state_stusps" in sql
         assert "s.name AS state_name" in sql
-
-    def test_tract_view_joins_county_then_state_vintage_keyed(self):
-        sql = geo.us_enriched_view_definitions(self.CAT)[f"{self.CAT}.geography.us_tract_enriched"]
-        assert "co.name AS county_name" in sql
-        assert "t.county_geoid = co.geoid AND t.vintage = co.vintage" in sql
-        assert "t.state_geoid = s.geoid AND t.vintage = s.vintage" in sql
 
     def test_zcta_is_not_enriched(self):
         defs = geo.us_enriched_view_definitions(self.CAT)
