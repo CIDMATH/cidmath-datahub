@@ -2893,6 +2893,7 @@ def build_block_layered(
         # relation into the query plan, which blows past spark.rpc.message.maxSize (a single
         # big state ~1.4GB). Instead, stage each state to Parquet on the Volume (vectorized,
         # one state in driver memory at a time) and read it back DISTRIBUTED.
+        import numpy as np
         import pandas as pd
 
         staged = _stage_volume_payload(vdir)
@@ -2921,19 +2922,26 @@ def build_block_layered(
             awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
             if gj is None:
                 raise ValueError(f"block shapefile {shp.name} has no GISJOIN; columns={cols}")
-            keep = gdf.geometry.notna() & ~gdf.geometry.is_empty
-            g = gdf[keep]
+            g = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty]
+            n = len(g)
+            # Explicit, identical dtypes per part (positional numpy arrays) so Spark's merged
+            # Parquet read sees one consistent schema: ALAND/AWATER are integers in some states
+            # and float (with nulls) in others -> force float64; vintage int64; src_name object.
+            if aland is not None:
+                land = pd.to_numeric(g[aland], errors="coerce").astype("float64").to_numpy()
+            else:
+                land = np.full(n, np.nan, dtype="float64")
+            if awater is not None:
+                water = pd.to_numeric(g[awater], errors="coerce").astype("float64").to_numpy()
+            else:
+                water = np.full(n, np.nan, dtype="float64")
             pd.DataFrame(
                 {
-                    "gisjoin": g[gj].astype(str).str.strip().str.upper(),
-                    "vintage": int(v),
-                    "src_name": None,
-                    "area_land_sqm": pd.to_numeric(g[aland], errors="coerce")
-                    if aland
-                    else None,
-                    "area_water_sqm": pd.to_numeric(g[awater], errors="coerce")
-                    if awater
-                    else None,
+                    "gisjoin": g[gj].astype(str).str.strip().str.upper().to_numpy(),
+                    "vintage": np.full(n, int(v), dtype="int64"),
+                    "src_name": np.array([None] * n, dtype=object),
+                    "area_land_sqm": land,
+                    "area_water_sqm": water,
                     "geometry_wkb": g.geometry.to_wkb(),
                 }
             ).to_parquet(pq_dir / f"part_{i:03d}.parquet", index=False)
