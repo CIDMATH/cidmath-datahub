@@ -874,6 +874,7 @@ def build_state_layered(
     raw_cenpop = f"{source_catalog}.geography_raw.us_census_state_cenpop"
     proc_state = f"{source_catalog}.geography_processed.us_census_state"
     proc_boundary = f"{source_catalog}.geography_processed.us_census_state_boundary"
+    raw_hhs = f"{source_catalog}.geography_raw.us_hhs_region"  # lookup for the hhs_region FK check
 
     def _ensure_staging(spark: SparkSession) -> None:
         spark.sql(
@@ -993,6 +994,19 @@ def build_state_layered(
         dq.not_null(
             columns=["geoid", "name", "stusps", "hhs_region", "hhs_region_name"],
             check_name="us_census_state_core_not_null",
+        )
+        # Cross-table integrity (belt-and-suspenders): the code-derived hhs_region must exist in
+        # the us_hhs_region lookup — catches drift if the geography.py region mappings ever diverge
+        # (hhs_region_for_state vs the HHS_REGION_HQ keys generate_hhs_regions uses). us_hhs_region
+        # is static (non-vintaged) so there's no parent_where. This is the *only* build edge to
+        # us_hhs_region — validation-only, NOT a data join: us_state.hhs_region stays code-derived
+        # (us_hhs_region is keyed by region and can't supply it per-state). Hence the us_state task
+        # depends_on us_hhs_region in geography_layered_job.yml.
+        dq.fk(
+            key="hhs_region",
+            parent_table=raw_hhs,
+            parent_key="hhs_region",
+            check_name="us_census_state_hhs_region_fk",
         )
 
     def _validate_boundary(ctx: BuildContext, staging_fqn: str) -> None:

@@ -47,7 +47,11 @@ resources:
               - "${var.analysts_group}"
           environment_key: geography_layered_env
 
+        # Depends on us_hhs_region only for the cross-table hhs_region FK *validation* (not a data
+        # join — us_state derives hhs_region in code; us_hhs_region is the integrity oracle).
         - task_key: us_state
+          depends_on:
+            - task_key: us_hhs_region
           spark_python_task:
             python_file: ../src/build_geography.py
             parameters:
