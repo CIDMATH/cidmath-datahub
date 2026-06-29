@@ -378,13 +378,15 @@ def build_state_row(
     """
     geoid = gisjoin_to_geoid(gisjoin, "state")
     usps = state_usps(geoid)
+    region = hhs_region_for_state(usps)
     return {
         "geoid": geoid,
         "vintage": int(vintage),
         "gisjoin": gisjoin.strip().upper(),
         "name": state_name(geoid),
         "stusps": usps,
-        "hhs_region": hhs_region_for_state(usps),
+        "hhs_region": region,
+        "hhs_region_name": hhs_region_name(region),
         "centroid_geo_lon": centroid_geo_lon,
         "centroid_geo_lat": centroid_geo_lat,
         "centroid_pop_lon": centroid_pop_lon,

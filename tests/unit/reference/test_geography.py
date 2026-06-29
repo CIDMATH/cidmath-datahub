@@ -206,6 +206,7 @@ class TestRowBuilders:
         assert row["stusps"] == "GA"
         assert row["name"] == "Georgia"
         assert row["hhs_region"] == 4
+        assert row["hhs_region_name"] == "Atlanta"
         assert row["vintage"] == 2020
         assert row["centroid_geo_lon"] == -83.6
         assert row["centroid_pop_lon"] is None

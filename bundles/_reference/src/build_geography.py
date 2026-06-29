@@ -127,6 +127,7 @@ STATE_SPARK_SCHEMA = T.StructType(
         T.StructField("name", T.StringType(), False),
         T.StructField("stusps", T.StringType(), False),
         T.StructField("hhs_region", T.IntegerType(), False),
+        T.StructField("hhs_region_name", T.StringType(), False),
         T.StructField("centroid_geo_lon", T.DoubleType(), False),
         T.StructField("centroid_geo_lat", T.DoubleType(), False),
         T.StructField("centroid_pop_lon", T.DoubleType(), True),
@@ -337,6 +338,7 @@ ZCTA_ENRICHED_COLS = (
     "centroid_geo_lat DOUBLE, area_land_sqm DOUBLE, area_water_sqm DOUBLE, "
     "primary_county_geoid STRING, primary_county_name STRING, state_geoid STRING, "
     "state_name STRING, state_stusps STRING, state_hhs_region INT, "
+    "state_hhs_region_name STRING, "
     "primary_county_overlap_land_sqm DOUBLE, primary_county_overlap_fraction DOUBLE, "
     "county_overlap_count INT, spans_multiple_counties BOOLEAN"
 )
@@ -355,6 +357,7 @@ _ZCTA_ENRICHED_SELECT = [
     "state_name",
     "state_stusps",
     "state_hhs_region",
+    "state_hhs_region_name",
     "primary_county_overlap_land_sqm",
     "primary_county_overlap_fraction",
     "county_overlap_count",
@@ -893,7 +896,8 @@ def build_state_layered(
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {proc_state} (geoid STRING, vintage INT, gisjoin STRING, "
-            f"name STRING, stusps STRING, hhs_region INT, centroid_geo_lon DOUBLE, "
+            f"name STRING, stusps STRING, hhs_region INT, hhs_region_name STRING, "
+            f"centroid_geo_lon DOUBLE, "
             f"centroid_geo_lat DOUBLE, centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, "
             f"area_land_sqm DOUBLE, area_water_sqm DOUBLE) USING DELTA"
         )
@@ -911,6 +915,7 @@ def build_state_layered(
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_state (geoid STRING, "
             f"vintage INT, gisjoin STRING, name STRING, stusps STRING, hhs_region INT, "
+            f"hhs_region_name STRING, "
             f"centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, centroid_pop_lon DOUBLE, "
             f"centroid_pop_lat DOUBLE, area_land_sqm DOUBLE, area_water_sqm DOUBLE) USING DELTA"
         )
@@ -986,7 +991,7 @@ def build_state_layered(
         dq = make_staging_dq(ctx, staging_fqn, record_table="geography_processed.us_census_state")
         dq.unique(keys=["geoid", "vintage"], check_name="us_census_state_pk_unique")
         dq.not_null(
-            columns=["geoid", "name", "stusps", "hhs_region"],
+            columns=["geoid", "name", "stusps", "hhs_region", "hhs_region_name"],
             check_name="us_census_state_core_not_null",
         )
 
@@ -1123,7 +1128,7 @@ def build_county_layered(
             f"centroid_geo_lat DOUBLE, "
             f"centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, area_land_sqm DOUBLE, "
             f"area_water_sqm DOUBLE, state_name STRING, state_stusps STRING, "
-            f"state_hhs_region INT) USING DELTA"
+            f"state_hhs_region INT, state_hhs_region_name STRING) USING DELTA"
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, "
@@ -1142,7 +1147,7 @@ def build_county_layered(
             f"centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, centroid_pop_lon DOUBLE, "
             f"centroid_pop_lat DOUBLE, "
             f"area_land_sqm DOUBLE, area_water_sqm DOUBLE, state_name STRING, state_stusps STRING, "
-            f"state_hhs_region INT) USING DELTA"
+            f"state_hhs_region INT, state_hhs_region_name STRING) USING DELTA"
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_county_boundary "
@@ -1198,7 +1203,8 @@ def build_county_layered(
         # Enrich with state labels from the same-catalog parent (parents-first; ADR 0037 #7).
         state = ctx.spark.sql(
             f"SELECT geoid AS state_geoid, name AS state_name, stusps AS state_stusps, "
-            f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
+            f"hhs_region AS state_hhs_region, hhs_region_name AS state_hhs_region_name "
+            f"FROM {proc_state} WHERE vintage = {int(v)}"
         )
         return lean.join(state, ["state_geoid"], "left").select(
             "geoid",
@@ -1215,6 +1221,7 @@ def build_county_layered(
             "state_name",
             "state_stusps",
             "state_hhs_region",
+            "state_hhs_region_name",
         )
 
     def _process_boundary(ctx: BuildContext, v: int) -> Any:
@@ -1391,7 +1398,7 @@ def build_tract_layered(
             f"centroid_geo_lat DOUBLE, "
             f"centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, area_land_sqm DOUBLE, "
             f"area_water_sqm DOUBLE, county_name STRING, state_name STRING, state_stusps STRING, "
-            f"state_hhs_region INT) USING DELTA"
+            f"state_hhs_region INT, state_hhs_region_name STRING) USING DELTA"
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {proc_boundary} (geoid STRING, vintage INT, "
@@ -1410,7 +1417,7 @@ def build_tract_layered(
             f"centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, centroid_pop_lon DOUBLE, "
             f"centroid_pop_lat DOUBLE, area_land_sqm DOUBLE, area_water_sqm DOUBLE, "
             f"county_name STRING, state_name STRING, state_stusps STRING, "
-            f"state_hhs_region INT) USING DELTA"
+            f"state_hhs_region INT, state_hhs_region_name STRING) USING DELTA"
         )
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_tract_boundary (geoid STRING, "
@@ -1471,7 +1478,8 @@ def build_tract_layered(
         )
         state = ctx.spark.sql(
             f"SELECT geoid AS state_geoid, name AS state_name, stusps AS state_stusps, "
-            f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
+            f"hhs_region AS state_hhs_region, hhs_region_name AS state_hhs_region_name "
+            f"FROM {proc_state} WHERE vintage = {int(v)}"
         )
         return (
             lean.join(county, ["county_geoid"], "left")
@@ -1492,6 +1500,7 @@ def build_tract_layered(
                 "state_name",
                 "state_stusps",
                 "state_hhs_region",
+                "state_hhs_region_name",
             )
         )
 
@@ -1780,7 +1789,8 @@ def build_zcta_layered(
         )
         state = ctx.spark.sql(
             f"SELECT geoid AS state_geoid, name AS state_name, stusps AS state_stusps, "
-            f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
+            f"hhs_region AS state_hhs_region, hhs_region_name AS state_hhs_region_name "
+            f"FROM {proc_state} WHERE vintage = {int(v)}"
         )
         return (
             lean.join(primary, ["geoid"], "left")
@@ -2055,7 +2065,7 @@ def build_block_group_layered(
         "tract_geoid STRING, gisjoin STRING, centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, "
         "centroid_pop_lon DOUBLE, centroid_pop_lat DOUBLE, area_land_sqm DOUBLE, "
         "area_water_sqm DOUBLE, county_name STRING, state_name STRING, state_stusps STRING, "
-        "state_hhs_region INT"
+        "state_hhs_region INT, state_hhs_region_name STRING"
     )
     bg_select = [
         "geoid",
@@ -2074,6 +2084,7 @@ def build_block_group_layered(
         "state_name",
         "state_stusps",
         "state_hhs_region",
+        "state_hhs_region_name",
     ]
 
     def _ensure_staging(spark: SparkSession) -> None:
@@ -2176,7 +2187,8 @@ def build_block_group_layered(
         )
         state = ctx.spark.sql(
             f"SELECT geoid AS state_geoid, name AS state_name, stusps AS state_stusps, "
-            f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
+            f"hhs_region AS state_hhs_region, hhs_region_name AS state_hhs_region_name "
+            f"FROM {proc_state} WHERE vintage = {int(v)}"
         )
         return (
             lean.join(county, ["county_geoid"], "left")
@@ -2382,7 +2394,7 @@ def build_block_layered(
         "tract_geoid STRING, block_group_geoid STRING, gisjoin STRING, "
         "centroid_geo_lon DOUBLE, centroid_geo_lat DOUBLE, area_land_sqm DOUBLE, "
         "area_water_sqm DOUBLE, county_name STRING, state_name STRING, state_stusps STRING, "
-        "state_hhs_region INT"
+        "state_hhs_region INT, state_hhs_region_name STRING"
     )
     block_select = [
         "geoid",
@@ -2400,6 +2412,7 @@ def build_block_layered(
         "state_name",
         "state_stusps",
         "state_hhs_region",
+        "state_hhs_region_name",
     ]
 
     def _ensure_staging(spark: SparkSession) -> None:
@@ -2525,7 +2538,8 @@ def build_block_layered(
         )
         state = ctx.spark.sql(
             f"SELECT geoid AS state_geoid, name AS state_name, stusps AS state_stusps, "
-            f"hhs_region AS state_hhs_region FROM {proc_state} WHERE vintage = {int(v)}"
+            f"hhs_region AS state_hhs_region, hhs_region_name AS state_hhs_region_name "
+            f"FROM {proc_state} WHERE vintage = {int(v)}"
         )
         return (
             lean.join(county, ["county_geoid"], "left")
