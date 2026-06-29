@@ -43,10 +43,9 @@ from typing import Any
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
-from cidmath_datahub.common import grants, registration
-from cidmath_datahub.common.dq import DQRecorder
+from cidmath_datahub.common import registration
 from cidmath_datahub.common.logging import get_logger
-from cidmath_datahub.common.pipeline import BuildContext, run_build
+from cidmath_datahub.common.pipeline import BuildContext
 from cidmath_datahub.common.reference_builder import (
     CanonicalOutput,
     LandingRetention,
@@ -64,12 +63,11 @@ log = get_logger(__name__)
 SCHEMA = "geography"
 PIPELINE_REF = "bundles/_reference/src/build_geography.py"
 
-# All shapefile levels (us_state/us_county/us_tract/us_zcta) are migrated to the layered
-# builder (build_geography_layered). The legacy build (run(), build_geography_reference) now
-# builds ONLY the static us_hhs_region; its shapefile/boundary machinery below is dead pending
-# full retirement (extract us_hhs_region to its own entrypoint, then delete run() + helpers).
-# See docs/runbooks/geography-layered-cutover.md.
-LEVELS: tuple[str, ...] = ()
+# The whole geography subject (us_hhs_region + us_state/county/tract/zcta/block_group/block) is
+# built on the shared layered builder (build_*_layered, job build_geography_layered; ADR
+# 0036/0037/0039). The legacy monolithic run() and its build_geography_reference job are retired;
+# us_hhs_region is the builder's static (non-vintaged) shape. See
+# docs/runbooks/geography-layered-cutover.md.
 
 # IPUMS NHGIS boundary shapefile API codes, keyed by (level, vintage). Pattern is
 # us_<level>_<year>_tl<tiger_basis>. Verify/extend against the live catalog with
@@ -576,454 +574,10 @@ def _read_cenpop_lookup(root: Path, level: str, vintage: int) -> dict[str, tuple
     return lookup
 
 
-def _centroid_for(
-    gisjoin: Any, geom: Any, cenpop: dict[str, tuple[float, float]]
-) -> tuple[float, float, float | None, float | None]:
-    """Return ``(geo_lon, geo_lat, pop_lon, pop_lat)``.
-
-    The geographic interior point is always present; the population-weighted pair
-    is None unless a Center of Population covers this GISJOIN.
-    """
-    pt = geom.representative_point()
-    geo_lon, geo_lat = float(pt.x), float(pt.y)
-    key = str(gisjoin).strip().upper()
-    if cenpop and key in cenpop:
-        pop_lon, pop_lat = cenpop[key]
-        return geo_lon, geo_lat, pop_lon, pop_lat
-    return geo_lon, geo_lat, None, None
-
-
 def _geom_to_wkb(geom: Any, tolerance: float) -> bytes:
     if tolerance > 0:
         geom = geom.simplify(tolerance, preserve_topology=True)
     return geom.wkb
-
-
-def _boundary_row(
-    level: str, row: dict[str, Any], vintage: int, resolution: str, geom: Any, tolerance: float
-) -> dict[str, Any]:
-    return {
-        "geo_level": level,
-        "geoid_system": gadm.GEOID_SYSTEM_CENSUS,
-        "geoid": row["geoid"],
-        "vintage": vintage,
-        "resolution": resolution,
-        "gisjoin": row["gisjoin"],
-        "geometry_wkb": _geom_to_wkb(geom, tolerance),
-    }
-
-
-def _build_state_frames(
-    gdf: Any,
-    vintage: int,
-    tolerance: float,
-    resolution: str,
-    cenpop: dict[str, tuple[float, float]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    cols = list(gdf.columns)
-    gj = _first_col(cols, ["GISJOIN", "gisjoin"])
-    if gj is None:
-        raise ValueError(f"state shapefile has no GISJOIN column; columns={cols}")
-    aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
-    awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
-
-    rows: list[dict[str, Any]] = []
-    boundary: list[dict[str, Any]] = []
-    for _, rec in gdf.iterrows():
-        geom = rec.geometry
-        if geom is None or geom.is_empty:
-            continue
-        geo_lon, geo_lat, pop_lon, pop_lat = _centroid_for(rec[gj], geom, cenpop)
-        row = geo.build_state_row(
-            rec[gj],
-            vintage,
-            centroid_geo_lon=geo_lon,
-            centroid_geo_lat=geo_lat,
-            centroid_pop_lon=pop_lon,
-            centroid_pop_lat=pop_lat,
-            area_land_sqm=_num(rec[aland]) if aland else None,
-            area_water_sqm=_num(rec[awater]) if awater else None,
-        )
-        rows.append(row)
-        boundary.append(_boundary_row("us_state", row, vintage, resolution, geom, tolerance))
-    return rows, boundary
-
-
-def _build_county_frames(
-    gdf: Any,
-    vintage: int,
-    tolerance: float,
-    resolution: str,
-    cenpop: dict[str, tuple[float, float]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    cols = list(gdf.columns)
-    gj = _first_col(cols, ["GISJOIN", "gisjoin"])
-    if gj is None:
-        raise ValueError(f"county shapefile has no GISJOIN column; columns={cols}")
-    name_col = _first_col(cols, ["NAME", "NAMELSAD", "NHGISNAM", "NAME10", "NAME20", "name"])
-    aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
-    awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
-
-    rows: list[dict[str, Any]] = []
-    boundary: list[dict[str, Any]] = []
-    for _, rec in gdf.iterrows():
-        geom = rec.geometry
-        if geom is None or geom.is_empty:
-            continue
-        geo_lon, geo_lat, pop_lon, pop_lat = _centroid_for(rec[gj], geom, cenpop)
-        name = str(rec[name_col]) if name_col else ""
-        row = geo.build_county_row(
-            rec[gj],
-            vintage,
-            name,
-            centroid_geo_lon=geo_lon,
-            centroid_geo_lat=geo_lat,
-            centroid_pop_lon=pop_lon,
-            centroid_pop_lat=pop_lat,
-            area_land_sqm=_num(rec[aland]) if aland else None,
-            area_water_sqm=_num(rec[awater]) if awater else None,
-        )
-        rows.append(row)
-        boundary.append(_boundary_row("us_county", row, vintage, resolution, geom, tolerance))
-    return rows, boundary
-
-
-def _build_tract_frames(
-    gdf: Any,
-    vintage: int,
-    tolerance: float,
-    resolution: str,
-    cenpop: dict[str, tuple[float, float]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    cols = list(gdf.columns)
-    gj = _first_col(cols, ["GISJOIN", "gisjoin"])
-    if gj is None:
-        raise ValueError(f"tract shapefile has no GISJOIN column; columns={cols}")
-    aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
-    awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
-
-    rows: list[dict[str, Any]] = []
-    boundary: list[dict[str, Any]] = []
-    for _, rec in gdf.iterrows():
-        geom = rec.geometry
-        if geom is None or geom.is_empty:
-            continue
-        geo_lon, geo_lat, pop_lon, pop_lat = _centroid_for(rec[gj], geom, cenpop)
-        row = geo.build_tract_row(
-            rec[gj],
-            vintage,
-            centroid_geo_lon=geo_lon,
-            centroid_geo_lat=geo_lat,
-            centroid_pop_lon=pop_lon,
-            centroid_pop_lat=pop_lat,
-            area_land_sqm=_num(rec[aland]) if aland else None,
-            area_water_sqm=_num(rec[awater]) if awater else None,
-        )
-        rows.append(row)
-        boundary.append(_boundary_row("us_tract", row, vintage, resolution, geom, tolerance))
-    return rows, boundary
-
-
-def _build_zcta_frames(
-    gdf: Any,
-    vintage: int,
-    tolerance: float,
-    resolution: str,
-    cenpop: dict[str, tuple[float, float]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    cols = list(gdf.columns)
-    gj = _first_col(cols, ["GISJOIN", "gisjoin"])
-    if gj is None:
-        raise ValueError(f"zcta shapefile has no GISJOIN column; columns={cols}")
-    aland = _first_col(cols, ["ALAND", "ALAND10", "ALAND20", "aland"])
-    awater = _first_col(cols, ["AWATER", "AWATER10", "AWATER20", "awater"])
-
-    rows: list[dict[str, Any]] = []
-    boundary: list[dict[str, Any]] = []
-    for _, rec in gdf.iterrows():
-        geom = rec.geometry
-        if geom is None or geom.is_empty:
-            continue
-        geo_lon, geo_lat, _pop_lon, _pop_lat = _centroid_for(rec[gj], geom, cenpop)
-        row = geo.build_zcta_row(
-            rec[gj],
-            vintage,
-            centroid_geo_lon=geo_lon,
-            centroid_geo_lat=geo_lat,
-            area_land_sqm=_num(rec[aland]) if aland else None,
-            area_water_sqm=_num(rec[awater]) if awater else None,
-        )
-        rows.append(row)
-        boundary.append(_boundary_row("us_zcta", row, vintage, resolution, geom, tolerance))
-    return rows, boundary
-
-
-BUILDERS = {
-    "us_state": _build_state_frames,
-    "us_county": _build_county_frames,
-    "us_tract": _build_tract_frames,
-    "us_zcta": _build_zcta_frames,
-}
-
-
-def _check_unique(
-    level: str,
-    vintage: int,
-    rows: list[dict[str, Any]],
-    *,
-    recorder: DQRecorder,
-    table_name: str,
-) -> None:
-    """Record uniqueness check on ``geoid`` for this (level, vintage) chunk; raise on fail.
-
-    Records to ``_ops.dq_results`` for both pass and fail outcomes so the
-    audit trail captures green runs as well as red ones (ADR 0009).
-    """
-    seen: set[str] = set()
-    dups: set[str] = set()
-    for r in rows:
-        if r["geoid"] in seen:
-            dups.add(r["geoid"])
-        seen.add(r["geoid"])
-    passed = not dups
-    sample = sorted(dups)[:10]
-    recorder.record(
-        table_name=table_name,
-        check_name=f"{level}_geoid_uniqueness_{vintage}",
-        category=DQCategory.UNIQUENESS,
-        severity=DQSeverity.FAIL,
-        passed=passed,
-        failing_row_count=len(dups),
-        total_row_count=len(rows),
-        details={"sample_duplicates": sample, "vintage": vintage} if dups else None,
-    )
-    if dups:
-        raise ValueError(f"duplicate geoid in {level} (vintage {vintage}): {sample}")
-
-
-def _check_fk(
-    level: str,
-    rows: list[dict[str, Any]],
-    fk_col: str,
-    parent_geoids: set[str],
-    vintage: int,
-    *,
-    recorder: DQRecorder,
-    table_name: str,
-) -> None:
-    """Record FK integrity check; raise on fail. Records both pass and fail (ADR 0009)."""
-    missing = sorted({r[fk_col] for r in rows if r[fk_col] not in parent_geoids})
-    passed = not missing
-    recorder.record(
-        table_name=table_name,
-        check_name=f"{level}_fk_{fk_col}_{vintage}",
-        category=DQCategory.REFERENTIAL,
-        severity=DQSeverity.FAIL,
-        passed=passed,
-        failing_row_count=len(missing),
-        total_row_count=len(rows),
-        details=(
-            {"sample_missing": missing[:10], "fk_column": fk_col, "vintage": vintage}
-            if missing
-            else None
-        ),
-    )
-    if missing:
-        raise ValueError(
-            f"{level} rows referencing missing {fk_col} (vintage {vintage}): {missing[:10]}"
-        )
-
-
-def _build_hhs_region(spark: SparkSession, catalog: str) -> None:
-    rows = geo.generate_hhs_regions()
-    df = spark.createDataFrame(rows, schema=HHS_REGION_SPARK_SCHEMA).sort("hhs_region")
-    df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        f"{catalog}.{SCHEMA}.us_hhs_region"
-    )
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.us_hhs_region IS "
-        f"'The ten HHS regions (static federal grouping of states). Reference "
-        f"table; full_refresh. ADR 0020.'"
-    )
-    log.info("Wrote us_hhs_region", extra={"rows": len(rows)})
-
-
-def _write_chunk(
-    spark: SparkSession,
-    catalog: str,
-    table: str,
-    rows: list[dict[str, Any]],
-    schema: T.StructType,
-    written: set[str],
-) -> None:
-    """Write one (level, vintage) chunk. The first write to a table overwrites
-    (full_refresh); later chunks append. Bounds driver memory at tract/ZCTA
-    volume and avoids a single-file write for large tables.
-    """
-    if not rows:
-        return
-    df = spark.createDataFrame(rows, schema=schema)
-    mode = "overwrite" if table not in written else "append"
-    writer = df.write.mode(mode)
-    if mode == "overwrite":
-        writer = writer.option("overwriteSchema", "true")
-    else:
-        # mergeSchema lets the append evolve a new column into an existing
-        # table (e.g. adding geoid_system to the shared boundary table on the
-        # first re-run — ADR 0023 review P1-6); no-op once the column exists.
-        writer = writer.option("mergeSchema", "true")
-    writer.saveAsTable(f"{catalog}.{SCHEMA}.{table}")
-    written.add(table)
-    log.info("Wrote chunk", extra={"table": table, "rows": len(rows), "mode": mode})
-
-
-def _set_clustering(spark: SparkSession, catalog: str) -> None:
-    """Best-effort Liquid Clustering on the high-volume tables (ADR 0020).
-
-    Applied after the data lands; non-fatal if the runtime doesn't support
-    ALTER ... CLUSTER BY, since clustering is a read-pruning optimization.
-    """
-    targets = (("boundary", "geo_level, vintage"), ("us_tract", "vintage"), ("us_zcta", "vintage"))
-    for table, cols in targets:
-        try:
-            spark.sql(f"ALTER TABLE {catalog}.{SCHEMA}.{table} CLUSTER BY ({cols})")
-        except Exception as exc:  # pragma: no cover - runtime-dependent
-            log.warning("Could not set clustering", extra={"table": table, "error": str(exc)})
-
-
-def _register_dataset(
-    spark: SparkSession,
-    *,
-    catalog: str,
-    table: str,
-    description: str,
-    public_health_relevance: str,
-    spatial_resolution: str,
-    cluster_columns: list[str] | None,
-    pipeline_reference: str,
-) -> None:
-    full = f"{catalog}.{SCHEMA}.{table}"
-    registration.register_dataset(
-        spark,
-        catalog,
-        registration.DatasetCatalogEntry(
-            full_table_name=full,
-            subject=SCHEMA,
-            layer="reference",
-            description=description,
-            public_health_relevance=public_health_relevance,
-            spatial_resolution=spatial_resolution,
-            spatial_coverage="United States",
-            source_provider_code="ipums_nhgis",
-            source_url=NHGIS_SOURCE_URL,
-            source_documentation_url=NHGIS_DOC_URL,
-            license=NHGIS_LICENSE,
-            dua_required=True,
-            dua_reference=NHGIS_DUA_REFERENCE,
-            access_tier="restricted",
-            external_maintainer_name=NHGIS_MAINTAINER,
-            is_hosted=True,
-        ),
-        registration.DatasetEngineeringEntry(
-            full_table_name=full,
-            update_semantics="full_refresh",
-            materialization_type="table",
-            cluster_columns=cluster_columns,
-            pipeline_reference=pipeline_reference,
-        ),
-    )
-
-
-def _comment_tables(spark: SparkSession, catalog: str) -> None:
-    # us_state + us_county + us_tract are owned by the layered build now (cutover).
-    comments = {
-        "us_zcta": "US ZCTAs (geoid, vintage); non-nesting. Source IPUMS NHGIS. ADR 0020.",
-        "boundary": "Boundary polygons (WKB) by geo_level/vintage/resolution. ADR 0020.",
-    }
-    for table, text in comments.items():
-        spark.sql(f"COMMENT ON TABLE {catalog}.{SCHEMA}.{table} IS '{text}'")
-
-
-def _reset_us_boundaries(spark: SparkSession, catalog: str) -> None:
-    """Delete only this build's geo_levels from the shared boundary table.
-
-    ``geography.boundary`` is polymorphic — the country / country_subdivision
-    builds also write to it (geo_level='country', 'country_subdivision', …).
-    This build must refresh only its own US levels and append, NOT overwrite the
-    whole table, or it silently wipes the GADM-sourced international rows. This
-    matches the per-level full_refresh contract the GADM builds already follow
-    (ADR 0023 review — fixes a latent boundary-overwrite landmine). No-op on a
-    fresh catalog where the table doesn't exist yet.
-    """
-    levels = ", ".join(f"'{lvl}'" for lvl in LEVELS)
-    try:
-        spark.sql(f"DELETE FROM {catalog}.{SCHEMA}.boundary WHERE geo_level IN ({levels})")
-        log.info("Reset US boundary rows", extra={"geo_levels": list(LEVELS)})
-    except Exception as exc:  # noqa: BLE001 — table absent on first-ever run
-        log.info("boundary table not present yet; nothing to delete", extra={"error": str(exc)})
-
-
-def run(
-    catalog: str,
-    vintages: list[int],
-    data_engineers_group: str,
-    analysts_group: str,
-    ipums_secret_scope: str | None = None,
-    ipums_secret_key: str | None = None,
-    simplify_tolerance: float = 0.005,
-    full_resolution: bool = False,
-) -> None:
-    log.info(
-        "Building geography reference tables",
-        extra={"catalog": catalog, "vintages": vintages, "full_resolution": full_resolution},
-    )
-
-    def _ensure(spark: SparkSession) -> None:
-        spark.sql(
-            f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
-            f"COMMENT 'Canonical US geography reference: states, counties, tracts, "
-            f"ZCTAs, HHS regions, and companion boundaries. Owned by the _reference "
-            f"bundle. Source: IPUMS NHGIS. See ADR 0020.'"
-        )
-
-    def _work(ctx: BuildContext) -> None:
-        # All shapefile levels are on the layered builder now; the legacy build's sole
-        # remaining output is the static us_hhs_region (no shapefiles, no vintage). The
-        # per-level us_<lvl>_boundary tables replace this build's writes to the polymorphic
-        # geography.boundary (its stale US rows are removed by the cutover runbook).
-        _build_hhs_region(ctx.spark, catalog)
-
-    def _register(spark: SparkSession) -> None:
-        _register_dataset(
-            spark,
-            catalog=catalog,
-            table="us_hhs_region",
-            description="The ten HHS regions (static federal grouping of states).",
-            public_health_relevance=(
-                "Federal regional grouping used for HHS/CDC regional reporting and rollups."
-            ),
-            spatial_resolution="hhs_region",
-            cluster_columns=None,
-            pipeline_reference=PIPELINE_REF,
-        )
-
-    def _grant(spark: SparkSession) -> None:
-        # Grants: reader-tier for both groups, same posture as time (ADR 0018/0020).
-        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
-        grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-        grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
-        log.info("Access model verified", extra={"schema": f"{catalog}.{SCHEMA}"})
-
-    run_build(
-        catalog=catalog,
-        pipeline_reference=PIPELINE_REF,
-        ensure=_ensure,
-        work=_work,
-        register=_register,
-        grant=_grant,
-    )
-    log.info("Geography reference build complete", extra={"catalog": catalog})
 
 
 # ---------------------------------------------------------------------------
@@ -3128,6 +2682,117 @@ def build_block_layered(
     return build_reference(spec, vintages=vintages)
 
 
+# ---------------------------------------------------------------------------
+# Layered build — us_hhs_region (static, generated; ADR 0036 static build).
+# ---------------------------------------------------------------------------
+# The ten HHS regions are a non-vintaged federal grouping generated in code (no
+# shapefiles, no vintage, no source payload to land in a Volume). It uses the shared
+# builder's STATIC shape: one generated raw landing promoted 1:1 to the canonical
+# us_hhs_region. This is the generated/static "builder bend" recorded in ADR 0036.
+HHS_REGION_SOURCE_URL = "https://www.hhs.gov/about/agencies/iea/regional-offices/index.html"
+
+
+def build_hhs_region_layered(
+    *,
+    source_catalog: str,
+    model_catalog: str,
+    data_engineers_group: str,
+    analysts_group: str,
+) -> tuple[str, str]:
+    """Build the static us_hhs_region via the shared builder's static path (ADR 0036)."""
+    raw_hhs = f"{source_catalog}.geography_raw.us_hhs_region"
+    hhs_desc = "The ten HHS regions (static federal grouping of states)."
+    hhs_phr = "Federal regional grouping used for HHS/CDC regional reporting and rollups."
+
+    def _ensure_staging(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.geography_raw "
+            f"COMMENT 'Source-catalog raw landings for geography (1:1 with source). ADR 0037.'"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {raw_hhs} (hhs_region INT, name STRING, "
+            f"member_states ARRAY<STRING>) USING DELTA"
+        )
+
+    def _ensure_canonical(spark: SparkSession) -> None:
+        spark.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {model_catalog}.{SCHEMA} "
+            f"COMMENT 'Canonical US geography reference (source-agnostic). ADR 0020/0037.'"
+        )
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{SCHEMA}.us_hhs_region (hhs_region INT, "
+            f"name STRING, member_states ARRAY<STRING>) USING DELTA"
+        )
+
+    def _acquire(ctx: BuildContext, _v: int) -> Any:
+        # Generated reference: the ten HHS regions, materialized 1:1 as the raw landing.
+        rows = geo.generate_hhs_regions()
+        return ctx.spark.createDataFrame(rows, HHS_REGION_SPARK_SCHEMA).sort("hhs_region")
+
+    def _promote(ctx: BuildContext, _v: int) -> Any:
+        return ctx.spark.sql(f"SELECT * FROM {raw_hhs}")
+
+    def _validate(ctx: BuildContext, staging_fqn: str) -> None:
+        dq = make_staging_dq(ctx, staging_fqn, record_table="geography_raw.us_hhs_region")
+        dq.unique(keys=["hhs_region"], check_name="us_hhs_region_pk_unique")
+        dq.not_null(
+            columns=["hhs_region", "name", "member_states"],
+            check_name="us_hhs_region_core_not_null",
+        )
+
+    base_entry = registration.DatasetCatalogEntry(
+        full_table_name="(set per layer by the builder)",
+        subject=SCHEMA,
+        layer="reference",
+        description=hhs_desc,
+        public_health_relevance=hhs_phr,
+        spatial_resolution="hhs_region",
+        spatial_coverage="United States",
+        source_provider_code="hhs",
+        source_origin_code="hhs",
+        source_url=HHS_REGION_SOURCE_URL,
+        source_documentation_url=HHS_REGION_SOURCE_URL,
+        license="Public domain (U.S. Government work).",
+        dua_required=False,
+        dua_reference="",
+        access_tier="open",
+        external_maintainer_name="U.S. Department of Health & Human Services",
+        is_hosted=False,
+    )
+
+    spec = ReferenceBuildSpec(
+        subject=SCHEMA,
+        source_catalog=source_catalog,
+        model_catalog=model_catalog,
+        pipeline_reference=PIPELINE_REF,
+        reader_groups=(data_engineers_group, analysts_group),
+        engineer_group=data_engineers_group,
+        base_catalog_entry=base_entry,
+        raw_landings=[
+            RawLanding(
+                table="us_hhs_region",
+                acquire=_acquire,
+                description="The ten HHS regions, generated in code (1:1 raw, no external source).",
+            )
+        ],
+        outputs=[
+            CanonicalOutput(
+                canonical_table="us_hhs_region",
+                reads=("us_hhs_region",),
+                promote=_promote,
+                validate_staging=_validate,
+                description=hhs_desc,
+                public_health_relevance=hhs_phr,
+            )
+        ],
+        ensure_staging=_ensure_staging,
+        ensure_canonical=_ensure_canonical,
+        update_semantics="full_refresh",
+        static=True,
+    )
+    return build_reference(spec)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
@@ -3170,63 +2835,79 @@ def main() -> None:
     )
     parser.add_argument(
         "--level",
-        choices=["us_state", "us_county", "us_tract", "us_zcta", "us_block_group", "us_block"],
+        choices=[
+            "us_hhs_region",
+            "us_state",
+            "us_county",
+            "us_tract",
+            "us_zcta",
+            "us_block_group",
+            "us_block",
+        ],
         default=None,
         help="Build a single geography level via the shared builder (ADR 0036). Its parent levels "
         "must already be built (their processed tables are joined for enrichment). This is the "
-        "per-level entry the job DAG calls, one task per level, ordered by depends_on.",
+        "per-level entry the job DAG calls, one task per level, ordered by depends_on. "
+        "us_hhs_region is static/generated (no parents, no NHGIS secret).",
     )
     args = parser.parse_args()
 
     vintages = [int(v) for v in args.vintages.split(",") if v.strip()]
+    source_catalog = args.source_catalog or args.catalog.replace("ecdh_model_", "ecdh_")
 
-    if args.level or args.layered or args.layered_state:
-        if not args.ipums_secret_scope:
-            raise ValueError("--ipums-secret-scope is required to pull NHGIS shapefiles")
-        source_catalog = args.source_catalog or args.catalog.replace("ecdh_model_", "ecdh_")
-        api_key = _get_secret(args.ipums_secret_scope, args.ipums_secret_key)
-        level_kwargs = {
-            "source_catalog": source_catalog,
-            "model_catalog": args.catalog,
-            "vintages": vintages,
-            "data_engineers_group": args.data_engineers_group,
-            "analysts_group": args.analysts_group,
-            "api_key": api_key,
-            "simplify_tolerance": args.simplify_tolerance,
-            "full_resolution": args.full_resolution,
-        }
-        # One build function per level; the job DAG (depends_on) enforces parents-first.
-        builders = {
-            "us_state": build_state_layered,
-            "us_county": build_county_layered,
-            "us_tract": build_tract_layered,
-            "us_zcta": build_zcta_layered,
-            "us_block_group": build_block_group_layered,
-            "us_block": build_block_layered,
-        }
-        if args.level:
-            builders[args.level](**level_kwargs)
-        elif args.layered:  # whole chain in one process (dev convenience), parents-first
-            build_state_layered(**level_kwargs)
-            build_county_layered(**level_kwargs)
-            build_tract_layered(**level_kwargs)
-            build_zcta_layered(**level_kwargs)
-            build_block_group_layered(**level_kwargs)
-            build_block_layered(**level_kwargs)
-        else:  # --layered-state
-            build_state_layered(**level_kwargs)
+    if not (args.level or args.layered or args.layered_state):
+        raise ValueError("pass --level <name> (job DAG), --layered (dev chain), or --layered-state")
+
+    # us_hhs_region is static/generated — no shapefiles, so it needs no NHGIS secret.
+    if args.level == "us_hhs_region":
+        build_hhs_region_layered(
+            source_catalog=source_catalog,
+            model_catalog=args.catalog,
+            data_engineers_group=args.data_engineers_group,
+            analysts_group=args.analysts_group,
+        )
         return
 
-    run(
-        args.catalog,
-        vintages,
-        args.data_engineers_group,
-        args.analysts_group,
-        args.ipums_secret_scope,
-        args.ipums_secret_key,
-        args.simplify_tolerance,
-        args.full_resolution,
-    )
+    # Every other level pulls NHGIS shapefiles.
+    if not args.ipums_secret_scope:
+        raise ValueError("--ipums-secret-scope is required to pull NHGIS shapefiles")
+    api_key = _get_secret(args.ipums_secret_scope, args.ipums_secret_key)
+    level_kwargs = {
+        "source_catalog": source_catalog,
+        "model_catalog": args.catalog,
+        "vintages": vintages,
+        "data_engineers_group": args.data_engineers_group,
+        "analysts_group": args.analysts_group,
+        "api_key": api_key,
+        "simplify_tolerance": args.simplify_tolerance,
+        "full_resolution": args.full_resolution,
+    }
+    # One build function per shapefile level; the job DAG (depends_on) enforces parents-first.
+    builders = {
+        "us_state": build_state_layered,
+        "us_county": build_county_layered,
+        "us_tract": build_tract_layered,
+        "us_zcta": build_zcta_layered,
+        "us_block_group": build_block_group_layered,
+        "us_block": build_block_layered,
+    }
+    if args.level:
+        builders[args.level](**level_kwargs)
+    elif args.layered:  # whole subject in one process (dev convenience), parents-first
+        build_hhs_region_layered(
+            source_catalog=source_catalog,
+            model_catalog=args.catalog,
+            data_engineers_group=args.data_engineers_group,
+            analysts_group=args.analysts_group,
+        )
+        build_state_layered(**level_kwargs)
+        build_county_layered(**level_kwargs)
+        build_tract_layered(**level_kwargs)
+        build_zcta_layered(**level_kwargs)
+        build_block_group_layered(**level_kwargs)
+        build_block_layered(**level_kwargs)
+    else:  # --layered-state
+        build_state_layered(**level_kwargs)
 
 
 if __name__ == "__main__":

@@ -5,10 +5,10 @@
 # enables granular partial refreshes (re-run a level + its descendants) without
 # rebuilding the whole subject.
 #
-# Deliberately SEPARATE from build_geography_reference (the legacy whole-geography
-# build): both write geography.us_*, so keeping them apart lets the migration be
-# validated in dev without colliding. The cutover (later) removes each migrated level
-# from the legacy job. Tract / zcta / block-group / block are added here as tasks.
+# This is the SOLE geography build now — the legacy whole-geography build
+# (build_geography_reference / geography_job.yml) and its run() entrypoint are retired
+# (cutover complete 2026-06-29). Every level is a task here, including the static
+# us_hhs_region (the shared builder's non-vintaged shape; no shapefiles, no NHGIS secret).
 #
 # Each level lands its 1:1 source payloads in the geography_raw landing Volume,
 # derives geography_processed.*, and promotes the source-agnostic geography.*.
@@ -28,6 +28,25 @@ resources:
         and promotes geography.*. Long-running: IPUMS extracts are asynchronous.
 
       tasks:
+        # Static, generated: the ten HHS regions (no shapefiles, no vintage, no NHGIS secret).
+        # Root reference — no parents and nothing depends on it; runs in parallel. Built on the
+        # shared builder's STATIC shape (ADR 0036): full_refresh, no vintage column.
+        - task_key: us_hhs_region
+          spark_python_task:
+            python_file: ../src/build_geography.py
+            parameters:
+              - "--level"
+              - "us_hhs_region"
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_layered_env
+
         - task_key: us_state
           spark_python_task:
             python_file: ../src/build_geography.py

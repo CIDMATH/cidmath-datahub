@@ -136,6 +136,24 @@ class TestReferenceBuildSpecValidation:
         with pytest.raises(ValueError, match="unknown raw landing"):
             _spec(outputs=[_output(reads=("does_not_exist",))])
 
+    def test_static_requires_full_refresh(self):
+        # A static (non-vintaged) build must not use the vintage_snapshot default.
+        with pytest.raises(ValueError, match="must use update_semantics='full_refresh'"):
+            _spec(static=True)
+
+    def test_static_rejects_volume_backed_landings(self):
+        with pytest.raises(ValueError, match="cannot have Volume-backed landings"):
+            _spec(
+                static=True,
+                update_semantics="full_refresh",
+                raw_landings=[_volume_landing()],
+            )
+
+    def test_static_spec_valid(self):
+        s = _spec(static=True, update_semantics="full_refresh")
+        assert s.static is True
+        assert s.update_semantics == "full_refresh"
+
 
 @pytest.mark.unit
 class TestDerivedNames:

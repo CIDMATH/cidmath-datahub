@@ -136,3 +136,16 @@ writer⊂schema gaps the I2 review found — close them here rather than as N pe
   `reference`, the DDL comment says `model`), `access_tier` (`open` in code vs `public` in the DDL),
   `subject`, `source_provider_code`, `spatial_resolution` — to `vocabularies.py` + dataclass
   `__post_init__`, and confirm CI (ADR 0016) covers them.
+
+### Static (generated / non-vintaged) reference — the builder bend (added 2026-06-29)
+The vintaged path could not express a **generated, non-vintaged** reference (e.g. the ten HHS
+regions — a static federal grouping with no vintage dimension and no source payload). Rather than
+shoehorn a meaningless `vintage` column onto a published table, `ReferenceBuildSpec` gained a
+**`static` mode**: the per-vintage hooks are invoked **once** (the vintage arg is an ignored
+placeholder), outputs carry **no** `vintage` column, and each table is a full overwrite
+(`update_semantics="full_refresh"`, no per-vintage `replaceWhere`). Constraints enforced in
+`__post_init__`: `full_refresh` + **direct (`acquire`) landings only** — a static build has no
+payload to land in a Volume. First adopter: `geography.us_hhs_region` (`build_hhs_region_layered`),
+which let the legacy monolithic `build_geography_reference` (`run()`) be retired. Generalizes to any
+static/generated lookup (e.g. `time`). This was the **only** builder bend the geography migration
+required — the vintaged shapefile levels (state→block) all fit the standard path unchanged.

@@ -92,6 +92,11 @@ For each level `<lvl>` (and its `<lvl>_boundary`):
   all-water gap scoped + recorded WARN like BG). No cenpop. ~8M rows/vintage. **No DROP**
   (never in legacy). **Watch:** large-state read (CA/TX) loads into the driver — bump the
   driver if it OOMs; ~8M-polygon geometry simplification is the slow part.
+  ✅ **(dev) validated** — FK DQ green (block_group/county/state, both vintages), ~8M
+  rows/vintage, water-block accepted-gap WARN, 15-digit geoids confirmed.
+
+**Geography hierarchy `us_state → us_county → us_tract → us_zcta → us_block_group → us_block`
+is COMPLETE on the layered builder in dev.** Remaining = Final retirement (below) + prod deploy.
 
 ## Validate after each level
 
@@ -108,18 +113,39 @@ WHERE check_name LIKE 'us_census_%_fk_%' ORDER BY checked_at DESC;
 
 ## Final retirement
 
-All shapefile levels (state/county/tract/zcta) are now migrated; the legacy `run()` builds
-**only `us_hhs_region`**, and its shapefile/boundary machinery (`BUILDERS`,
-`_build_*_frames`, `_write_chunk`, `_check_unique`, `_reset_us_boundaries`, `_comment_tables`,
-`_set_clustering`) is dead code pending retirement. To finish:
-
-1. Extract `us_hhs_region` into its own small entrypoint (static, no shapefiles) on the
-   `run_build` seam, then delete legacy `run()` + the dead helpers and the
-   `build_geography_reference` job.
-2. Migrate `us_block_group` + `us_block` onto the layered builder (same pattern).
+1. ✅ **Extract `us_hhs_region` + delete legacy `run()`** (done) — rather than a separate
+   `run_build` entrypoint, `us_hhs_region` was migrated onto the **shared builder** via a new
+   **static (non-vintaged) mode** added to `build_reference` (`ReferenceBuildSpec.static`;
+   full_refresh overwrite, no `vintage` column, hooks called once). `build_hhs_region_layered`
+   builds it as a `--level us_hhs_region` task (no NHGIS secret; generated provenance
+   `source_provider_code="hhs"`, `access_tier="open"` — the legacy NHGIS provenance was wrong).
+   The legacy `run()` and all dead shapefile/boundary helpers (`BUILDERS`, `_build_*_frames`,
+   `_centroid_for`, `_boundary_row`, `_check_unique`, `_check_fk`, `_build_hhs_region`,
+   `_write_chunk`, `_set_clustering`, `_register_dataset`, `_comment_tables`,
+   `_reset_us_boundaries`, `LEVELS`) were deleted (~445 lines), with orphaned imports pruned.
+   The static-mode "builder bend" is recorded in ADR 0036.
+2. ✅ **Migrate `us_block_group` + `us_block`** (done) — see status above.
 3. ~~Retire `build_geography_views`~~ ✅ **done 2026-06-24** — both `_enriched` views dropped (county
    + tract); `build_geography_views.py` + `geography_views_job.yml` removed (git rm), and
    `us_enriched_view_definitions` + its tests deleted. Exemplar references repointed to
    `build_icd10cm.py` / `build_reference`. ADR 0028 marked retired-in-code.
-4. Owner-context: `DROP TABLE geography.boundary` once nothing consumes the polymorphic US
-   rows (the per-level `us_<lvl>_boundary` tables replace them).
+4. **Retire the `build_geography_reference` job** — DELETE its resource YAML; `us_hhs_region` is
+   now a task in `build_geography_layered`. *(pending — code done, YAML deletion + commit on Windows.)*
+5. **Owner-context:** `DROP TABLE geography.boundary` once nothing consumes the polymorphic US
+   rows (the per-level `us_<lvl>_boundary` tables replace them). *(pending — run as build SP.)*
+6. **Prod deploy** — prod is greenfield (no geography tables), so deploy the layered build and
+   run the DAG; no legacy/layered collision to coordinate. *(pending.)*
+
+## Validate the us_hhs_region migration (dev)
+
+```bash
+# new static (non-vintaged) shape: no vintage column, 10 rows, raw + canonical
+SELECT * FROM ecdh_model_dev.geography.us_hhs_region ORDER BY hhs_region;     -- 10 rows, no `vintage`
+SELECT count(*) FROM ecdh_dev.geography_raw.us_hhs_region;                    -- 10 (1:1 raw)
+SELECT check_name, passed, failing_row_count FROM ecdh_dev._ops.dq_results
+WHERE check_name LIKE 'us_hhs_region_%' ORDER BY checked_at DESC;            -- pk_unique + core_not_null green
+-- provenance corrected (was ipums_nhgis): source_provider_code='hhs', access_tier='open'
+SELECT source_provider_code, access_tier, update_semantics FROM ecdh_model_dev._ops.dataset_catalog c
+JOIN ecdh_model_dev._ops.dataset_engineering e USING (full_table_name)
+WHERE full_table_name = 'ecdh_model_dev.geography.us_hhs_region';
+```

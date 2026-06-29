@@ -195,6 +195,14 @@ class ReferenceBuildSpec:
     vintage_column: str = "vintage"
     update_semantics: str = "vintage_snapshot"
 
+    # Static (non-vintaged) build: generated reference with no vintage dimension (e.g. the
+    # ten HHS regions, a static federal grouping). Hooks are invoked **once** with an ignored
+    # placeholder vintage, outputs carry **no** vintage column, and each table is written with
+    # a full overwrite (no per-vintage replaceWhere). The "where the builder bends" case for
+    # generated/static reference (ADR 0036); requires update_semantics='full_refresh' and
+    # direct (acquire) landings only — there is no source payload to land in a Volume.
+    static: bool = False
+
     def __post_init__(self) -> None:
         if not is_valid_update_semantics(self.update_semantics):
             raise ValueError(f"update_semantics {self.update_semantics!r} not in the vocabulary")
@@ -207,6 +215,15 @@ class ReferenceBuildSpec:
             unknown = set(out.reads) - landing_names
             if unknown:
                 raise ValueError(f"{out.canonical_table}: reads unknown raw landing(s) {unknown}")
+        if self.static:
+            if self.update_semantics != "full_refresh":
+                raise ValueError(
+                    f"{self.subject}: a static build must use update_semantics='full_refresh'"
+                )
+            if any(landing.is_volume_backed for landing in self.raw_landings):
+                raise ValueError(
+                    f"{self.subject}: a static (generated) build cannot have Volume-backed landings"
+                )
 
     # --- derived names ---
     @property
@@ -238,15 +255,19 @@ class ReferenceBuildSpec:
 def build_reference(
     spec: ReferenceBuildSpec,
     *,
-    vintages: Sequence[int],
+    vintages: Sequence[int] = (),
     spark: SparkSession | None = None,
 ) -> tuple[str, str]:
     """Run a reference build through the two-phase path; return ``(phase_a, phase_b)`` run ids.
 
     Phase A (source catalog) and Phase B (model catalog) are each a ``run_build``
     invocation; Phase A's staging validation gates Phase B. ``spark`` is resolved
-    once and shared across both phases.
+    once and shared across both phases. ``vintages`` is required for a vintaged build
+    and ignored for a ``static`` (non-vintaged) spec.
     """
+    if not spec.static and not vintages:
+        raise ValueError(f"{spec.subject}: a vintaged build needs at least one vintage")
+
     if spark is None:
         from pyspark.sql import SparkSession as _SparkSession
 
@@ -261,23 +282,36 @@ def build_reference(
 
     # ---- Phase A: source-catalog staging -------------------------------------
     def _work_staging(ctx: BuildContext) -> None:
-        for v in vintages:
+        if spec.static:
+            # Non-vintaged: land + (optionally) process each table once, full overwrite.
             for landing in spec.raw_landings:
-                if landing.is_volume_backed:
-                    vdir = _landing_volume_dir(spec, landing, v, run_date)
-                    df = landing.read_from_volume(ctx, v, vdir)
-                else:
-                    df = landing.acquire(ctx, v)
-                _write_vintage(ctx.spark, spec.raw_fqn(landing.table), df, spec.vintage_column, v)
+                df = landing.acquire(ctx, _STATIC_VINTAGE)
+                _write_full(ctx.spark, spec.raw_fqn(landing.table), df)
             for out in spec.outputs:
                 if out.process is not None:
-                    _write_vintage(
-                        ctx.spark,
-                        spec.processed_fqn(out),
-                        out.process(ctx, v),
-                        spec.vintage_column,
-                        v,
+                    _write_full(
+                        ctx.spark, spec.processed_fqn(out), out.process(ctx, _STATIC_VINTAGE)
                     )
+        else:
+            for v in vintages:
+                for landing in spec.raw_landings:
+                    if landing.is_volume_backed:
+                        vdir = _landing_volume_dir(spec, landing, v, run_date)
+                        df = landing.read_from_volume(ctx, v, vdir)
+                    else:
+                        df = landing.acquire(ctx, v)
+                    _write_vintage(
+                        ctx.spark, spec.raw_fqn(landing.table), df, spec.vintage_column, v
+                    )
+                for out in spec.outputs:
+                    if out.process is not None:
+                        _write_vintage(
+                            ctx.spark,
+                            spec.processed_fqn(out),
+                            out.process(ctx, v),
+                            spec.vintage_column,
+                            v,
+                        )
         # Validate each output's staging and GATE the promote (ADR 0037 decision 8):
         # a blocking TableDQ failure raises here, so Phase B below never runs.
         for out in spec.outputs:
@@ -332,11 +366,19 @@ def build_reference(
 
     # ---- Phase B: model-catalog promote (reached only if Phase A did not raise) ----
     def _work_promote(ctx: BuildContext) -> None:
-        for v in vintages:
+        if spec.static:
             for out in spec.outputs:
-                _write_vintage(
-                    ctx.spark, spec.canonical_fqn(out), out.promote(ctx, v), spec.vintage_column, v
-                )
+                _write_full(ctx.spark, spec.canonical_fqn(out), out.promote(ctx, _STATIC_VINTAGE))
+        else:
+            for v in vintages:
+                for out in spec.outputs:
+                    _write_vintage(
+                        ctx.spark,
+                        spec.canonical_fqn(out),
+                        out.promote(ctx, v),
+                        spec.vintage_column,
+                        v,
+                    )
         for out in spec.outputs:
             if out.validate_canonical is not None:
                 out.validate_canonical(ctx, spec.canonical_fqn(out))
@@ -555,6 +597,21 @@ def _write_vintage(
         "vintage written",
         extra={"table": full_table_name, "vintage": vintage, "predicate": predicate},
     )
+
+
+# Placeholder vintage handed to a static build's hooks (which ignore it). A static build
+# has no vintage dimension; this keeps the per-vintage hook signature uniform.
+_STATIC_VINTAGE = 0
+
+
+def _write_full(spark: SparkSession, full_table_name: str, df: DataFrame) -> None:
+    """Full overwrite of a static (non-vintaged) table (ADR 0036 static build).
+
+    Replaces all rows against the schema declared by ``ensure`` — no ``overwriteSchema``,
+    so a schema change fails loud as an explicit migration rather than drifting silently.
+    """
+    df.write.format("delta").mode("overwrite").saveAsTable(full_table_name)
+    log.info("static table written", extra={"table": full_table_name})
 
 
 def make_staging_dq(
