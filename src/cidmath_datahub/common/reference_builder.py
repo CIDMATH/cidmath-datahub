@@ -96,13 +96,13 @@ class RawLanding:
 
     Two shapes:
       - **Volume-backed** (``landing_retention != NONE``): ``fetch_to_volume(vintage, dir)``
-        writes the verbatim extracted payload (file, or an API/query response) into a
-        landing Volume; ``read_from_volume(ctx, vintage, dir)`` reads it into the 1:1 raw
-        DataFrame. The builder fetches once for immutable vintages (skip-if-present) and a
-        fresh snapshot per run otherwise.
+        writes the payload into a landing Volume — a verbatim *extracted* payload (file, or an
+        API/query response) **or** a *generated* payload (a generator writing e.g. a parquet;
+        ADR 0039 amended 2026-06-30); ``read_from_volume(ctx, vintage, dir)`` reads it into the
+        1:1 raw DataFrame. The builder fetches once for immutable vintages (skip-if-present) and
+        a fresh snapshot per run otherwise. Works in both vintaged and static builds.
       - **Direct** (``landing_retention == NONE``): ``acquire(ctx, vintage)`` returns the raw
-        DataFrame with no Volume — for purely generated reference (no extraction) or a
-        not-yet-migrated source.
+        DataFrame with no Volume — for in-memory generated reference or a not-yet-migrated source.
 
     Either way the raw table is a faithful 1:1 copy; derivation happens in ``process``.
     """
@@ -196,11 +196,13 @@ class ReferenceBuildSpec:
     update_semantics: str = "vintage_snapshot"
 
     # Static (non-vintaged) build: generated reference with no vintage dimension (e.g. the
-    # ten HHS regions, a static federal grouping). Hooks are invoked **once** with an ignored
-    # placeholder vintage, outputs carry **no** vintage column, and each table is written with
-    # a full overwrite (no per-vintage replaceWhere). The "where the builder bends" case for
-    # generated/static reference (ADR 0036); requires update_semantics='full_refresh' and
-    # direct (acquire) landings only — there is no source payload to land in a Volume.
+    # ten HHS regions, the time dimension, a static federal grouping). Hooks are invoked **once**
+    # with an ignored placeholder vintage, outputs carry **no** vintage column, and each table is
+    # written with a full overwrite (no per-vintage replaceWhere). The "where the builder bends"
+    # case for generated/static reference (ADR 0036); requires update_semantics='full_refresh'.
+    # Landings may be **direct** (`acquire`, in-memory generated) OR **Volume-backed** (the
+    # generator writes a payload — e.g. a parquet — to the landing Volume, fetched at the
+    # placeholder vintage; ADR 0039 amended 2026-06-30 removed the generated-no-Volume carve-out).
     static: bool = False
 
     def __post_init__(self) -> None:
@@ -220,10 +222,9 @@ class ReferenceBuildSpec:
                 raise ValueError(
                     f"{self.subject}: a static build must use update_semantics='full_refresh'"
                 )
-            if any(landing.is_volume_backed for landing in self.raw_landings):
-                raise ValueError(
-                    f"{self.subject}: a static (generated) build cannot have Volume-backed landings"
-                )
+            # Volume-backed landings ARE allowed in static mode (ADR 0039 amended 2026-06-30):
+            # a generated payload lands in the Volume at the placeholder vintage, same as a
+            # fetched one. Phase 0 + the static staging branch handle both shapes.
 
     # --- derived names ---
     @property
@@ -284,8 +285,14 @@ def build_reference(
     def _work_staging(ctx: BuildContext) -> None:
         if spec.static:
             # Non-vintaged: land + (optionally) process each table once, full overwrite.
+            # Volume-backed landings read the generated payload from the Volume (fetched in
+            # Phase 0 at the placeholder vintage); direct landings acquire in-memory.
             for landing in spec.raw_landings:
-                df = landing.acquire(ctx, _STATIC_VINTAGE)
+                if landing.is_volume_backed:
+                    vdir = _landing_volume_dir(spec, landing, _STATIC_VINTAGE, run_date)
+                    df = landing.read_from_volume(ctx, _STATIC_VINTAGE, vdir)
+                else:
+                    df = landing.acquire(ctx, _STATIC_VINTAGE)
                 _write_full(ctx.spark, spec.raw_fqn(landing.table), df)
             for out in spec.outputs:
                 if out.process is not None:
@@ -551,8 +558,11 @@ def _ensure_and_fetch_volume(
         grants.grant_volume_engineer(
             spark, spec.source_catalog, spec.raw_schema, "_landing", principal
         )
+    # A static (non-vintaged) build fetches once at the placeholder vintage; a vintaged build
+    # fetches per real vintage (ADR 0039; static-Volume amendment 2026-06-30).
+    fetch_vintages = [_STATIC_VINTAGE] if spec.static else list(vintages)
     for landing in volume_landings:
-        for v in vintages:
+        for v in fetch_vintages:
             vdir = _landing_volume_dir(spec, landing, v, run_date)
             if _volume_dir_is_complete(vdir):
                 log.info("landing payload complete; skipping fetch", extra={"dir": vdir})

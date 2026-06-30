@@ -141,18 +141,26 @@ class TestReferenceBuildSpecValidation:
         with pytest.raises(ValueError, match="must use update_semantics='full_refresh'"):
             _spec(static=True)
 
-    def test_static_rejects_volume_backed_landings(self):
-        with pytest.raises(ValueError, match="cannot have Volume-backed landings"):
-            _spec(
-                static=True,
-                update_semantics="full_refresh",
-                raw_landings=[_volume_landing()],
-            )
+    def test_static_allows_volume_backed_landings(self):
+        # ADR 0039 amended 2026-06-30: a static (generated) build MAY land its payload in the
+        # Volume (generator writes e.g. a parquet), same as a fetched source. No longer rejected.
+        s = _spec(
+            static=True,
+            update_semantics="full_refresh",
+            raw_landings=[_volume_landing()],
+        )
+        assert s.static is True
+        assert s.raw_landings[0].is_volume_backed is True
 
     def test_static_spec_valid(self):
         s = _spec(static=True, update_semantics="full_refresh")
         assert s.static is True
         assert s.update_semantics == "full_refresh"
+
+    def test_static_with_direct_landing_still_valid(self):
+        # The original us_hhs_region shape (direct in-memory acquire) is unchanged.
+        s = _spec(static=True, update_semantics="full_refresh", raw_landings=[_landing()])
+        assert s.raw_landings[0].is_volume_backed is False
 
 
 @pytest.mark.unit

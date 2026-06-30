@@ -49,8 +49,11 @@ For each level `<lvl>` (and its `<lvl>_boundary`):
    build-owned tables), so this `DELETE` is `PERMISSION_DENIED` when run interactively.
    Either run it as the build owner (notebook/job as the service principal) **or, preferred,
    defer it** — the stale rows are harmless once consumers use `<lvl>_boundary`, and the
-   wholesale `DROP TABLE geography.boundary` at Final retirement removes every level's
+   single targeted `DELETE` at Final retirement (step 5) removes every migrated US level's
    leftovers in one owner-context step. Treat the per-level `DELETE` as optional.
+   **Do NOT `DROP TABLE geography.boundary`** — it is a *shared* polymorphic table that the
+   GADM country/subdivision/subnational builds still write to (`geo_level` in
+   `country`/`country_subdivision`/`subnational_adm2`). Only the `us_*` rows are migrated out.
 6. **Prod.** Steps 1–5 above are dev. Repeat in prod **only after** the layered build is
    deployed and run in prod for `<lvl>` — otherwise prod stops rebuilding `<lvl>` with
    nothing replacing it. (Tolerable for immutable vintages, but prod keeps the lean
@@ -96,7 +99,10 @@ For each level `<lvl>` (and its `<lvl>_boundary`):
   rows/vintage, water-block accepted-gap WARN, 15-digit geoids confirmed.
 
 **Geography hierarchy `us_state → us_county → us_tract → us_zcta → us_block_group → us_block`
-is COMPLETE on the layered builder in dev.** Remaining = Final retirement (below) + prod deploy.
+is COMPLETE on the layered builder in dev.** Dev cutover is fully closed out (2026-06-30):
+legacy `run()` + `build_geography_reference` job retired, enriched labels + `us_hhs_region`
+static shape verified, and the stale US `boundary` rows (232,169) deleted. **Only prod deploy
+remains** (Final retirement step 6).
 
 ## Validate after each level
 
@@ -129,10 +135,19 @@ WHERE check_name LIKE 'us_census_%_fk_%' ORDER BY checked_at DESC;
    + tract); `build_geography_views.py` + `geography_views_job.yml` removed (git rm), and
    `us_enriched_view_definitions` + its tests deleted. Exemplar references repointed to
    `build_icd10cm.py` / `build_reference`. ADR 0028 marked retired-in-code.
-4. **Retire the `build_geography_reference` job** — DELETE its resource YAML; `us_hhs_region` is
-   now a task in `build_geography_layered`. *(pending — code done, YAML deletion + commit on Windows.)*
-5. **Owner-context:** `DROP TABLE geography.boundary` once nothing consumes the polymorphic US
-   rows (the per-level `us_<lvl>_boundary` tables replace them). *(pending — run as build SP.)*
+4. ✅ **Retire the `build_geography_reference` job** (done 2026-06-30) — resource YAML deleted
+   (committed in `4e21da2`, deployed via Actions; the legacy job is gone from the dev workspace).
+   `us_hhs_region` is now a task in `build_geography_layered`.
+5. ✅ **Owner-context: delete the migrated US rows from the shared polymorphic boundary table**
+   (done 2026-06-30). The per-level `us_<lvl>_boundary` tables replace them. **Not a `DROP`:**
+   `geography.boundary` is shared with the GADM country/subdivision/subnational builds, which
+   still write their `country`/`country_subdivision`/`subnational_adm2` rows there. Only the four
+   migrated US levels were removed (`us_block`/`us_block_group` were never written to `boundary`):
+   ```sql
+   DELETE FROM ecdh_model_dev.geography.boundary
+   WHERE geo_level IN ('us_state', 'us_county', 'us_tract', 'us_zcta');
+   ```
+   Run in owner context (temporary `GRANT MODIFY` → `DELETE` → `REVOKE`, or a run-as-SP one-off).
 6. **Prod deploy** — prod is greenfield (no geography tables), so deploy the layered build and
    run the DAG; no legacy/layered collision to coordinate. *(pending.)*
 

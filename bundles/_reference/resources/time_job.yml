@@ -1,7 +1,11 @@
 # Job that builds the canonical time reference tables.
 #
-# Generates time.calendar_date and time.epi_week in the integrated catalog
-# (ecdh_model_<env>) via deterministic computation. Idempotent (full_refresh).
+# Generates time.calendar_date and time.epi_week via deterministic computation,
+# on the shared build_reference builder (ADR 0036) using the static path with
+# Volume-backed generated landings (ADR 0039, amended 2026-06-30): the generator
+# lands a parquet payload in time_raw._landing, the 1:1 raw (time_raw.*) is built
+# from it, and the canonical (time.*) is promoted to the model catalog. Idempotent
+# (full_refresh; SNAPSHOT_PER_RUN landing skips a same-day re-generate).
 #
 # See ADR 0014 (reference data scope) and bundles/_reference/src/build_time.py.
 
@@ -20,6 +24,8 @@ resources:
             parameters:
               - "--catalog"
               - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
               - "--start-year"
               - "1900"
               - "--end-year"
@@ -36,6 +42,9 @@ resources:
             client: ${var.serverless_client_version}
             dependencies:
               - ../../../dist/cidmath_datahub-*.whl
+              # Phase 0 writes the generated payload to the Volume without Spark (pandas/pyarrow).
+              - pandas>=2.0
+              - pyarrow>=14.0
 
       email_notifications:
         on_failure:

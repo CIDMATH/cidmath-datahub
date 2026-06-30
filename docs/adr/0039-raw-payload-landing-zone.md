@@ -35,9 +35,13 @@ silently, so they warrant archiving **as much as or more than** files.
    parsing** — a file (zip/CSV/XML/shapefile) *or* an API/query payload (JSON response,
    paginated payloads, a serialized query result) — stored as **format-faithfully as the
    extraction allows**, engineer-only. The 1:1 raw Delta table (ADR 0037) is then built
-   **from the Volume payload**, not by re-fetching. **Generated** reference (no extraction
-   from an external source, e.g. `time`) has **no Volume** — its raw table is built from the
-   generator; provenance is the generator code + version.
+   **from the Volume payload**, not by re-fetching. **Generated** reference (no external
+   extraction, e.g. `time`, or hand-curated lookups like the WHO/UN country classifications)
+   **also lands in the Volume** *(AMENDED 2026-06-30 — was: "no Volume"; see Amendment below)*:
+   the generator writes its payload (e.g. a parquet) to the Volume, and the 1:1 raw Delta is
+   built from it — same `RawLanding` shape as a fetched source, with `fetch_to_volume` being a
+   generator rather than a download. Provenance is the generator code + version, plus any
+   documented source reference the generator encodes.
 
 2. **Landing retention mode is chosen from the same source-behavior analysis that picks the
    table's `update_semantics`** (ADR 0007). It is a parallel axis, not a new judgment:
@@ -98,7 +102,9 @@ silently, so they warrant archiving **as much as or more than** files.
   SCD2 keyed by `snapshot_date`) — orthogonal to and still valid alongside this ADR, which
   owns the Volume landing for all sources. CVX, when built, uses this ADR's snapshot_per_run
   Volume mode + 0032's in-table snapshot_replace.
-- **Generated reference (`time`) is unaffected** — no Volume; built from the generator.
+- **Generated reference (`time`) also lands in the Volume** *(AMENDED 2026-06-30)* — the
+  generator writes its payload to the Volume; the raw Delta is built from it, uniform with fetched
+  sources. (The `time` build is not yet on the shared builder; it adopts this when migrated.)
 - Requires the source catalog to host engineer-only Volumes under each `<subject>_raw`
   schema (a grants/governance addition, parallel to the raw/processed schema grants).
 
@@ -107,3 +113,33 @@ Sequencing: amend the ADR 0036 builder (`RawLanding` fetch/read split + `landing
 `build_reference` Phase 0) → retrofit `us_state` (per-vintage-immutable Volume) and confirm
 fetch-once in dev → then county/tract inherit it. The 0037 raw definition and the
 README/0036 docs get the `source → Volume → raw Delta` refinement folded in at the same time.
+
+## Amendment (2026-06-30) — generated reference also lands in the Volume
+
+The original decision exempted **generated** reference (`time`) from the Volume: "no Volume — its
+raw table is built from the generator." Migrating international geography onto the builder surfaced
+two generated/curated sources that sit alongside fetched GADM data — the pycountry-derived ISO
+3166-1/2 lists and the hand-curated WHO-region / UN-M49 `country_classifications` lookup. Rather
+than make those a special case (in-code, no raw), we **remove the carve-out**: generated reference
+lands in the Volume too.
+
+**Rule (now uniform):** every reference payload — fetched *or* generated — lands in the Volume
+before parsing; the 1:1 raw Delta is built from it. For generated sources, `RawLanding.fetch_to_volume`
+is a **generator** (writes a parquet payload to the Volume) instead of an HTTP download;
+`read_from_volume` reads it back identically. Retention follows the same axis as fetched sources
+(generated `full_refresh` → snapshot-per-run or `NONE`, generated immutable-vintaged → per-vintage).
+
+**Why:**
+- **Uniformity** — one landing pattern, one builder shape, one mental model for all reference.
+- **Replay / fidelity** — the payload actually produced for a build is captured even as generator
+  code evolves; same reproducibility/audit benefit fetched sources get.
+- **Documented data, not buried code** — hand-curated lookups (WHO/UN) become raw data with
+  documented provenance (WHO GHO API `ParentCode`; UN Statistics Division M49), not just code.
+
+**Trade-off (accepted):** a Volume payload for a small generated table (a few hundred / few
+thousand rows) is mild overhead vs. writing the raw Delta straight from the generator. Consistency
+wins; the cost is negligible at reference-data scale.
+
+**Scope:** governs the geography-intl migration's ISO + classifications landings now. The `time`
+build is **not yet on the shared builder**; when it is migrated (separate backlog item), it adopts
+this uniform Volume landing rather than the old exemption.
