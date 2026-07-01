@@ -1,0 +1,69 @@
+# Job: build the international (GADM) geography subject on the shared layered builder
+# (ADR 0036/0037/0039), parents-first per-level DAG via depends_on — the GADM mirror of
+# build_geography_layered (US/census). Consolidates the three legacy per-subject jobs
+# (geography_{country,subdivision,subnational}_reference) into one DAG.
+#
+#   country -> country_subdivision -> subnational
+#
+# The ~1.4 GB GADM 4.1 GeoPackage lands ONCE in the geography_raw landing Volume under a
+# shared volume_key (gadm_410_levels); the first level fetches it, the rest skip
+# (ADR 0039 fetch-once). Each level lands its 1:1 raw (GADM layer + generated ISO/WHO-UN
+# payloads), derives geography_processed.*, and promotes geography.* + per-level
+# geography.<level>_boundary (replacing the polymorphic geography.boundary).
+#
+# NOTE: subdivision + subnational tasks are added as those levels are ported; this job
+# starts with country (the root level). See bundles/_reference/src/build_geography_*.py.
+
+resources:
+  jobs:
+    build_geography_intl_layered:
+      name: "[_reference] build_geography_intl_layered"
+      description: |
+        Layered international geography build (GADM), parents-first DAG
+        (ADR 0036/0037/0039): country -> country_subdivision -> subnational. GADM
+        GeoPackage landed once in the Volume; per-level raw -> processed -> canonical
+        with per-level boundary tables. Long-running: ~1.4 GB GADM download.
+
+      tasks:
+        # Root level: ISO 3166-1 countries + GADM ADM_0 polygons. Fetches the shared GADM
+        # payload (the later levels skip-if-present). No parents.
+        - task_key: country
+          spark_python_task:
+            python_file: ../src/build_geography_country.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--vintages"
+              - "2022"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_intl_env
+
+      environments:
+        - environment_key: geography_intl_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+              - pycountry>=23.12
+              - geopandas>=1.0
+              - pyogrio>=0.9
+              - shapely>=2.0
+              # generated ISO/WHO-UN payloads are written to the Volume without Spark.
+              - pandas>=2.0
+              - pyarrow>=14.0
+
+      timeout_seconds: 7200
+
+      # Alerting (ADR 0010): Teams primary via notification destination, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

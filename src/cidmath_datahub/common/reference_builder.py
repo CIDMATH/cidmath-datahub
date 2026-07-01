@@ -113,6 +113,12 @@ class RawLanding:
     fetch_to_volume: FetchToVolumeFn | None = None
     read_from_volume: ReadFromVolumeFn | None = None
     description: str | None = None  # _ops row (layer=raw); falls back to the build's base entry
+    # Volume payload directory key (defaults to `table`). Set this when ONE fetched payload
+    # backs SEVERAL raw tables — e.g. the single GADM GeoPackage feeds country (ADM_0),
+    # country_subdivision (ADM_1), and subnational (ADM_2): all three give their GADM landing
+    # the SAME `volume_key` so the payload lands ONCE (first task fetches + marks complete; the
+    # others skip), while each keeps its own per-layer raw table name via `table`.
+    volume_key: str | None = None
 
     def __post_init__(self) -> None:
         if self.landing_retention == LandingRetention.NONE:
@@ -133,6 +139,11 @@ class RawLanding:
     @property
     def is_volume_backed(self) -> bool:
         return self.landing_retention != LandingRetention.NONE
+
+    @property
+    def payload_key(self) -> str:
+        """Volume payload-dir key: `volume_key` if set, else the raw-table name."""
+        return self.volume_key or self.table
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -490,8 +501,12 @@ def _landing_volume(spec: ReferenceBuildSpec) -> str:
 def _landing_volume_dir(
     spec: ReferenceBuildSpec, landing: RawLanding, vintage: int, run_date: str
 ) -> str:
-    """Filesystem path (under the landing Volume) for one landing's payload (ADR 0039)."""
-    root = f"/Volumes/{spec.source_catalog}/{spec.raw_schema}/_landing/{landing.table}"
+    """Filesystem path (under the landing Volume) for one landing's payload (ADR 0039).
+
+    Keyed by ``landing.payload_key`` (the raw-table name by default, or a shared
+    ``volume_key`` when one payload backs several raw tables — e.g. the GADM GeoPackage).
+    """
+    root = f"/Volumes/{spec.source_catalog}/{spec.raw_schema}/_landing/{landing.payload_key}"
     if landing.landing_retention == LandingRetention.PER_VINTAGE_IMMUTABLE:
         return f"{root}/vintage={int(vintage)}"
     if landing.landing_retention == LandingRetention.SNAPSHOT_PER_RUN:

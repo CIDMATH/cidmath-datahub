@@ -48,9 +48,13 @@ SCHEMA = "time"
 PIPELINE_REF = "bundles/_reference/src/build_time.py"
 
 # Time is generated, not externally sourced. The data is computed in-house; the
-# definitions follow ISO 8601 (calendar/ISO weeks) and the CDC MMWR epidemiological
-# week convention. Recorded as generated provenance (ADR 0006/0008/0039 amendment).
-TIME_SOURCE_URL = "https://www.iso.org/iso-8601-date-and-time-format.html"
+# definitions follow the CDC MMWR epidemiological-week convention (the surveillance-
+# authoritative rule: Sun-Sat weeks, week 1 = the first with >=4 days in the year) and
+# ISO 8601 for the Gregorian/ISO-week calendar columns. Recorded as generated provenance
+# (ADR 0006/0008/0039 amendment). Verified against the CDC MMWR Week Log 2025-2026
+# (105/105 weeks exact, incl. the 53-week 2025 case) on 2026-06-30.
+MMWR_DOC_URL = "https://ndc.services.cdc.gov/wp-content/uploads/MMWR_week_overview.pdf"
+ISO_8601_URL = "https://www.iso.org/iso-8601-date-and-time-format.html"
 
 CALENDAR_SPARK_SCHEMA = T.StructType(
     [
@@ -210,10 +214,11 @@ def build_time_layered(
         spatial_resolution="n/a",
         spatial_coverage="n/a (temporal reference)",
         source_provider_code="generated",
-        source_origin_code="generated",
-        source_url=TIME_SOURCE_URL,
-        source_documentation_url=TIME_SOURCE_URL,
-        license="Generated computational reference (no external license; ISO 8601 calendar + CDC MMWR epi-weeks).",
+        source_origin_code="cdc",  # MMWR epi-week definition is CDC's; the data is generated from it
+        source_url=MMWR_DOC_URL,
+        source_documentation_url=MMWR_DOC_URL,
+        source_data_dictionary_url=ISO_8601_URL,  # calendar/ISO-week column definitions
+        license="Generated computational reference (no external license; CDC MMWR epi-weeks + ISO 8601 calendar).",
         dua_required=False,
         dua_reference="",
         access_tier="open",

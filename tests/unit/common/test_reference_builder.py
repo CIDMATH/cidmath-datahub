@@ -253,6 +253,14 @@ class TestRawLandingValidation:
     def test_volume_landing_is_volume_backed(self):
         assert _volume_landing().is_volume_backed is True
 
+    def test_payload_key_defaults_to_table(self):
+        assert _volume_landing(table="gadm_adm0").payload_key == "gadm_adm0"
+
+    def test_payload_key_uses_volume_key_when_set(self):
+        # One shared payload (the GADM GeoPackage) backing several per-layer raw tables.
+        landing = _volume_landing(table="gadm_adm0", volume_key="gadm_410_levels")
+        assert landing.payload_key == "gadm_410_levels"
+
     def test_volume_landing_needs_both_hooks(self):
         with pytest.raises(ValueError, match="needs `fetch_to_volume`"):
             rb.RawLanding(
