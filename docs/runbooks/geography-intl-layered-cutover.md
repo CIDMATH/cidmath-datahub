@@ -11,8 +11,12 @@ subjects, and the last `run_build` holdout in the geography subject. When it com
 geography level has its own per-level boundary table** and the shared polymorphic
 `geography.boundary` can be dropped outright.
 
-> **Status:** PLAN / pre-implementation (drafted 2026-06-30). Design decisions below are
-> **PROPOSED — confirm before implementing.** No code written yet.
+> **Status:** IMPLEMENTED — pending dev validation (2026-07-07). All three levels are ported onto
+> `build_reference` (`build_geography_{country,subdivision,subnational}.py`) and wired into the
+> `build_geography_intl_layered` DAG. Design decisions below are **DECIDED as built**. Remaining:
+> run the DAG in dev, then execute the gated boundary cutover (delete GADM rows + drop
+> `geography.boundary`), `git rm` the two legacy job YAMLs, and land the ADR note
+> (`geography-intl-adr-note-draft.md`).
 
 ---
 
