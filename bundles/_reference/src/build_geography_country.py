@@ -61,6 +61,33 @@ GADM_ADM0_LAYER = "ADM_0"
 GADM_VOLUME_KEY = "gadm_410_levels"
 SOURCE_FILE = f"GADM {gadm.GADM_RELEASE} ADM_0"
 
+# Per-landing provenance (over the build's base `gadm` entry) for the non-GADM sources, so their
+# raw `_ops.dataset_catalog` rows record the true source rather than inheriting 'gadm'.
+_ISO_PROVENANCE = {
+    "source_provider_code": "pycountry",  # distributor the codes are pulled from
+    "source_origin_code": "iso",  # ISO 3166 defines the codes
+    "source_url": "https://www.iso.org/iso-3166-country-codes.html",
+    "source_documentation_url": "https://www.iso.org/iso-3166-country-codes.html",
+    "license": "Public (ISO 3166-1 country codes); pycountry MIT.",
+    "dua_required": False,
+    "dua_reference": "",
+    "access_tier": "open",
+    "external_maintainer_name": "ISO / pycountry",
+    "is_hosted": False,
+}
+_CLASS_PROVENANCE = {
+    "source_provider_code": "generated",  # hand-curated in-repo lookup (no external distributor)
+    "source_origin_code": "who_un",  # WHO GHO regions + UN Statistics Division M49
+    "source_url": "https://www.who.int/data/gho/info/gho-odata-api",
+    "source_documentation_url": "https://unstats.un.org/unsd/methodology/m49/",
+    "license": "Public (WHO GHO ParentCode regions + UN Statistics Division M49).",
+    "dua_required": False,
+    "dua_reference": "",
+    "access_tier": "open",
+    "external_maintainer_name": "WHO GHO / UN Statistics Division",
+    "is_hosted": False,
+}
+
 COUNTRY_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("country_alpha3", T.StringType(), False),
@@ -429,6 +456,7 @@ def build_country_layered(
                 fetch_to_volume=_fetch_iso,
                 read_from_volume=_read_iso,
                 description="ISO 3166-1 country codes from pycountry (generated payload, parquet).",
+                catalog_overrides=_ISO_PROVENANCE,
             ),
             RawLanding(
                 table="country_classifications",
@@ -439,6 +467,7 @@ def build_country_layered(
                     "WHO region / UN M49 sub-region lookup (generated payload; sources: WHO GHO "
                     "ParentCode, UN Statistics Division M49)."
                 ),
+                catalog_overrides=_CLASS_PROVENANCE,
             ),
         ],
         outputs=[

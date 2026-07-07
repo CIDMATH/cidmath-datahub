@@ -261,6 +261,17 @@ class TestRawLandingValidation:
         landing = _volume_landing(table="gadm_adm0", volume_key="gadm_410_levels")
         assert landing.payload_key == "gadm_410_levels"
 
+    def test_catalog_overrides_valid_fields_accepted(self):
+        landing = _volume_landing(
+            table="iso_3166_1",
+            catalog_overrides={"source_provider_code": "iso_3166", "is_hosted": False},
+        )
+        assert landing.catalog_overrides["source_provider_code"] == "iso_3166"
+
+    def test_catalog_overrides_rejects_unknown_field(self):
+        with pytest.raises(ValueError, match="unknown field"):
+            _volume_landing(table="iso_3166_1", catalog_overrides={"not_a_real_field": "x"})
+
     def test_volume_landing_needs_both_hooks(self):
         with pytest.raises(ValueError, match="needs `fetch_to_volume`"):
             rb.RawLanding(

@@ -47,11 +47,11 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cidmath_datahub.common import grants, registration
 from cidmath_datahub.common.dq import TableDQ
@@ -113,6 +113,13 @@ class RawLanding:
     fetch_to_volume: FetchToVolumeFn | None = None
     read_from_volume: ReadFromVolumeFn | None = None
     description: str | None = None  # _ops row (layer=raw); falls back to the build's base entry
+    # Per-landing provenance override for THIS raw table's `_ops.dataset_catalog` row: a mapping of
+    # DatasetCatalogEntry field -> value applied over the build's shared `base_catalog_entry`. Use
+    # it when a raw landing's true source differs from the build's primary source — e.g. a GADM
+    # build whose ISO / WHO-UN generated landings should read source_provider_code='iso_3166' /
+    # 'who_un', not the build's 'gadm'. Structural fields (full_table_name/layer/derived_from) are
+    # builder-owned and ignored if present. None = inherit the base entry unchanged.
+    catalog_overrides: Mapping[str, Any] | None = None
     # Volume payload directory key (defaults to `table`). Set this when ONE fetched payload
     # backs SEVERAL raw tables — e.g. the single GADM GeoPackage feeds country (ADM_0),
     # country_subdivision (ADM_1), and subnational (ADM_2): all three give their GADM landing
@@ -135,6 +142,11 @@ class RawLanding:
                 )
             if self.acquire is not None:
                 raise ValueError(f"{self.table}: a Volume-backed landing must not set `acquire`")
+        if self.catalog_overrides:
+            valid = {f.name for f in fields(registration.DatasetCatalogEntry)}
+            unknown = set(self.catalog_overrides) - valid
+            if unknown:
+                raise ValueError(f"{self.table}: catalog_overrides has unknown field(s) {unknown}")
 
     @property
     def is_volume_backed(self) -> bool:
@@ -346,6 +358,7 @@ def build_reference(
                     layer="raw",
                     derived_from=None,
                     description=landing.description,
+                    catalog_overrides=landing.catalog_overrides,
                 ),
                 _layer_engineering_entry(spec, spec.raw_fqn(landing.table), None),
             )
@@ -459,18 +472,19 @@ def _layer_catalog_entry(
     derived_from: list[str] | None,
     description: str | None = None,
     public_health_relevance: str | None = None,
+    catalog_overrides: Mapping[str, Any] | None = None,
 ) -> DatasetCatalogEntry:
     """Clone the build's base provenance entry for one layer/table (ADR 0008).
 
     The base entry carries shared provenance (source URL, license, provider/origin
     codes, access tier, …); only the per-table fields are overridden. ``layer`` ∈
-    raw / processed / reference.
+    raw / processed / reference. ``catalog_overrides`` (per-landing provenance) is
+    applied first; the structural keys below always win.
     """
-    overrides: dict[str, object] = {
-        "full_table_name": full_table_name,
-        "layer": layer,
-        "derived_from": derived_from,
-    }
+    overrides: dict[str, object] = dict(catalog_overrides or {})
+    overrides.update(
+        {"full_table_name": full_table_name, "layer": layer, "derived_from": derived_from}
+    )
     if description is not None:
         overrides["description"] = description
     if public_health_relevance is not None:
