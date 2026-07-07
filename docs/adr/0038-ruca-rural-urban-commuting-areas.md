@@ -173,8 +173,19 @@ builder fold-in — is deferred to a tracked follow-up, as the sequencing note a
   (verified by the runbook's conformance join).
 - **Delta 5 (DQ / audit):** `ingested_at` retained; DQ recorded against the canonical (consumer)
   table names. Full `TableDQ` (ADR 0029) adoption rides with the delta-6 builder fold-in.
-- **Delta 6 (builder fold-in):** **deferred** — tracked follow-up; fold `ruca.py`'s parser + a
-  `ReferenceTableSpec` into `build_reference_table` when the ADR 0036 builder lands.
+- **Delta 6 (builder fold-in):** **DONE (2026-07-07).** `build_ruca.py` is rebuilt on the shared
+  `build_reference` builder (ADR 0036/0037/0039) as two vintaged `ReferenceBuildSpec`s (tract
+  1990–2020, zip 2010–2020) sharing one Spark session; the hand-rolled `_vintage_snapshot_write` /
+  `_register_*` / `_grant` / `_comment_tables` are removed (the builder owns per-vintage
+  `replaceWhere`, `_ops` registration, and grants). Raw now lands verbatim in the
+  `geography_raw._landing` Volume (ADR 0039, `PER_VINTAGE_IMMUTABLE`, fetch-once). DQ moves into
+  `validate_staging` (`make_staging_dq` for PK + the reused `ruca.py` helpers for format/vocab/
+  distribution), plus a tract→`us_tract` FK (WARN) and an approximate ZIP→`us_zcta` match-rate
+  (INFO) validated against the same-source-catalog `geography_processed.*`. The `us_ruca_zcta`
+  bridge view is rebuilt post-promote. RUCA is wired into `build_geography_layered` as the
+  `us_ruca_tract` / `us_ruca_zip` tasks (parents-first after `us_tract` / `us_zcta`); the standalone
+  `ruca_job.yml` is retired. Same tables, schemas, and rows — a build-mechanism fold-in with data
+  parity.
 
 Per-layer registration (raw → source `_ops`, engineer-tier grants; canonical/view → model `_ops`,
 reader-tier) and the drop+rebuild runbook (`docs/runbooks/realign-ruca-source-path.sql`, mirroring

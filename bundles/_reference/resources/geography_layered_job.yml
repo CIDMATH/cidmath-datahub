@@ -15,6 +15,10 @@
 # vintage_snapshot with a DQ-gated promote (ADR 0034/0037/0039). Geospatial libs are
 # on this job's environment only (ADR 0020); the IPUMS key is read at runtime.
 #
+# The USDA ERS RUCA augmenting tables (us_ruca_tract / us_ruca_zip + the us_ruca_zcta bridge
+# view) are folded onto the shared builder here too (ADR 0038 Delta 6), via build_ruca.py, wired
+# parents-first after us_tract / us_zcta. This retires the standalone ruca_job.yml.
+#
 # See bundles/_reference/src/build_geography.py (build_<level>_layered) + ADR 0036/0037/0039.
 
 resources:
@@ -208,6 +212,48 @@ resources:
               - "${var.ipums_secret_key}"
           environment_key: geography_layered_env
 
+        # Augmenting table (ADR 0038/0040): USDA ERS RUCA rural/urban codes by census tract.
+        # Separate entrypoint (build_ruca.py), folded onto the shared builder. Depends on us_tract
+        # for the (geoid, vintage) FK validation (against geography_processed.us_tract, same catalog).
+        - task_key: us_ruca_tract
+          depends_on:
+            - task_key: us_tract
+          spark_python_task:
+            python_file: ../src/build_ruca.py
+            parameters:
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
+              - "${var.model_catalog}"
+              - "--level"
+              - "tract"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_layered_env
+
+        # Augmenting table: RUCA codes by ZIP (>= 2010) + the us_ruca_zcta bridge view. Depends on
+        # us_zcta (the view joins us_zcta; the approximate ZIP->ZCTA match rate validates against
+        # geography_processed.us_zcta, same catalog).
+        - task_key: us_ruca_zip
+          depends_on:
+            - task_key: us_zcta
+          spark_python_task:
+            python_file: ../src/build_ruca.py
+            parameters:
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
+              - "${var.model_catalog}"
+              - "--level"
+              - "zip"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_layered_env
+
       environments:
         - environment_key: geography_layered_env
           spec:
@@ -218,6 +264,9 @@ resources:
               - geopandas>=1.0
               - pyogrio>=0.9
               - shapely>=2.0
+              # RUCA (us_ruca_*) reads ERS CSV/XLSX/legacy .xls: pandas (via geopandas) + Excel engines.
+              - openpyxl
+              - xlrd
 
       timeout_seconds: 7200
 
