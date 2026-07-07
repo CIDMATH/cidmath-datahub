@@ -1,0 +1,66 @@
+# Job that builds the analysis-ready wide daily weather table (ADR 0025 slice 3).
+#
+# Reshapes weather_processed.noaa_nclimgrid_daily (long-form) into weather.daily
+# (wide: prcp/tavg/tmax/tmin as columns, one row per geo_level/geoid/obs_date) and
+# joins geography (county/state name + state context + HHS region, vintage 2020) and
+# time (epi-week / ISO week) labels. merge_upsert on (geo_level, geoid, obs_date) so
+# prelim->scaled revisions in processed propagate here.
+#
+# Layering: writes the model catalog (${var.model_catalog}) `weather` schema — the
+# consumer-facing, ANALYST-READABLE canonical — reading weather_processed from the
+# source-aligned catalog (${var.source_catalog}) and geography/time from the model
+# catalog. No HTTP (pure Spark SQL over existing tables); env needs only the wheel.
+#
+# Default parameters build the recent review window (2024-2026), matching the raw +
+# processed jobs. For the full 1951-present backfill, override --start-year/--end-year.
+#
+# Deploy order: requires weather_processed (this bundle) and the _reference
+# geography/time tables. See bundles/weather/src/build_nclimgrid_analysis.py.
+
+resources:
+  jobs:
+    build_nclimgrid_analysis_weather:
+      name: "[weather] build_nclimgrid_analysis"
+      description: |
+        Builds weather.daily (analysis-ready wide daily table: prcp/tavg/tmax/tmin +
+        geography/time labels) from weather_processed. merge_upsert; analyst-readable.
+        CONUS-only. ADR 0025 slice 3 (analysis).
+
+      tasks:
+        - task_key: build_nclimgrid_analysis
+          spark_python_task:
+            python_file: ../src/build_nclimgrid_analysis.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
+              - "${var.model_catalog}"
+              - "--start-year"
+              - "2024"
+              - "--end-year"
+              - "2026"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: weather_analysis_env
+
+      environments:
+        - environment_key: weather_analysis_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      # A join + merge over the processed window; a recent window runs in minutes.
+      # Generous ceiling for a full-history rebuild.
+      timeout_seconds: 21600
+
+      # Alerting (ADR 0010): Teams primary, email secondary.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}
