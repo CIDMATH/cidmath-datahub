@@ -11,8 +11,8 @@
 # payloads), derives geography_processed.*, and promotes geography.* + per-level
 # geography.<level>_boundary (replacing the polymorphic geography.boundary).
 #
-# NOTE: subdivision + subnational tasks are added as those levels are ported; this job
-# starts with country (the root level). See bundles/_reference/src/build_geography_*.py.
+# All three levels are ported onto build_reference; the DAG runs them parents-first via
+# depends_on. See bundles/_reference/src/build_geography_{country,subdivision,subnational}.py.
 
 resources:
   jobs:
@@ -30,6 +30,46 @@ resources:
         - task_key: country
           spark_python_task:
             python_file: ../src/build_geography_country.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--vintages"
+              - "2022"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_intl_env
+
+        # First-level subdivisions: ISO 3166-2 codes + GADM ADM_1 polygons. Skips the shared
+        # GADM fetch (country already landed it); FKs country_alpha2 -> geography.country.
+        - task_key: country_subdivision
+          depends_on:
+            - task_key: country
+          spark_python_task:
+            python_file: ../src/build_geography_subdivision.py
+            parameters:
+              - "--catalog"
+              - "${var.model_catalog}"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--vintages"
+              - "2022"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_intl_env
+
+        # Second-level (ADM_2) subnational units. Resolves subdivision_code from the ADM_1
+        # parent (geography.country_subdivision); FKs country_alpha3 -> geography.country.
+        - task_key: subnational
+          depends_on:
+            - task_key: country_subdivision
+          spark_python_task:
+            python_file: ../src/build_geography_subnational.py
             parameters:
               - "--catalog"
               - "${var.model_catalog}"
