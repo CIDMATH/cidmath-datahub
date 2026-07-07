@@ -1,9 +1,13 @@
 """Land NOAA nClimGrid-Daily area averages into weather_raw.noaa_nclimgrid_daily.
 
 ADR 0025 slice 1 (raw only). Faithful ingest: discover the cty + ste monthly
-CSVs under ``access/averages/<year>/``, download them politely, parse via
-``cidmath_datahub.weather.nclimgrid`` (NCEI region codes preserved exactly as
-published), and ``merge_upsert`` into ``weather_raw.noaa_nclimgrid_daily`` keyed on
+CSVs under ``access/averages/<year>/``, download them politely, **land each verbatim
+in the ``weather_raw._landing`` UC Volume (ADR 0039) before parsing** so the raw
+table is reproducible from the stored payloads without re-fetching NOAA (which
+revises prelim->scaled and rewrites files); the landing is SNAPSHOT_PER_RUN (a fresh
+verbatim snapshot per run). Then parse via ``cidmath_datahub.weather.nclimgrid`` (NCEI
+region codes preserved exactly as published) and ``merge_upsert`` into
+``weather_raw.noaa_nclimgrid_daily`` keyed on
 (region_type, region_code, variable, obs_date). There is **no** NCEI->FIPS
 conformance here — that is the processed layer (a later slice); raw stays
 faithful to the source so it can be reviewed before processing is designed.
@@ -29,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import time
 import urllib.request
 from datetime import UTC, datetime
@@ -94,6 +99,9 @@ def _discover_year_files(year: int, region_types: set[str]) -> list[tuple[str, d
     return out
 
 
+LANDING_VOLUME = "_landing"  # weather_raw._landing UC Volume (verbatim payloads, ADR 0039)
+
+
 def _ensure_table(spark: SparkSession, catalog: str) -> None:
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}")
     spark.sql(
@@ -106,6 +114,28 @@ def _ensure_table(spark: SparkSession, catalog: str) -> None:
         CLUSTER BY (variable, region_type, obs_date)
         """
     )
+
+
+def _ensure_landing_volume(spark: SparkSession, catalog: str, data_engineers_group: str) -> None:
+    """Create the engineer-only landing Volume and grant file access (ADR 0039).
+
+    READ/WRITE VOLUME is volume-scoped and is NOT conferred by ownership for FUSE file
+    access, so grant it explicitly to the running principal (its own writes/reads) and the
+    engineer group (inspection) — same pattern as the shared reference builder's Phase 0.
+    """
+    spark.sql(
+        f"CREATE VOLUME IF NOT EXISTS {catalog}.{SCHEMA}.{LANDING_VOLUME} "
+        f"COMMENT 'Verbatim NOAA nClimGrid CSV payloads — engineer-only landing zone. ADR 0039.'"
+    )
+    principal = spark.sql("SELECT current_user()").collect()[0][0]
+    for grantee in {principal, data_engineers_group}:
+        grants.grant_volume_engineer(spark, catalog, SCHEMA, LANDING_VOLUME, grantee)
+
+
+def _landing_dir(catalog: str, run_date: str) -> str:
+    """Per-run snapshot dir under the landing Volume (SNAPSHOT_PER_RUN — NOAA revises
+    prelim→scaled, so each run captures a fresh verbatim snapshot; ADR 0039)."""
+    return f"/Volumes/{catalog}/{SCHEMA}/{LANDING_VOLUME}/snapshot_date={run_date}"
 
 
 def _merge_file(spark: SparkSession, catalog: str, rows: list[dict[str, Any]]) -> None:
@@ -290,14 +320,26 @@ def run(
 
     def _ensure(spark: SparkSession) -> None:
         _ensure_table(spark, catalog)
+        _ensure_landing_volume(spark, catalog, data_engineers_group)
 
     def _work(ctx: BuildContext) -> None:
         spark = ctx.spark
+        run_date = datetime.now(tz=UTC).date().isoformat()
+        landing = _landing_dir(catalog, run_date)
+        os.makedirs(landing, exist_ok=True)
         files_loaded = 0
         for year in range(start_year, end_year + 1):
             for name, meta in _discover_year_files(year, region_types):
                 text = _http_text(f"{BASE_URL}/{year}/{name}")
-                rows = ncl.parse_average_csv(text.splitlines(), source_file=name)
+                # Land the payload verbatim in the Volume BEFORE parsing (ADR 0039), then build
+                # the raw rows FROM the landed file — so the raw table is reproducible from the
+                # Volume without re-fetching NOAA (which revises prelim→scaled and rewrites files).
+                payload_path = os.path.join(landing, name)
+                with open(payload_path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                with open(payload_path, encoding="utf-8") as fh:
+                    lines = fh.read().splitlines()
+                rows = ncl.parse_average_csv(lines, source_file=name)
                 now = datetime.now(tz=UTC)
                 for r in rows:
                     r["status"] = meta["status"]
@@ -306,6 +348,7 @@ def run(
                 files_loaded += 1
                 time.sleep(request_delay)
             log.info("Year complete", extra={"year": year, "files_loaded_so_far": files_loaded})
+        log.info("Landed payloads in Volume", extra={"dir": landing, "files": files_loaded})
         _dq_checks(ctx.recorder, spark, catalog, start_year, end_year, files_loaded)
 
     run_build(
