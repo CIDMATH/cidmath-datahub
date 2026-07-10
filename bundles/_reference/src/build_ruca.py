@@ -10,8 +10,9 @@ gains the ADR 0039 Volume landing (the ERS files land verbatim in the landing Vo
 
 Two vintaged specs run in one entrypoint (the builder takes one vintage set per call, and the two
 tables have different vintage coverage):
-  - **tract** (1990/2000/2010/2020) -> ``geography.us_ruca_tract``, PK ``(geoid, vintage)``;
-    promote adds derived ``state_geoid``/``county_geoid`` (``substring(geoid, ...)``).
+  - **tract** (2010/2020) -> ``geography.us_ruca_tract``, PK ``(geoid, vintage)``; promote adds
+    derived ``state_geoid``/``county_geoid`` (``substring(geoid, ...)``). (1990/2000 use an older
+    RUCA code scheme not in ruca.py's vocabulary; deferred — see TRACT_VINTAGES.)
   - **zip** (2010/2020 only) -> ``geography.us_ruca_zip``, PK ``(zip_code, vintage)``; plus the
     ``us_ruca_zcta`` approximate ZIP->ZCTA bridge **view**, rebuilt post-promote.
 
@@ -31,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
@@ -82,7 +84,12 @@ ZIP_URLS: dict[int, str] = {
     2010: "https://www.ers.usda.gov/media/5440/2010-rural-urban-commuting-area-codes-zip-code-file.csv?v=19921",
 }
 
-TRACT_VINTAGES = (1990, 2000, 2010, 2020)
+# 2010 + 2020 only: 1990/2000 RUCA data uses an older secondary-code scheme (e.g. 8.3, 2.2) that
+# is not in ruca.py's published SECONDARY_RUCA_CODES vocabulary (2010/2020), so those vintages fail
+# the blocking code-validity DQ and were never loadable through this parser. The read layer still
+# handles the 1990/2000 file layout (errata preamble, single combined code, decimal FIPS) so they
+# can be enabled if the code vocabulary is expanded (a separate data-onboarding task).
+TRACT_VINTAGES = (2010, 2020)
 ZIP_VINTAGES = (2010, 2020)
 
 # Generous per-vintage cardinality bands (WARN only): a count far outside signals a parse problem.
@@ -251,11 +258,64 @@ def _detect_header_row(frame: Any) -> int | None:
         ]
         if len(short) < 3:
             continue
-        has_geo = any(("tract" in c or "zipcode" in c or "statecounty" in c) for c in short)
-        has_ruca = any("ruca" in c for c in short)
+        has_geo = any(
+            ("tract" in c or "zipcode" in c or "statecounty" in c or "fips" in c
+             or "census" in c or "geoid" in c)
+            for c in short
+        )
+        has_ruca = any(("ruca" in c or "commuting" in c or "ruralurban" in c) for c in short)
         if has_geo and has_ruca:
             return i
     return None
+
+
+def _split_combined_ruca(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Some vintages (1990/2000) publish ONE combined RUCA code column (dotted, e.g. "8.3") named
+    "Rural-urban commuting area code" instead of separate Primary/Secondary columns. Duplicate that
+    single code into both — the parser's normalizers derive the integer primary
+    (int(float("8.3"))=8) and keep the dotted secondary ("8.3"). No-op when Primary + Secondary
+    already resolve (2020, or the aliased RUCA1/RUCA2 files)."""
+    if not rows:
+        return rows
+    norm = {k: _norm_header(k) for k in rows[0]}
+    has_primary = any("primaryruca" in n for n in norm.values())
+    has_secondary = any("secondaryruca" in n for n in norm.values())
+    if has_primary and has_secondary:
+        return rows
+    combined = next(
+        (k for k, n in norm.items() if "ruca" in n or "commuting" in n or "ruralurban" in n), None
+    )
+    if combined is None:
+        return rows
+    for r in rows:
+        code = r.get(combined, "")
+        r.setdefault("Primary RUCA Code", code)
+        r.setdefault("Secondary RUCA Code", code)
+    return rows
+
+
+def _clean_geoid_column(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip non-digits from the tract/ZIP id column so decimal-suffixed FIPS codes (the 1990/2000
+    "010010201.00") pass the digits-only GEOID guard. Targets only the id column the parser
+    resolves; other columns (incl. the dotted secondary code) are untouched."""
+    if not rows:
+        return rows
+    keys = list(rows[0].keys())
+    equals = {"statecountytractfipscode", "censustract", "tractfips"}
+    id_key = next((k for k in keys if _norm_header(k) in equals), None)
+    if id_key is None:
+        id_key = next(
+            (k for k in keys if "tract" in _norm_header(k) or "zipcode" in _norm_header(k)), None
+        )
+    if id_key is None:
+        return rows
+    for r in rows:
+        v = r.get(id_key)
+        if v not in (None, ""):
+            digits = re.sub(r"\D", "", str(v))
+            if digits:
+                r[id_key] = digits
+    return rows
 
 
 def _header_score(header: list[str]) -> int:
@@ -309,8 +369,21 @@ def _read_rows(raw: bytes, filename: str, *, aliases: dict[str, str] | None = No
         if best is None or score > best[0]:
             best = (score, rows)
     if best is None:
-        raise ValueError(f"Could not locate a RUCA header row in {filename!r}")
-    return best[1]
+        # Diagnostic: dump each sheet's first rows so an unseen vintage layout is identifiable
+        # from the error (rather than guessing). Cells truncated for a compact message.
+        previews = []
+        for name, frame in frames.items():
+            head = []
+            for i in range(min(len(frame), 12)):
+                cells = [str(x).strip()[:40] for x in frame.iloc[i].tolist()[:8]]
+                head.append(f"    row{i}: {cells}")
+            previews.append(f"  sheet {name!r} ({frame.shape[0]}x{frame.shape[1]}):\n"
+                            + "\n".join(head))
+        raise ValueError(
+            f"Could not locate a RUCA header row in {filename!r}. Sheet previews:\n"
+            + "\n".join(previews)
+        )
+    return _clean_geoid_column(_split_combined_ruca(best[1]))
 
 
 def _find_payload(volume_dir: Path) -> Path:
