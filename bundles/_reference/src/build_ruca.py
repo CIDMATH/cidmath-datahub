@@ -218,24 +218,87 @@ def _download(url: str) -> tuple[bytes, str]:
     return raw, filename
 
 
-def _read_rows(raw: bytes, filename: str) -> list[dict[str, Any]]:
-    """Read a downloaded CSV / XLSX / .xls into header -> cell dicts (all text, blanks -> "")."""
+def _norm_header(name: Any) -> str:
+    """Lower-case, drop surrounding quotes, keep [a-z0-9] (mirrors ruca._normalize_header)."""
+    import re
+
+    return re.sub(r"[^a-z0-9]", "", str(name).strip().strip("'\"").lower())
+
+
+# Older/compact ERS files (2010 ZIP, and some older tract vintages) quote their headers and name the
+# codes RUCA1 / RUCA2 rather than PrimaryRUCA / SecondaryRUCA. ERS convention: RUCA1 = primary code,
+# RUCA2 = secondary code. Applied at the READ layer only (ruca.py stays unchanged) and only fires on
+# an exact ruca1/ruca2 header, so the 2020 "Primary RUCA Code 2020" files are untouched. VERIFY the
+# mapping in dev (spot-check a few ids -> primary/secondary against the ERS published codes).
+_RUCA_HEADER_ALIASES = {"ruca1": "Primary RUCA Code", "ruca2": "Secondary RUCA Code"}
+
+
+def _detect_header_row(frame: Any) -> int | None:
+    """Index of the first row that looks like a RUCA header (a geo column + a RUCA column).
+
+    ERS files vary by vintage: the older .xls carry a leading errata/notes row (the 12/9/2025 1990
+    errata banner is literally row 0 now) or bury the data behind a notes sheet, so the header is
+    *detected*, not assumed to be row 0.
+    """
+    for i in range(min(len(frame), 30)):
+        cells = [_norm_header(c) for c in frame.iloc[i].tolist()]
+        has_geo = any(("tract" in c or "zipcode" in c or "statecounty" in c) for c in cells)
+        has_ruca = any("ruca" in c for c in cells)
+        if has_geo and has_ruca:
+            return i
+    return None
+
+
+def _header_score(header: list[str]) -> int:
+    """How many RUCA logical columns a header row resolves (to pick the data sheet in a workbook)."""
+    norm = {_norm_header(h) for h in header}
+    return sum(1 for t in ("tract", "zipcode", "primaryruca", "secondaryruca", "state")
+               if any(t in n for n in norm))
+
+
+def _read_rows(raw: bytes, filename: str, *, aliases: dict[str, str] | None = None
+               ) -> list[dict[str, Any]]:
+    """Read a downloaded CSV / XLSX / .xls into header -> cell dicts (all text, blanks -> "").
+
+    Detects the real header row (skipping errata/notes preamble rows and picking the best sheet in a
+    multi-sheet workbook) instead of assuming row 0; strips quote qualifiers; and applies ``aliases``
+    (normalized-header -> replacement) so vintage-variant names reach the parser (e.g. the compact
+    ZIP ruca1/ruca2). All cells read as text so leading zeros in GEOIDs/ZIPs survive.
+    """
     import io
 
     import pandas as pd
 
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
-        # ERS CSVs are Latin-1 / Windows-1252 (place names carry bytes like 0xF1); latin-1 maps
-        # every byte so the read never aborts.
-        df = pd.read_csv(io.BytesIO(raw), dtype=str, keep_default_na=False, encoding="latin-1")
+        # Latin-1 / Windows-1252 (place names carry high bytes); read header-less to detect it.
+        frames = {"csv": pd.read_csv(io.BytesIO(raw), dtype=str, keep_default_na=False,
+                                     header=None, encoding="latin-1")}
     elif suffix in (".xlsx", ".xls"):
-        # openpyxl for .xlsx, xlrd for legacy .xls; data on the first sheet.
-        df = pd.read_excel(io.BytesIO(raw), sheet_name=0, dtype=str, keep_default_na=False)
+        # openpyxl for .xlsx, xlrd for legacy .xls; scan every sheet for the data sheet.
+        frames = pd.read_excel(io.BytesIO(raw), sheet_name=None, dtype=str,
+                               keep_default_na=False, header=None)
     else:
         raise ValueError(f"Unsupported RUCA file type {suffix!r} for {filename!r}")
-    df.columns = [str(c).strip() for c in df.columns]
-    return df.to_dict(orient="records")
+
+    best: tuple[int, list[dict[str, Any]]] | None = None
+    for frame in frames.values():
+        hdr = _detect_header_row(frame)
+        if hdr is None:
+            continue
+        header = [str(c).strip().strip("'\"") for c in frame.iloc[hdr].tolist()]
+        if aliases:
+            header = [aliases.get(_norm_header(c), c) for c in header]
+        rows = [
+            dict(zip(header, [str(v) for v in rec]))
+            for rec in frame.iloc[hdr + 1:].itertuples(index=False)
+        ]
+        score = _header_score(header)
+        if best is None or score > best[0]:
+            best = (score, rows)
+    if best is None:
+        raise ValueError(f"Could not locate a RUCA header row in {filename!r}")
+    return best[1]
 
 
 def _find_payload(volume_dir: Path) -> Path:
@@ -285,7 +348,9 @@ def _fetch_tract(v: int, volume_dir: str) -> None:
 
 def _read_tract(ctx: BuildContext, v: int, volume_dir: str) -> Any:
     path = _find_payload(Path(volume_dir))
-    records = ruca.parse_tract_rows(_read_rows(path.read_bytes(), path.name), int(v))
+    records = ruca.parse_tract_rows(
+        _read_rows(path.read_bytes(), path.name, aliases=_RUCA_HEADER_ALIASES), int(v)
+    )
     now = datetime.now(tz=UTC)
     rows = [_raw_tract_row(r, path.name, now) for r in records]
     log.info("Parsed RUCA tracts", extra={"vintage": int(v), "rows": len(rows)})
@@ -299,7 +364,9 @@ def _fetch_zip(v: int, volume_dir: str) -> None:
 
 def _read_zip(ctx: BuildContext, v: int, volume_dir: str) -> Any:
     path = _find_payload(Path(volume_dir))
-    records = ruca.parse_zip_rows(_read_rows(path.read_bytes(), path.name), int(v))
+    records = ruca.parse_zip_rows(
+        _read_rows(path.read_bytes(), path.name, aliases=_RUCA_HEADER_ALIASES), int(v)
+    )
     now = datetime.now(tz=UTC)
     rows = [_raw_zip_row(r, path.name, now) for r in records]
     log.info("Parsed RUCA ZIPs", extra={"vintage": int(v), "rows": len(rows)})
