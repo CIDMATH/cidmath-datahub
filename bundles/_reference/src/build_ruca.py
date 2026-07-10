@@ -238,12 +238,21 @@ def _detect_header_row(frame: Any) -> int | None:
 
     ERS files vary by vintage: the older .xls carry a leading errata/notes row (the 12/9/2025 1990
     errata banner is literally row 0 now) or bury the data behind a notes sheet, so the header is
-    *detected*, not assumed to be row 0.
+    *detected*, not assumed to be row 0. Only SHORT cells count as candidate column labels — the
+    errata banner is one long prose cell that happens to contain the words "RUCA" and "census
+    tracts", so a naive substring check would (wrongly) treat it as the header. Real headers are a
+    handful of short labels, so we require >= 3 short cells carrying the geo + RUCA tokens.
     """
-    for i in range(min(len(frame), 30)):
-        cells = [_norm_header(c) for c in frame.iloc[i].tolist()]
-        has_geo = any(("tract" in c or "zipcode" in c or "statecounty" in c) for c in cells)
-        has_ruca = any("ruca" in c for c in cells)
+    for i in range(min(len(frame), 40)):
+        short = [
+            _norm_header(c)
+            for c in (str(x).strip().strip("'\"") for x in frame.iloc[i].tolist())
+            if 0 < len(c) <= 60
+        ]
+        if len(short) < 3:
+            continue
+        has_geo = any(("tract" in c or "zipcode" in c or "statecounty" in c) for c in short)
+        has_ruca = any("ruca" in c for c in short)
         if has_geo and has_ruca:
             return i
     return None
@@ -289,8 +298,11 @@ def _read_rows(raw: bytes, filename: str, *, aliases: dict[str, str] | None = No
         header = [str(c).strip().strip("'\"") for c in frame.iloc[hdr].tolist()]
         if aliases:
             header = [aliases.get(_norm_header(c), c) for c in header]
+        # Strip surrounding quote qualifiers + whitespace from cell VALUES too (the compact ZIP
+        # files quote every field, e.g. '36874'); a leading/trailing strip leaves internal
+        # apostrophes (O'Brien County) intact.
         rows = [
-            dict(zip(header, [str(v) for v in rec]))
+            dict(zip(header, [str(v).strip().strip("'\"") for v in rec]))
             for rec in frame.iloc[hdr + 1:].itertuples(index=False)
         ]
         score = _header_score(header)
