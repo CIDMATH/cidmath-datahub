@@ -447,17 +447,24 @@ def normalize_secondary_code(value: str | int | float) -> str:
         '1.1'
         >>> normalize_secondary_code("99")
         '99'
+        >>> normalize_secondary_code("99.0")
+        '99'
         >>> normalize_secondary_code(" 7.2 ")
         '7.2'
     """
     s = str(value).strip()
     if not s:
         raise ValueError("empty secondary RUCA code")
-    if s == "99":
-        return "99"
     if "." in s:
         whole, _, frac = s.partition(".")
+        # 99 is the not-coded (water/zero-population) sentinel, not a primary.secondary code.
+        # The 1990/2000 combined-code files write it decimal-formatted as "99.0" (the reader keeps
+        # the decimal, like every other code); collapse any 99.x back to the canonical bare "99".
+        if int(whole) == 99:
+            return "99"
         return f"{int(whole)}.{frac}"
+    if int(s) == 99:
+        return "99"
     return f"{int(s)}.0"
 
 
