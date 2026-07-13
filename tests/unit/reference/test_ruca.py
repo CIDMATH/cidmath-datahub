@@ -100,6 +100,8 @@ class TestNormalizeSecondaryCode:
             ("10.3", "10.3"),
             (" 7.2 ", "7.2"),
             ("99", "99"),  # special code preserved
+            ("99.0", "99"),  # 1990/2000 combined-code files write the 99 sentinel as 99.0
+            (99.0, "99"),  # a float reader may hand us 99.0
         ],
     )
     def test_normalization(self, raw, expected):
@@ -389,6 +391,17 @@ class TestVersionAwareDQ:
         rows = [_tract_row("53033010100", "WA", "King", "2", "2.2", "4,000", "1.2", "3333.3")]
         recs = ruca.parse_tract_rows(rows, 2020)
         assert ruca.find_invalid_secondary_codes(recs) == [("53033010100", "2.2")]
+
+    def test_zero_population_sentinel_99_0_normalizes_and_passes(self):
+        # 1990/2000 water/zero-population tracts carry the combined code 99, read as "99.0"; it must
+        # normalize to the "99" sentinel and pass the vocab check (regression: it was failing as
+        # out-of-vocab "99.0" for all 1,219 zero-pop tracts).
+        rows = [_tract_row("02050951696", "AK", "Bethel", "99.0", "99.0", "0", "0", "")]
+        recs = ruca.parse_tract_rows(rows, 1990)
+        assert recs[0].primary_ruca == 99
+        assert recs[0].secondary_ruca == "99"
+        assert ruca.find_invalid_secondary_codes(recs) == []
+        assert ruca.find_invalid_primary_codes(recs) == []
 
     def test_v2_0_row_with_10_6_secondary_passes_at_2000(self):
         # A 2000 tract with the v2.0 10.6 secondary must validate against v2.0 (not flagged).
