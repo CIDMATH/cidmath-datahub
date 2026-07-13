@@ -37,7 +37,9 @@ resources:
           spark_python_task:
             python_file: ../src/build_loinc.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               - "--loinc-version"
               - "2.82"

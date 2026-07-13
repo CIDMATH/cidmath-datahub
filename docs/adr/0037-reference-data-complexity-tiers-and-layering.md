@@ -207,3 +207,28 @@ unchanged — a build-mechanism fold-in with data parity; consumers unaffected. 
 `reference/icd10pcs.py` / `reference/icd9_procedures.py` are reused unchanged. **Deferred to later
 waves:** CVX/NDC (revise-in-place + Volume relocation), the authenticated sets (LOINC/RxNorm/SNOMED),
 and the multi-source hierarchical ICD-CM.
+
+## Applied — codes backport wave 3 (LOINC + RxNorm + SNOMED, authenticated)
+The three **authenticated** code sets are folded onto `build_reference`: `codes.loinc` /
+`codes.loinc_map_to`, `codes.rxnorm`, and `codes.snomed`. Each lands its authenticated release zip
+verbatim in the source-catalog Volume `ecdh_<env>.codes_raw._landing`, parses into the 1:1 raw
+table(s), and promotes the canonical(s) from raw. LOINC's two tables share one release-zip landing via
+a shared `volume_key` (like NDC). These are the **first builds to key on a string vintage** — the
+release versions `loinc_version` / `rxnorm_version` / `snomed_version` — which the wave-2 builder
+generalization (`Vintage = int | date | str`) makes possible.
+
+- **Authenticated fetch** runs inside `fetch_to_volume`, reading credentials from the existing secret
+  scopes: LOINC HTTP Basic (`loinc_secret_scope`); RxNorm/SNOMED the shared UTS `umls_secret_scope`
+  (API-key download proxy + UTS Release API to resolve the download URL). The raw landing Volume is
+  engineer-only, so licensed payloads are not broadly readable.
+- **Integrity** is checked at fetch: LOINC verifies the API's `downloadMD5Hash`; RxNorm/SNOMED verify
+  a CLI-supplied `--expected-md5` when given. A mismatch raises before the completion marker is
+  written, so a corrupt download is never cached (a stronger guarantee than the old in-`work` check).
+- **access_tier** follows each canonical: RxNorm `open` (SAB=RXNORM is non-proprietary; only the
+  download is gated); LOINC + SNOMED `restricted` / `dua_required=True` (Regenstrief / UMLS+SNOMED
+  affiliate licenses). DQ is run on the freshly-parsed records (LOINC/SNOMED carry parse-time-only or
+  multi-file-derived state the tables don't persist) and gated in `validate_staging`. The `_current`
+  views are dropped (ADR 0034). Pure parsers reused unchanged; canonical schemas + rows unchanged.
+
+With waves 1-3 done, the only remaining backport is the multi-source hierarchical **ICD-10-CM /
+ICD-9-CM** relayer (wave 4), which exercises the processed-stage path and is tracked separately.
