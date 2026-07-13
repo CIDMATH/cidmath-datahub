@@ -232,9 +232,9 @@ def resolve_year_window(
 
     * **Explicit** -- pass both ``start_year`` and ``end_year`` (an ad-hoc slice or the full-history
       backfill).
-    * **Rolling** -- pass ``recent_years`` N, yielding ``(current_year - N, current_year)``: a window
-      relative to ``today`` for the scheduled monthly refresh, so it always covers NOAA's prelim->scaled
-      revision lag plus new months without a hard-coded year range.
+    * **Rolling** -- pass ``recent_years`` N, yielding ``(current_year - N, current_year)``: a
+      window relative to ``today`` for the scheduled monthly refresh, so it always covers NOAA's
+      prelim->scaled revision lag plus new months without a hard-coded year range.
 
     Deterministic and unit-testable: ``today`` can be injected to pin the current year (it defaults
     to the current UTC date, matching the builds' ``datetime.now(tz=UTC)`` convention).

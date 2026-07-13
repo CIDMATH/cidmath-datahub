@@ -385,7 +385,7 @@ def main() -> None:
     parser.add_argument("--request-delay", type=float, default=DEFAULT_REQUEST_DELAY)
     args = parser.parse_args()
 
-    start_year, end_year = nclimgrid.resolve_year_window(
+    start_year, end_year = ncl.resolve_year_window(
         start_year=args.start_year, end_year=args.end_year, recent_years=args.recent_years
     )
     region_types = {r.strip() for r in args.region_types.split(",") if r.strip()}

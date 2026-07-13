@@ -551,7 +551,7 @@ def main() -> None:
         help="NOAA NCEI->FIPS cross-reference URL (defaults to the nClimGrid doc/ folder).",
     )
     args = parser.parse_args()
-    start_year, end_year = nclimgrid.resolve_year_window(
+    start_year, end_year = ncl.resolve_year_window(
         start_year=args.start_year, end_year=args.end_year, recent_years=args.recent_years
     )
     run(
