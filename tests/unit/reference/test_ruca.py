@@ -308,7 +308,10 @@ class TestDQHelpers:
 class TestVersionedVocabulary:
     def test_vintage_to_version_map(self):
         assert ruca.RUCA_VERSION_BY_VINTAGE == {
-            1990: "v1_11", 2000: "v2_0", 2010: "v3_x", 2020: "v3_x"
+            1990: "v1_11",
+            2000: "v2_0",
+            2010: "v3_x",
+            2020: "v3_x",
         }
 
     @pytest.mark.parametrize(
@@ -345,15 +348,15 @@ class TestVersionedVocabulary:
     @pytest.mark.parametrize(
         "code,version,expected",
         [
-            ("2.2", "v1_11", True),   # unique to v1.11
+            ("2.2", "v1_11", True),  # unique to v1.11
             ("2.2", "v2_0", False),
             ("2.2", "v3_x", False),
-            ("10.6", "v2_0", True),   # present in v2.0
+            ("10.6", "v2_0", True),  # present in v2.0
             ("10.6", "v1_11", False),
             ("10.6", "v3_x", False),
             ("4.2", "v2_0", True),
             ("4.2", "v3_x", False),
-            ("10.3", "v3_x", True),   # modern set unchanged
+            ("10.3", "v3_x", True),  # modern set unchanged
         ],
     )
     def test_validate_secondary_is_version_aware(self, code, version, expected):
@@ -398,19 +401,18 @@ class TestVersionAwareDQ:
         assert ruca.find_invalid_secondary_codes(recs) == []
 
     def test_v2_0_10_6_flagged_at_2020(self):
-        rows = [_tract_row("30001000100", "MT", "Beaverhead", "10", "10.6", "1,200", "500.0", "2.4")]
+        rows = [
+            _tract_row("30001000100", "MT", "Beaverhead", "10", "10.6", "1,200", "500.0", "2.4")
+        ]
         recs = ruca.parse_tract_rows(rows, 2020)
         assert ruca.find_invalid_secondary_codes(recs) == [("30001000100", "10.6")]
 
     def test_mixed_vintages_each_validated_against_own_version(self):
         # 1990 (2.2 ok) + 2020 (2.2 not ok) in one batch: only the 2020 row is flagged.
-        recs = (
-            ruca.parse_tract_rows(
-                [_tract_row("53033010100", "WA", "King", "2", "2.2", "1", "1", "1")], 1990
-            )
-            + ruca.parse_tract_rows(
-                [_tract_row("53033010100", "WA", "King", "2", "2.2", "1", "1", "1")], 2020
-            )
+        recs = ruca.parse_tract_rows(
+            [_tract_row("53033010100", "WA", "King", "2", "2.2", "1", "1", "1")], 1990
+        ) + ruca.parse_tract_rows(
+            [_tract_row("53033010100", "WA", "King", "2", "2.2", "1", "1", "1")], 2020
         )
         assert ruca.find_invalid_secondary_codes(recs) == [("53033010100", "2.2")]
 
@@ -444,7 +446,9 @@ class TestCodeDefinitions:
         assert "1.0" not in primary  # primary codes are not dotted
 
     def test_version_specific_description_present(self):
-        defs = {(d.ruca_version, d.code_level, d.code): d.description for d in ruca.code_definitions()}
+        defs = {
+            (d.ruca_version, d.code_level, d.code): d.description for d in ruca.code_definitions()
+        }
         # v1.11's 2.2 has its distinct "combined flows" wording; absent from v3_x.
         assert "combined flows" in defs[("v1_11", "secondary", "2.2")].lower()
         assert ("v3_x", "secondary", "2.2") not in defs
