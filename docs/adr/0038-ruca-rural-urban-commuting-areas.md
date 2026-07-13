@@ -196,3 +196,27 @@ Per-layer registration (raw → source `_ops`, engineer-tier grants; canonical/v
 reader-tier) and the drop+rebuild runbook (`docs/runbooks/realign-ruca-source-path.sql`, mirroring
 `rename-icd-cm-tables.sql`) are included. The canonical table shapes are unchanged, so consumers are
 unaffected.
+
+**Implementation note (2026-07-13, RUCA's code scheme is versioned — a subject dimension).** The
+`primary_ruca` / `secondary_ruca` **coding scheme itself changes across vintages** — it is not a
+single stable vocabulary. There are three versions, mapped to the decennial vintages:
+
+| Vintage | RUCA version | Definitions authority |
+|---|---|---|
+| 1990 | **v1.11** | UW WWAMI RHRC — `https://depts.washington.edu/uwruca/ruca1/ruca-codes11.php` |
+| 2000 | **v2.0** | UW WWAMI RHRC — `https://depts.washington.edu/uwruca/ruca-codes.php` |
+| 2010 / 2020 | v3.x (current) | USDA ERS (encoded in `reference/ruca.py`) |
+
+The differences are substantive, not cosmetic: v1.11 has a `2.2` secondary and lacks `4.2`/`5.2`/`6.1`/
+`10.6`, and its category *descriptions* use older terminology ("urban core / large town / urban place")
+versus v2.0/v3.x ("metropolitan / micropolitan / Urbanized Area / Urban Cluster"). So a given
+`secondary_ruca` value's **meaning depends on the vintage**. USDA ERS documents only the current
+scheme; the older definitions come from UW (the original RUCA authors). This is why the current build
+loads **2010/2020 only** — 1990/2000 rows fail the single modern-vocabulary DQ.
+
+Consequences already recorded: the vintages are **not comparable across decades** (tract boundaries,
+urban-core methodology, *and now the code scheme* change each decade), so consumers must scope to one
+vintage. Enabling 1990/2000 is a **version-aware vocabulary + descriptions** task (per-version code
+sets + a `vintage→version` map + version-aware validators), a natural home for the deferred
+`us_ruca_code_definitions` lookup (keyed `(ruca_version, code_level, code, description)`) — tracked in
+a dedicated issue (`ruca-1990-2000-vintages`), not this ADR.
