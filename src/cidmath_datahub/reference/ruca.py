@@ -12,9 +12,10 @@ rural/urban flag (ADR 0038).
 The RUCA coding scheme is **versioned**: the code values, the secondary set, and the descriptions
 differ by version, keyed to the vintage (1990 -> v1.11, 2000 -> v2.0, 2010/2020 -> v3.x current).
 The controlled vocabularies + descriptions are therefore version-keyed (see the ``*_BY_VERSION``
-registries and ``RUCA_VERSION_BY_VINTAGE``), and validation is version-aware -- a 1990 row is checked
-against v1.11, a 2020 row against v3.x. The version-specific descriptions are also surfaced as
-queryable data by the ``geography.us_ruca_code_definitions`` lookup (built from :func:`code_definitions`).
+registries and ``RUCA_VERSION_BY_VINTAGE``), and validation is version-aware -- a 1990 row is
+checked against v1.11, a 2020 row against v3.x. The version-specific descriptions are also
+surfaced as queryable data by the ``geography.us_ruca_code_definitions`` lookup (built from
+:func:`code_definitions`).
 
 This module is the single source of truth for RUCA code sets, identifier normalization, code
 validation, source-header resolution, and the pure DQ helpers. It holds **no Spark and no IO**
@@ -97,10 +98,11 @@ ZIP_CODE_WIDTH = 5
 # ``geography.us_ruca_code_definitions`` lookup the build materializes from them.
 #
 # The ``99`` (zero-population / no-data) code is a modern (v3_x) convention. Whether the legacy
-# 1990/2000 ERS media ``.xls`` files use ``99`` or a different missing indicator is not yet confirmed
-# from the source files; ``99`` is accepted in every version's set so a zero-population tract does not
-# fail the blocking vocab DQ, and a genuinely different sentinel in the older files would surface as
-# an out-of-vocab row for a human to add. VERIFY against the 1990/2000 files in dev (ADR 0038).
+# 1990/2000 ERS media ``.xls`` files use ``99`` or a different missing indicator is not yet
+# confirmed from the source files; ``99`` is accepted in every version's set so a zero-population
+# tract does not fail the blocking vocab DQ, and a genuinely different sentinel in the older files
+# would surface as an out-of-vocab row for a human to add. VERIFY against the 1990/2000 files in
+# dev (ADR 0038).
 # ---------------------------------------------------------------------------
 
 #: Ordered RUCA code-scheme versions (oldest -> current).
@@ -113,7 +115,7 @@ DEFAULT_RUCA_VERSION = "v3_x"
 RUCA_VERSION_BY_VINTAGE: dict[int, str] = {1990: "v1_11", 2000: "v2_0", 2010: "v3_x", 2020: "v3_x"}
 
 #: UW/ERS code-definition source page per version (recorded in the lookup's provenance). The
-#: 1990/2000 code semantics are UW WWAMI RHRC-authored (the original RUCA authors); 2010/2020 are ERS.
+#: 1990/2000 code semantics are UW WWAMI RHRC-authored (original RUCA authors); 2010/2020 are ERS.
 CODE_DEFINITION_SOURCE_URL_BY_VERSION: dict[str, str] = {
     "v1_11": "https://depts.washington.edu/uwruca/ruca1/ruca-codes11.php",
     "v2_0": "https://depts.washington.edu/uwruca/ruca-codes.php",
@@ -166,15 +168,18 @@ SECONDARY_RUCA_DESCRIPTIONS_V3_X: dict[str, str] = {
 # --- v2_0 (vintage 2000; UW WWAMI RHRC "Code Definitions: Version 2.0") -------------------------
 # Modern-style terminology (Metropolitan area / Urban Cluster (UC) / small town / rural areas), but
 # a wider secondary set than v3_x: v2.0 keeps the ``x.2`` "10%-29%" secondaries and ``6.1``/``10.6``
-# that the modern ERS product dropped. UA=Urbanized Area, UC=Urban Cluster; "large UC" = 10,000-49,999
-# ("micropolitan"), "small UC" = 2,500-9,999.
+# that the modern ERS product dropped. UA=Urbanized Area, UC=Urban Cluster; "large UC" =
+# 10,000-49,999 ("micropolitan"), "small UC" = 2,500-9,999.
 
 #: v2_0 primary codes, code -> description (UW v2.0).
 PRIMARY_RUCA_DESCRIPTIONS_V2_0: dict[int, str] = {
     1: "Metropolitan area core: primary flow within an Urbanized Area (UA)",
     2: "Metropolitan area high commuting: primary flow 30% or more to a UA",
     3: "Metropolitan area low commuting: primary flow 10% to 30% to a UA",
-    4: "Micropolitan area core: primary flow within an Urban Cluster (UC) of 10,000-49,999 (large UC)",
+    4: (
+        "Micropolitan area core: primary flow within an Urban Cluster (UC) of 10,000-49,999 "
+        "(large UC)"
+    ),
     5: "Micropolitan high commuting: primary flow 30% or more to a large UC",
     6: "Micropolitan low commuting: primary flow 10% to 30% to a large UC",
     7: "Small town core: primary flow within an Urban Cluster of 2,500-9,999 (small UC)",
@@ -224,22 +229,31 @@ SECONDARY_RUCA_DESCRIPTIONS_V2_0: dict[str, str] = {
 
 # --- v1_11 (vintage 1990; UW WWAMI RHRC "RUCA Version 1.1 Code Definitions") --------------------
 # Older terminology: "urban core / large town / small town / isolated small rural" and "Urban Place"
-# rather than "Urban Cluster". Distinct secondary set: unique ``2.2`` (combined flows), and it lacks
-# ``4.2``/``5.2``/``6.1``/``10.6``. Thresholds are also stated differently (5-30% vs 10-29%). ``x.0``
-# is UW's "otherwise" (no qualifying secondary flow); stored as "No additional code" for consistency.
+# rather than "Urban Cluster". Distinct secondary set: unique ``2.2`` (combined flows), and it
+# lacks ``4.2``/``5.2``/``6.1``/``10.6``. Thresholds are also stated differently (5-30% vs 10-29%).
+# ``x.0`` is UW's "otherwise" (no qualifying secondary flow); stored as "No additional code".
 
 #: v1_11 primary codes, code -> description (UW v1.11).
 PRIMARY_RUCA_DESCRIPTIONS_V1_11: dict[int, str] = {
-    1: "Urban core Census tract: primary flow within a Census Bureau Urbanized Area (metro >= 50,000)",
+    1: (
+        "Urban core Census tract: primary flow within a Census Bureau Urbanized Area "
+        "(metro >= 50,000)"
+    ),
     2: "Census tract strongly tied to urban core: primary flow to an Urbanized Area (>30%)",
     3: "Census tract weakly tied to urban core: primary flow to an Urbanized Area but 5-30%",
     4: "Large town Census tract: primary flow within a large Urban Place (10,000-49,999 & >30%)",
     5: "Census tract strongly tied to large town: primary flow to a large Urban Place (>30%)",
     6: "Census tract weakly tied to large town: primary flow to a large Urban Place (5-30%)",
-    7: "Small town Census tract: primary flow within a small Urban Place (>= 2,500 & <10,000 & >30%)",
+    7: (
+        "Small town Census tract: primary flow within a small Urban Place "
+        "(>= 2,500 & <10,000 & >30%)"
+    ),
     8: "Census tract strongly tied to small town: primary flow to a small Urban Place (>30%)",
     9: "Census tract weakly tied to small town: primary flow to a small Urban Place (5-30%)",
-    10: "Isolated small rural Census tract: no primary flow over 5% to any Urbanized Area or Urban Place",
+    10: (
+        "Isolated small rural Census tract: no primary flow over 5% to any Urbanized Area or "
+        "Urban Place"
+    ),
     99: "Not coded: zero-population/no-data tract (verify sentinel against the 1990 source file)",
 }
 
@@ -313,7 +327,7 @@ SECONDARY_RUCA_CODES: frozenset[str] = SECONDARY_RUCA_CODES_BY_VERSION[DEFAULT_R
 
 
 def version_for_vintage(vintage: int) -> str:
-    """Return the RUCA code-scheme version for a decennial ``vintage`` (see RUCA_VERSION_BY_VINTAGE).
+    """Return the RUCA code-scheme version for a decennial ``vintage``.
 
     Unknown vintages fall back to the current version (``v3_x``) so validators never crash on an
     unexpected vintage; the real vintages (1990/2000/2010/2020) are all mapped explicitly.

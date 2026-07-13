@@ -126,7 +126,7 @@ class TestValidateCodes:
         assert ruca.validate_secondary_code(code) is False
 
     def test_code_set_sizes(self):
-        # The un-suffixed aliases are the current (v3_x) vocabulary: 10 primary + 99; 21 secondary + 99.
+        # Un-suffixed aliases are the current (v3_x) vocab: 10 primary + 99; 21 secondary + 99.
         assert len(ruca.PRIMARY_RUCA_CODES) == 11
         assert len(ruca.SECONDARY_RUCA_CODES) == 22
         assert ruca.PRIMARY_RUCA_CODES == ruca.PRIMARY_RUCA_CODES_BY_VERSION["v3_x"]
