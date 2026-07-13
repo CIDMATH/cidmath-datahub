@@ -25,7 +25,7 @@ import calendar
 import csv
 import re
 from collections.abc import Iterable
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 # nClimGrid missing-value marker (also pads day-columns of short months). Real
@@ -212,3 +212,53 @@ def conform_region(region_type: str, region_code: str, ncei_to_fips: dict[str, s
             return None
         return fips_state + suffix
     return None
+
+
+# ---------------------------------------------------------------------------
+# Build-window resolution (shared by the three nClimGrid entrypoints; ADR 0025)
+# ---------------------------------------------------------------------------
+
+
+def resolve_year_window(
+    *,
+    start_year: int | None = None,
+    end_year: int | None = None,
+    recent_years: int | None = None,
+    today: date | None = None,
+) -> tuple[int, int]:
+    """Resolve the inclusive ``(start_year, end_year)`` build window.
+
+    Two mutually-exclusive modes:
+
+    * **Explicit** -- pass both ``start_year`` and ``end_year`` (an ad-hoc slice or the full-history
+      backfill).
+    * **Rolling** -- pass ``recent_years`` N, yielding ``(current_year - N, current_year)``: a window
+      relative to ``today`` for the scheduled monthly refresh, so it always covers NOAA's prelim->scaled
+      revision lag plus new months without a hard-coded year range.
+
+    Deterministic and unit-testable: ``today`` can be injected to pin the current year (it defaults
+    to the current UTC date, matching the builds' ``datetime.now(tz=UTC)`` convention).
+
+    Raises:
+        ValueError: if neither mode is fully specified, if both are mixed, if ``recent_years`` is
+            negative, or if ``start_year > end_year``.
+
+    Examples:
+        >>> from datetime import date
+        >>> resolve_year_window(recent_years=2, today=date(2026, 7, 13))
+        (2024, 2026)
+        >>> resolve_year_window(start_year=1951, end_year=2026)
+        (1951, 2026)
+    """
+    if recent_years is not None:
+        if start_year is not None or end_year is not None:
+            raise ValueError("pass --recent-years OR --start-year/--end-year, not both")
+        if recent_years < 0:
+            raise ValueError(f"--recent-years must be >= 0 (got {recent_years})")
+        current = (today or datetime.now(tz=UTC).date()).year
+        return current - recent_years, current
+    if start_year is None or end_year is None:
+        raise ValueError("provide both --start-year and --end-year, or --recent-years N")
+    if start_year > end_year:
+        raise ValueError(f"--start-year ({start_year}) must be <= --end-year ({end_year})")
+    return start_year, end_year

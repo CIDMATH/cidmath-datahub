@@ -203,3 +203,40 @@ class TestConstants:
         assert ncl.REGION_TYPES == frozenset({"cty", "ste"})
         assert ncl.VARIABLES == frozenset({"prcp", "tavg", "tmax", "tmin"})
         assert ncl.SENTINEL == -999.99
+
+
+@pytest.mark.unit
+class TestResolveYearWindow:
+    def test_rolling_window_from_today(self):
+        # --recent-years N -> [current_year - N, current_year], pinned via injected today.
+        assert ncl.resolve_year_window(recent_years=2, today=date(2026, 7, 13)) == (2024, 2026)
+        assert ncl.resolve_year_window(recent_years=0, today=date(2026, 1, 1)) == (2026, 2026)
+
+    def test_explicit_window(self):
+        assert ncl.resolve_year_window(start_year=1951, end_year=2026) == (1951, 2026)
+        assert ncl.resolve_year_window(start_year=2024, end_year=2024) == (2024, 2024)
+
+    def test_recent_years_default_today_is_current_year(self):
+        # Without an injected today it uses the current UTC year (end == that year).
+        start, end = ncl.resolve_year_window(recent_years=1)
+        assert end - start == 1
+
+    def test_mixing_modes_raises(self):
+        with pytest.raises(ValueError, match="not both"):
+            ncl.resolve_year_window(start_year=2020, end_year=2026, recent_years=2)
+
+    def test_missing_explicit_bound_raises(self):
+        with pytest.raises(ValueError, match="both --start-year and --end-year"):
+            ncl.resolve_year_window(start_year=2024)
+        with pytest.raises(ValueError, match="both --start-year and --end-year"):
+            ncl.resolve_year_window(end_year=2026)
+        with pytest.raises(ValueError):
+            ncl.resolve_year_window()
+
+    def test_negative_recent_years_raises(self):
+        with pytest.raises(ValueError, match=">= 0"):
+            ncl.resolve_year_window(recent_years=-1)
+
+    def test_reversed_explicit_window_raises(self):
+        with pytest.raises(ValueError, match="must be <="):
+            ncl.resolve_year_window(start_year=2026, end_year=2024)

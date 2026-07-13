@@ -1,0 +1,105 @@
+# Scheduled monthly refresh of the NOAA nClimGrid-Daily pipeline (ADR 0025; alerting ADR 0010).
+#
+# Runs the three v1 builds in dependency order -- raw -> processed -> analysis -- over a ROLLING
+# recent window (--recent-years 2, i.e. [current_year - 2, current_year]) so weather_processed and
+# weather.daily stay current with NOAA's monthly publish: prelim->scaled revisions of recent months
+# plus newly-added months. All three builds are merge_upsert (idempotent), so a month that flipped
+# prelim->scaled is rewritten in place and new months append.
+#
+# This job keeps the RECENT WINDOW current; it does NOT do the one-time full-history backfill. For
+# that (or any ad-hoc slice), Run-now the per-slice jobs (build_nclimgrid_{raw,processed,analysis})
+# with explicit --start-year/--end-year (chunk the ~1951-present backfill by decade). See the
+# weather README.
+#
+# Schedule: 07:00 ET on the 12th of each month. NOAA rescales the prior month shortly after month-end
+# and prelim fields update every ~3 days (2-3 day observation lag), so by mid-month the prior month's
+# scaled data and current-month prelim have landed. --recent-years 2 covers the up-to-~3-month
+# prelim->scaled lag and any later revisions. (Confirm the day against NOAA's publish cadence if it
+# shifts.)
+#
+# See bundles/weather/src/build_nclimgrid_{raw,processed,analysis}.py and ADR 0025/0010/0039.
+
+resources:
+  jobs:
+    build_nclimgrid_refresh_weather:
+      name: "[weather] build_nclimgrid_refresh (monthly)"
+      description: |
+        Monthly rolling refresh of the NOAA nClimGrid-Daily pipeline. Runs raw -> processed ->
+        analysis in dependency order over a rolling recent window (--recent-years 2), keeping
+        weather_processed and weather.daily current with NOAA's prelim->scaled revisions and new
+        months. Idempotent (merge_upsert). CONUS-only. ADR 0025.
+
+      schedule:
+        # Monthly: 07:00 on the 12th (Emory / US Eastern). Quartz: sec min hour day-of-month month dow.
+        quartz_cron_expression: "0 0 7 12 * ?"
+        timezone_id: "America/New_York"
+        pause_status: "UNPAUSED"
+
+      tasks:
+        # Slice 1 (raw): land recent-window CSVs verbatim + merge_upsert into weather_raw.
+        - task_key: build_nclimgrid_raw
+          spark_python_task:
+            python_file: ../src/build_nclimgrid_raw.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--recent-years"
+              - "2"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+          environment_key: weather_refresh_env
+
+        # Slice 2 (processed): NCEI->FIPS conformance; depends on raw.
+        - task_key: build_nclimgrid_processed
+          depends_on:
+            - task_key: build_nclimgrid_raw
+          spark_python_task:
+            python_file: ../src/build_nclimgrid_processed.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
+              - "${var.model_catalog}"
+              - "--recent-years"
+              - "2"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+          environment_key: weather_refresh_env
+
+        # Slice 3 (analysis): pivot to weather.daily; depends on processed.
+        - task_key: build_nclimgrid_analysis
+          depends_on:
+            - task_key: build_nclimgrid_processed
+          spark_python_task:
+            python_file: ../src/build_nclimgrid_analysis.py
+            parameters:
+              - "--catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
+              - "${var.model_catalog}"
+              - "--recent-years"
+              - "2"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: weather_refresh_env
+
+      environments:
+        - environment_key: weather_refresh_env
+          spec:
+            client: ${var.serverless_client_version}
+            dependencies:
+              - ../../../dist/cidmath_datahub-*.whl
+
+      # A recent-window refresh runs in minutes across the three slices; generous ceiling.
+      timeout_seconds: 21600
+
+      # Alerting (ADR 0010): Teams primary, email secondary -- same as the per-slice weather jobs.
+      webhook_notifications:
+        on_failure:
+          - id: ${var.teams_destination_id}
+
+      email_notifications:
+        on_failure:
+          - ${var.email_recipient}

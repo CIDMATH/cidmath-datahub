@@ -535,8 +535,15 @@ def main() -> None:
         required=True,
         help="Integrated catalog holding the geography/time reference (ecdh_model_<env>).",
     )
-    parser.add_argument("--start-year", type=int, required=True)
-    parser.add_argument("--end-year", type=int, required=True)
+    parser.add_argument("--start-year", type=int, default=None,
+                        help="Explicit window start (with --end-year); omit if using --recent-years.")
+    parser.add_argument("--end-year", type=int, default=None,
+                        help="Explicit window end (with --start-year); omit if using --recent-years.")
+    parser.add_argument(
+        "--recent-years", type=int, default=None,
+        help="Rolling window: conform [current_year - N, current_year]. Used by the scheduled monthly "
+             "refresh instead of --start-year/--end-year.",
+    )
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
     parser.add_argument(
         "--crosswalk-url",
@@ -544,11 +551,14 @@ def main() -> None:
         help="NOAA NCEI->FIPS cross-reference URL (defaults to the nClimGrid doc/ folder).",
     )
     args = parser.parse_args()
+    start_year, end_year = nclimgrid.resolve_year_window(
+        start_year=args.start_year, end_year=args.end_year, recent_years=args.recent_years
+    )
     run(
         args.catalog,
         args.model_catalog,
-        args.start_year,
-        args.end_year,
+        start_year,
+        end_year,
         args.data_engineers_group,
         args.crosswalk_url,
     )
