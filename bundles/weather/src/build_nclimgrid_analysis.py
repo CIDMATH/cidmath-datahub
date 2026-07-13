@@ -32,6 +32,7 @@ from cidmath_datahub.common import grants, registration
 from cidmath_datahub.common.dq import TableDQ
 from cidmath_datahub.common.logging import get_logger
 from cidmath_datahub.common.pipeline import BuildContext, run_build
+from cidmath_datahub.weather import nclimgrid
 
 log = get_logger(__name__)
 
@@ -260,16 +261,26 @@ def main() -> None:
         "--model-catalog", required=True,
         help="Integrated catalog: writes weather.daily, reads geography/time (ecdh_model_<env>).",
     )
-    parser.add_argument("--start-year", type=int, required=True)
-    parser.add_argument("--end-year", type=int, required=True)
+    parser.add_argument("--start-year", type=int, default=None,
+                        help="Explicit window start (with --end-year); omit if using --recent-years.")
+    parser.add_argument("--end-year", type=int, default=None,
+                        help="Explicit window end (with --start-year); omit if using --recent-years.")
+    parser.add_argument(
+        "--recent-years", type=int, default=None,
+        help="Rolling window: build [current_year - N, current_year]. Used by the scheduled monthly "
+             "refresh instead of --start-year/--end-year.",
+    )
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
     parser.add_argument("--analysts-group", default="ecdh-analysts")
     args = parser.parse_args()
+    start_year, end_year = nclimgrid.resolve_year_window(
+        start_year=args.start_year, end_year=args.end_year, recent_years=args.recent_years
+    )
     run(
         args.catalog,
         args.model_catalog,
-        args.start_year,
-        args.end_year,
+        start_year,
+        end_year,
         args.data_engineers_group,
         args.analysts_group,
     )

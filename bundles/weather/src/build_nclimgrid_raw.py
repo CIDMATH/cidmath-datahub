@@ -367,8 +367,15 @@ def run(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, help="Source-aligned catalog (ecdh_<env>).")
-    parser.add_argument("--start-year", type=int, required=True)
-    parser.add_argument("--end-year", type=int, required=True)
+    parser.add_argument("--start-year", type=int, default=None,
+                        help="Explicit window start (with --end-year); omit if using --recent-years.")
+    parser.add_argument("--end-year", type=int, default=None,
+                        help="Explicit window end (with --start-year); omit if using --recent-years.")
+    parser.add_argument(
+        "--recent-years", type=int, default=None,
+        help="Rolling window: load [current_year - N, current_year]. Used by the scheduled monthly "
+             "refresh instead of --start-year/--end-year.",
+    )
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
     parser.add_argument(
         "--region-types",
@@ -378,11 +385,14 @@ def main() -> None:
     parser.add_argument("--request-delay", type=float, default=DEFAULT_REQUEST_DELAY)
     args = parser.parse_args()
 
+    start_year, end_year = ncl.resolve_year_window(
+        start_year=args.start_year, end_year=args.end_year, recent_years=args.recent_years
+    )
     region_types = {r.strip() for r in args.region_types.split(",") if r.strip()}
     run(
         args.catalog,
-        args.start_year,
-        args.end_year,
+        start_year,
+        end_year,
         args.data_engineers_group,
         region_types,
         args.request_delay,
