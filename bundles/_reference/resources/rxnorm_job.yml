@@ -37,7 +37,9 @@ resources:
           spark_python_task:
             python_file: ../src/build_rxnorm.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               # The download URL is resolved from --rxnorm-version via the UTS Release API
               # (https://uts-ws.nlm.nih.gov/releases?releaseType=rxnorm-full-monthly-release);
