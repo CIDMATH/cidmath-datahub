@@ -126,9 +126,11 @@ class TestValidateCodes:
         assert ruca.validate_secondary_code(code) is False
 
     def test_code_set_sizes(self):
-        # 10 primary classes + 99; 21 published secondary codes + 99.
+        # The un-suffixed aliases are the current (v3_x) vocabulary: 10 primary + 99; 21 secondary + 99.
         assert len(ruca.PRIMARY_RUCA_CODES) == 11
         assert len(ruca.SECONDARY_RUCA_CODES) == 22
+        assert ruca.PRIMARY_RUCA_CODES == ruca.PRIMARY_RUCA_CODES_BY_VERSION["v3_x"]
+        assert ruca.SECONDARY_RUCA_CODES == ruca.SECONDARY_RUCA_CODES_BY_VERSION["v3_x"]
 
 
 @pytest.mark.unit
@@ -299,3 +301,153 @@ class TestDQHelpers:
     def test_primary_distribution(self):
         recs = ruca.parse_tract_rows(TRACT_ROWS, 2020)
         assert ruca.primary_distribution(recs) == {1: 1, 10: 1, 99: 1}
+
+
+# --- versioned code vocabulary (ADR 0038) ------------------------------------
+@pytest.mark.unit
+class TestVersionedVocabulary:
+    def test_vintage_to_version_map(self):
+        assert ruca.RUCA_VERSION_BY_VINTAGE == {
+            1990: "v1_11", 2000: "v2_0", 2010: "v3_x", 2020: "v3_x"
+        }
+
+    @pytest.mark.parametrize(
+        "vintage,version",
+        [(1990, "v1_11"), (2000, "v2_0"), (2010, "v3_x"), (2020, "v3_x")],
+    )
+    def test_version_for_vintage(self, vintage, version):
+        assert ruca.version_for_vintage(vintage) == version
+
+    def test_version_for_unknown_vintage_defaults_to_current(self):
+        assert ruca.version_for_vintage(1980) == ruca.DEFAULT_RUCA_VERSION == "v3_x"
+
+    def test_primary_codes_identical_across_versions(self):
+        # Every version has primary 1-10 + 99; only the terminology (descriptions) differs.
+        expected = frozenset(range(1, 11)) | {99}
+        for version in ruca.RUCA_VERSIONS:
+            assert ruca.PRIMARY_RUCA_CODES_BY_VERSION[version] == expected
+
+    def test_v1_11_secondary_deltas(self):
+        # v1.11 uniquely has 2.2 and lacks 4.2 / 5.2 / 6.1 / 10.6.
+        v1 = ruca.SECONDARY_RUCA_CODES_BY_VERSION["v1_11"]
+        assert "2.2" in v1
+        assert {"4.2", "5.2", "6.1", "10.6"}.isdisjoint(v1)
+
+    def test_v2_0_secondary_deltas(self):
+        # v2.0 carries the wider secondary set the modern v3_x product drops.
+        v2 = ruca.SECONDARY_RUCA_CODES_BY_VERSION["v2_0"]
+        assert {"4.2", "5.2", "6.1", "10.6"}.issubset(v2)
+        assert "2.2" not in v2
+
+    def test_v3_x_matches_current_alias(self):
+        assert ruca.SECONDARY_RUCA_CODES_BY_VERSION["v3_x"] == ruca.SECONDARY_RUCA_CODES
+
+    @pytest.mark.parametrize(
+        "code,version,expected",
+        [
+            ("2.2", "v1_11", True),   # unique to v1.11
+            ("2.2", "v2_0", False),
+            ("2.2", "v3_x", False),
+            ("10.6", "v2_0", True),   # present in v2.0
+            ("10.6", "v1_11", False),
+            ("10.6", "v3_x", False),
+            ("4.2", "v2_0", True),
+            ("4.2", "v3_x", False),
+            ("10.3", "v3_x", True),   # modern set unchanged
+        ],
+    )
+    def test_validate_secondary_is_version_aware(self, code, version, expected):
+        assert ruca.validate_secondary_code(code, version) is expected
+
+    def test_validate_secondary_defaults_to_current_version(self):
+        # No version arg -> v3_x, so a v1.11-only code is rejected.
+        assert ruca.validate_secondary_code("2.2") is False
+        assert ruca.validate_secondary_code("10.3") is True
+
+    def test_validate_primary_accepts_version_arg(self):
+        assert ruca.validate_primary_code(2, "v1_11") is True
+        assert ruca.validate_primary_code(99, "v2_0") is True
+
+
+# --- version-aware batch DQ over parsed records ------------------------------
+@pytest.mark.unit
+class TestVersionAwareDQ:
+    def test_v1_11_row_with_2_2_secondary_passes_at_1990(self):
+        # A 1990 tract with the v1.11-only 2.2 secondary must validate against v1.11 (not flagged).
+        rows = [_tract_row("53033010100", "WA", "King", "2", "2.2", "4,000", "1.2", "3333.3")]
+        recs = ruca.parse_tract_rows(rows, 1990)
+        assert recs[0].primary_ruca == 2
+        assert recs[0].secondary_ruca == "2.2"
+        assert ruca.find_invalid_secondary_codes(recs) == []
+        assert ruca.find_invalid_primary_codes(recs) == []
+
+    def test_same_2_2_secondary_flagged_at_2020(self):
+        # The identical code at a modern vintage IS out of vocab (v3_x has no 2.2).
+        rows = [_tract_row("53033010100", "WA", "King", "2", "2.2", "4,000", "1.2", "3333.3")]
+        recs = ruca.parse_tract_rows(rows, 2020)
+        assert ruca.find_invalid_secondary_codes(recs) == [("53033010100", "2.2")]
+
+    def test_v2_0_row_with_10_6_secondary_passes_at_2000(self):
+        # A 2000 tract with the v2.0 10.6 secondary must validate against v2.0 (not flagged).
+        rows = [
+            _tract_row("30001000100", "MT", "Beaverhead", "10", "10.6", "1,200", "500.0", "2.4"),
+            _tract_row("30001000200", "MT", "Beaverhead", "4", "4.2", "8,000", "10.0", "800.0"),
+        ]
+        recs = ruca.parse_tract_rows(rows, 2000)
+        assert {r.secondary_ruca for r in recs} == {"10.6", "4.2"}
+        assert ruca.find_invalid_secondary_codes(recs) == []
+
+    def test_v2_0_10_6_flagged_at_2020(self):
+        rows = [_tract_row("30001000100", "MT", "Beaverhead", "10", "10.6", "1,200", "500.0", "2.4")]
+        recs = ruca.parse_tract_rows(rows, 2020)
+        assert ruca.find_invalid_secondary_codes(recs) == [("30001000100", "10.6")]
+
+    def test_mixed_vintages_each_validated_against_own_version(self):
+        # 1990 (2.2 ok) + 2020 (2.2 not ok) in one batch: only the 2020 row is flagged.
+        recs = (
+            ruca.parse_tract_rows(
+                [_tract_row("53033010100", "WA", "King", "2", "2.2", "1", "1", "1")], 1990
+            )
+            + ruca.parse_tract_rows(
+                [_tract_row("53033010100", "WA", "King", "2", "2.2", "1", "1", "1")], 2020
+            )
+        )
+        assert ruca.find_invalid_secondary_codes(recs) == [("53033010100", "2.2")]
+
+
+# --- code-definitions lookup projection --------------------------------------
+@pytest.mark.unit
+class TestCodeDefinitions:
+    def test_covers_all_versions_and_levels(self):
+        defs = ruca.code_definitions()
+        versions = {d.ruca_version for d in defs}
+        levels = {d.code_level for d in defs}
+        assert versions == set(ruca.RUCA_VERSIONS)
+        assert levels == {"primary", "secondary"}
+
+    def test_row_count_matches_registries(self):
+        expected = sum(
+            len(ruca.PRIMARY_RUCA_DESCRIPTIONS_BY_VERSION[v])
+            + len(ruca.SECONDARY_RUCA_DESCRIPTIONS_BY_VERSION[v])
+            for v in ruca.RUCA_VERSIONS
+        )
+        assert len(ruca.code_definitions()) == expected
+
+    def test_pk_is_unique(self):
+        keys = [(d.ruca_version, d.code_level, d.code) for d in ruca.code_definitions()]
+        assert len(keys) == len(set(keys))
+
+    def test_primary_codes_stored_as_plain_strings(self):
+        defs = ruca.code_definitions()
+        primary = {d.code for d in defs if d.code_level == "primary"}
+        assert "1" in primary and "10" in primary and "99" in primary
+        assert "1.0" not in primary  # primary codes are not dotted
+
+    def test_version_specific_description_present(self):
+        defs = {(d.ruca_version, d.code_level, d.code): d.description for d in ruca.code_definitions()}
+        # v1.11's 2.2 has its distinct "combined flows" wording; absent from v3_x.
+        assert "combined flows" in defs[("v1_11", "secondary", "2.2")].lower()
+        assert ("v3_x", "secondary", "2.2") not in defs
+        # Terminology differs at the primary level across versions.
+        assert "urban core" in defs[("v1_11", "primary", "1")].lower()
+        assert "metropolitan" in defs[("v3_x", "primary", "1")].lower()

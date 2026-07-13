@@ -10,11 +10,15 @@ gains the ADR 0039 Volume landing (the ERS files land verbatim in the landing Vo
 
 Two vintaged specs run in one entrypoint (the builder takes one vintage set per call, and the two
 tables have different vintage coverage):
-  - **tract** (2010/2020) -> ``geography.us_ruca_tract``, PK ``(geoid, vintage)``; promote adds
-    derived ``state_geoid``/``county_geoid`` (``substring(geoid, ...)``). (1990/2000 use an older
-    RUCA code scheme not in ruca.py's vocabulary; deferred — see TRACT_VINTAGES.)
+  - **tract** (1990/2000/2010/2020) -> ``geography.us_ruca_tract``, PK ``(geoid, vintage)``; promote
+    adds derived ``state_geoid``/``county_geoid`` (``substring(geoid, ...)``). 1990/2000 use older
+    RUCA code-scheme versions (v1.11 / v2.0); ruca.py's vocabulary + validators are version-aware
+    (keyed to vintage), so each vintage validates against its own version (ADR 0038).
   - **zip** (2010/2020 only) -> ``geography.us_ruca_zip``, PK ``(zip_code, vintage)``; plus the
     ``us_ruca_zcta`` approximate ZIP->ZCTA bridge **view**, rebuilt post-promote.
+  - **code definitions** (static) -> ``geography.us_ruca_code_definitions``, PK ``(ruca_version,
+    code_level, code)``; the version-specific primary/secondary descriptions as queryable data,
+    generated from ruca.py's ``code_definitions()`` (no download; ADR 0038).
 
 Raw lands 1:1 in ``ecdh_<env>.geography_raw.us_ruca_{tract,zip}`` (Volume-backed,
 ``PER_VINTAGE_IMMUTABLE`` — decennial + immutable). Simple tier: no ``_processed`` stage; each
@@ -64,6 +68,7 @@ MODEL_SCHEMA = "geography"
 PROCESSED_SCHEMA = "geography_processed"  # US geography levels' processed tables (FK oracle, same catalog)
 TRACT_TABLE = "us_ruca_tract"
 ZIP_TABLE = "us_ruca_zip"
+CODE_DEFINITIONS_TABLE = "us_ruca_code_definitions"
 ZCTA_VIEW = "us_ruca_zcta"
 ZCTA_TABLE = "us_zcta"
 US_TRACT_TABLE = "us_tract"
@@ -84,16 +89,19 @@ ZIP_URLS: dict[int, str] = {
     2010: "https://www.ers.usda.gov/media/5440/2010-rural-urban-commuting-area-codes-zip-code-file.csv?v=19921",
 }
 
-# 2010 + 2020 only: 1990/2000 RUCA data uses an older secondary-code scheme (e.g. 8.3, 2.2) that
-# is not in ruca.py's published SECONDARY_RUCA_CODES vocabulary (2010/2020), so those vintages fail
-# the blocking code-validity DQ and were never loadable through this parser. The read layer still
-# handles the 1990/2000 file layout (errata preamble, single combined code, decimal FIPS) so they
-# can be enabled if the code vocabulary is expanded (a separate data-onboarding task).
-TRACT_VINTAGES = (2010, 2020)
+# All four decennial tract vintages. 1990/2000 use older RUCA code-scheme versions (v1.11 / v2.0)
+# whose secondary sets differ from the modern v3_x set (e.g. 1990's 2.2; 2000's 4.2/10.6). ruca.py's
+# vocabulary + validators are now version-aware (keyed to vintage via RUCA_VERSION_BY_VINTAGE; ADR
+# 0038), so each vintage validates against its own version and 1990/2000 are loadable. The read layer
+# already handles the 1990/2000 file layout (errata preamble, single combined dotted code, decimal
+# FIPS). ZIP RUCA has no pre-2010 ERS product, so ZIP stays 2010/2020.
+TRACT_VINTAGES = (1990, 2000, 2010, 2020)
 ZIP_VINTAGES = (2010, 2020)
 
 # Generous per-vintage cardinality bands (WARN only): a count far outside signals a parse problem.
-_TRACT_CARDINALITY_MIN, _TRACT_CARDINALITY_MAX = 50_000, 100_000
+# Min widened to cover the older, coarser tract definitions (1990 ~60k, 2000 ~65k vs 2010 ~74k /
+# 2020 ~85k tracts).
+_TRACT_CARDINALITY_MIN, _TRACT_CARDINALITY_MAX = 40_000, 100_000
 _ZIP_CARDINALITY_MIN, _ZIP_CARDINALITY_MAX = 30_000, 60_000
 
 # Raw tract = source-fidelity (1:1), no derived parents (added at promote).
@@ -110,6 +118,17 @@ RAW_TRACT_SPARK_SCHEMA = T.StructType(
         T.StructField("population_density", T.DoubleType(), True),
         T.StructField("source_file", T.StringType(), False),
         T.StructField("ingested_at", T.TimestampType(), False),
+    ]
+)
+
+# Code-definitions lookup == raw == canonical (generated, static; no derived columns, no audit
+# columns -- mirrors the generated us_hhs_region static build). One schema in both catalogs.
+CODE_DEFINITIONS_SPARK_SCHEMA = T.StructType(
+    [
+        T.StructField("ruca_version", T.StringType(), False),
+        T.StructField("code_level", T.StringType(), False),
+        T.StructField("code", T.StringType(), False),
+        T.StructField("description", T.StringType(), False),
     ]
 )
 
@@ -143,6 +162,9 @@ _ZIP_DDL = (
     "zip_code STRING, vintage INT, state STRING, zip_code_type STRING, po_name STRING, "
     "primary_ruca INT, secondary_ruca STRING, source_file STRING, ingested_at TIMESTAMP"
 )
+_CODE_DEFINITIONS_DDL = (
+    "ruca_version STRING, code_level STRING, code STRING, description STRING"
+)
 
 _TRACT_DESC = (
     "USDA ERS Rural-Urban Commuting Area (RUCA) codes by census tract. Attribute extension of "
@@ -166,14 +188,40 @@ _ZIP_PHR = (
 _TRACT_KNOWN_LIMITATIONS = (
     "Primary + secondary RUCA codes (stored verbatim) and the source-provided population / land "
     "area / population density only; no derived rural-urban flag (combine the two code levels "
-    "downstream). Vintages (1990/2000/2010/2020) are NOT comparable across decades. Code-definition "
-    "labels live as constants in reference/ruca.py; a us_ruca_code_definitions lookup is deferred."
+    "downstream). Vintages (1990/2000/2010/2020) are NOT comparable across decades. In addition, the "
+    "RUCA code scheme itself is versioned (1990=v1.11, 2000=v2.0, 2010/2020=v3.x): the secondary set "
+    "and the code descriptions differ by version, so a given secondary_ruca value's meaning depends "
+    "on the vintage (e.g. 2.2 exists only in v1.11; 10.6 only in v2.0). Join geography."
+    "us_ruca_code_definitions on (ruca_version, code_level, code) -- resolve ruca_version from the "
+    "vintage -- for the version-specific human-readable description. The 99 (zero-population/no-data) "
+    "sentinel is confirmed for v3_x; the 1990/2000 missing indicator should be verified against the "
+    "source files."
 )
 _ZIP_KNOWN_LIMITATIONS = (
     "Primary + secondary RUCA codes (verbatim) + ZIP labels (state, zip_code_type, po_name) only. "
     "ZIP codes are USPS routes, not census GEOIDs; ZCTA is the Census areal approximation, so "
     "zip_code joins approximately to us_zcta.geoid on (zip_code = geoid, vintage) — see the "
     "us_ruca_zcta view. The match is not 1:1. ZIP files exist only from the 2010 vintage on."
+)
+
+_CODE_DEFINITIONS_DESC = (
+    "RUCA code definitions by scheme version: the version-specific human-readable description for "
+    "each primary/secondary RUCA code, keyed (ruca_version, code_level, code). Covers v1.11 (1990), "
+    "v2.0 (2000), and v3.x (2010/2020). Join us_ruca_tract by resolving ruca_version from the vintage "
+    "(1990=v1.11, 2000=v2.0, 2010/2020=v3.x) to attach a description per (vintage, code)."
+)
+_CODE_DEFINITIONS_PHR = (
+    "Turns the versioned RUCA codes into human-readable rural/urban classes for reporting, without "
+    "hard-coding labels per consumer, and makes the cross-version differences explicit."
+)
+_CODE_DEFINITIONS_KNOWN_LIMITATIONS = (
+    "Code descriptions only (no commuting-flow thresholds beyond the description text). The scheme is "
+    "versioned: the same secondary code can mean different things across versions, so callers MUST "
+    "join on ruca_version (resolved from the vintage), not code alone. Semantics for v1.11/v2.0 are "
+    "UW WWAMI Rural Health Research Center-authored (the original RUCA authors); v3.x is USDA ERS. "
+    "Provider is recorded as usda_ers (the data provider) with the UW pages as the documentation "
+    "source. The 99 (zero-population/no-data) sentinel for v1.11/v2.0 should be verified against the "
+    "1990/2000 source files."
 )
 
 # Provenance shared by every RUCA dataset entry (raw + canonical + view). Already USDA ERS public
@@ -839,6 +887,137 @@ def _build_zip(*, source_catalog: str, model_catalog: str, data_engineers_group:
         _register_zcta_view(spark, model_catalog)
 
 
+# ---------------------------------------------------------------------------
+# Code-definitions lookup spec (static / generated; no download -- ADR 0038)
+# ---------------------------------------------------------------------------
+
+
+def _acquire_code_definitions(ctx: BuildContext, _v: int) -> Any:
+    """Generate the version-specific RUCA code definitions from ruca.py (static; no IO)."""
+    rows = [
+        {
+            "ruca_version": d.ruca_version,
+            "code_level": d.code_level,
+            "code": d.code,
+            "description": d.description,
+        }
+        for d in ruca.code_definitions()
+    ]
+    log.info("Generated RUCA code definitions", extra={"rows": len(rows)})
+    return ctx.spark.createDataFrame(rows, CODE_DEFINITIONS_SPARK_SCHEMA).sort(
+        "ruca_version", "code_level", "code"
+    )
+
+
+def _build_code_definitions(*, source_catalog: str, model_catalog: str, data_engineers_group: str,
+                            analysts_group: str, spark: SparkSession) -> None:
+    """Build the static geography.us_ruca_code_definitions lookup (full_refresh; ADR 0038)."""
+    raw_defs = f"{source_catalog}.{RAW_SCHEMA}.{CODE_DEFINITIONS_TABLE}"
+
+    def _ensure_staging(sp: SparkSession) -> None:
+        sp.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.{RAW_SCHEMA} "
+            f"COMMENT 'Raw, fetched-as-is source landings that augment the geography subject "
+            f"(e.g. USDA ERS RUCA). Engineer-owned; canonicals promote to model geography. ADR 0037.'"
+        )
+        sp.sql(f"CREATE TABLE IF NOT EXISTS {raw_defs} ({_CODE_DEFINITIONS_DDL}) USING DELTA")
+
+    def _ensure_canonical(sp: SparkSession) -> None:
+        sp.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {model_catalog}.{MODEL_SCHEMA} "
+            f"COMMENT 'Canonical US geography reference (states, counties, tracts, ZCTAs, HHS "
+            f"regions, RUCA codes, boundaries). Owned by the _reference bundle. ADR 0020.'"
+        )
+        sp.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{MODEL_SCHEMA}.{CODE_DEFINITIONS_TABLE} "
+            f"({_CODE_DEFINITIONS_DDL}) USING DELTA"
+        )
+
+    def _promote(ctx: BuildContext, _v: int) -> Any:
+        """Raw is already canonical-shaped (no derived columns)."""
+        return ctx.spark.sql(f"SELECT * FROM {raw_defs}")
+
+    def _validate(ctx: BuildContext, staging_fqn: str) -> None:
+        record_table = f"{MODEL_SCHEMA}.{CODE_DEFINITIONS_TABLE}"
+        failures: list[str] = []
+
+        dq = make_staging_dq(ctx, staging_fqn, record_table=record_table)
+        if not dq.unique(keys=["ruca_version", "code_level", "code"],
+                         check_name="us_ruca_code_definitions_pk_uniqueness", raise_on_fail=False):
+            failures.append("duplicate (ruca_version, code_level, code)")
+        if not dq.not_null(columns=["ruca_version", "code_level", "code", "description"],
+                           check_name="us_ruca_code_definitions_core_not_null", raise_on_fail=False):
+            failures.append("null core column")
+
+        # Controlled-vocab guard on the generated columns (defensive; catches a bad ruca.py edit).
+        records = ctx.spark.sql(
+            f"SELECT ruca_version, code_level, code FROM {staging_fqn}"
+        ).collect()
+        n = len(records)
+        bad_version = sorted(
+            {r["ruca_version"] for r in records if r["ruca_version"] not in ruca.RUCA_VERSIONS}
+        )
+        _record(ctx, record_table, "us_ruca_code_definitions_version_valid", DQCategory.BUSINESS_RULE,
+                not bad_version, len(bad_version), n,
+                {"allowed": list(ruca.RUCA_VERSIONS), "sample": bad_version[:10]} if bad_version else None)
+        if bad_version:
+            failures.append(f"code definitions bad ruca_version: {bad_version[:5]}")
+
+        bad_level = sorted(
+            {r["code_level"] for r in records if r["code_level"] not in ("primary", "secondary")}
+        )
+        _record(ctx, record_table, "us_ruca_code_definitions_level_valid", DQCategory.BUSINESS_RULE,
+                not bad_level, len(bad_level), n,
+                {"allowed": ["primary", "secondary"], "sample": bad_level[:10]} if bad_level else None)
+        if bad_level:
+            failures.append(f"code definitions bad code_level: {bad_level[:5]}")
+
+        _record(ctx, record_table, "us_ruca_code_definitions_row_count", DQCategory.CARDINALITY,
+                n > 0, 0 if n > 0 else 1, n, {"rows": n}, severity=DQSeverity.INFO)
+
+        if failures:
+            raise ValueError("RUCA code-definitions blocking DQ failed -- " + "; ".join(failures))
+
+    spec = ReferenceBuildSpec(
+        subject=SUBJECT,
+        source_catalog=source_catalog,
+        model_catalog=model_catalog,
+        pipeline_reference=PIPELINE_REF,
+        reader_groups=(data_engineers_group, analysts_group),
+        engineer_group=data_engineers_group,
+        base_catalog_entry=_base_entry(
+            spatial_resolution="none", description=_CODE_DEFINITIONS_DESC,
+            phr=_CODE_DEFINITIONS_PHR, known_limitations=_CODE_DEFINITIONS_KNOWN_LIMITATIONS),
+        raw_landings=[
+            RawLanding(
+                table=CODE_DEFINITIONS_TABLE,
+                acquire=_acquire_code_definitions,
+                description=(
+                    "Generated version-specific RUCA code definitions (v1.11 / v2.0 / v3.x), static "
+                    "-- no download; produced from reference/ruca.py. Promoted to "
+                    "us_ruca_code_definitions."
+                ),
+            ),
+        ],
+        outputs=[
+            CanonicalOutput(
+                canonical_table=CODE_DEFINITIONS_TABLE,
+                reads=(CODE_DEFINITIONS_TABLE,),
+                promote=_promote,
+                validate_staging=_validate,
+                description=_CODE_DEFINITIONS_DESC,
+                public_health_relevance=_CODE_DEFINITIONS_PHR,
+            ),
+        ],
+        ensure_staging=_ensure_staging,
+        ensure_canonical=_ensure_canonical,
+        update_semantics="full_refresh",
+        static=True,
+    )
+    build_reference(spec)
+    log.info("RUCA code-definitions build complete")
+
+
 def _record(
     ctx: BuildContext, table: str, check_name: str, category: DQCategory, passed: bool,
     failing: int, total: int, details: dict[str, Any] | None, *,
@@ -865,7 +1044,7 @@ def build_ruca_layered(
     level: str = "both",
     vintages: tuple[int, ...] | None = None,
 ) -> None:
-    """Build RUCA tract and/or zip on the shared builder (one Spark session for both specs)."""
+    """Build RUCA tract and/or zip and/or code definitions on the shared builder (one session)."""
     spark = SparkSession.builder.getOrCreate()
     tract_vintages = (
         tuple(v for v in vintages if v in TRACT_VINTAGES) if vintages else TRACT_VINTAGES
@@ -880,17 +1059,25 @@ def build_ruca_layered(
         _build_zip(source_catalog=source_catalog, model_catalog=model_catalog,
                    data_engineers_group=data_engineers_group, analysts_group=analysts_group,
                    vintages=zip_vintages, spark=spark)
+    # Static lookup (no vintage): built for "definitions" and as part of "both". Vintage subsetting
+    # does not apply -- it is a single generated table covering every version.
+    if level in ("definitions", "both"):
+        _build_code_definitions(source_catalog=source_catalog, model_catalog=model_catalog,
+                                data_engineers_group=data_engineers_group,
+                                analysts_group=analysts_group, spark=spark)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-catalog", required=True, help="Source catalog for raw (ecdh_<env>).")
     parser.add_argument("--model-catalog", required=True, help="Model catalog for canonical (ecdh_model_<env>).")
-    parser.add_argument("--level", choices=["tract", "zip", "both"], default="both",
-                        help="Which RUCA table(s) to build. Default: both.")
+    parser.add_argument("--level", choices=["tract", "zip", "definitions", "both"], default="both",
+                        help="Which RUCA table(s) to build. 'both' builds tract + zip + the static "
+                             "code-definitions lookup. Default: both.")
     parser.add_argument("--vintages", default=None,
                         help="Comma-separated subset (e.g. 2020). Default: full per-level set "
-                             "(tract 1990/2000/2010/2020, zip 2010/2020).")
+                             "(tract 1990/2000/2010/2020, zip 2010/2020). Ignored for the static "
+                             "code-definitions lookup.")
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
     parser.add_argument("--analysts-group", default="ecdh-analysts")
     args = parser.parse_args()
