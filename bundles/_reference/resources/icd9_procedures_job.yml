@@ -2,13 +2,17 @@
 #
 # Downloads the CMS ICD-9-CM Version 32 master-descriptions zip over public HTTPS (no
 # credential -- U.S. Government work, public domain), extracts the procedure (SG) long +
-# short title files, joins them by code, and writes ecdh_model_<env>.codes.icd9_procedures
-# keyed by (icd9_procedure_code, edition_year) using snapshot_replace. Flat: code +
-# short/long title + chapter grouping; no classification hierarchy (contrast codes.icd9cm).
+# short title files, joins them by code. Folded onto the shared build_reference builder
+# (ADR 0037): the descriptions zip lands verbatim in the source-catalog Volume
+# ecdh_<env>.codes_raw._landing (ADR 0039), parses into the 1:1 raw table
+# ecdh_<env>.codes_raw.icd9_procedures, and the canonical ecdh_model_<env>.codes.icd9_procedures
+# is promoted from raw, keyed by (icd9_procedure_code, edition_year) with atomic replaceWhere
+# (vintage_snapshot; ADR 0034). Flat: code + short/long title + chapter grouping; no
+# classification hierarchy (contrast codes.icd9cm).
 #
 # ICD-9-CM is frozen (Version 32 is the final release, valid through 2015-09-30), so this is
-# a single edition (--edition-year 2015). Thin entrypoint over the run_build seam (ADR 0027);
-# re-pullable, so vintage-reproducible (ADR 0024).
+# a single, immutable edition (--edition-year 2015; PER_VINTAGE_IMMUTABLE landing, fetch-once).
+# Re-pullable, so vintage-reproducible (ADR 0024).
 #
 # Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**) but triggered
 # from the UI. The CMS direct-download slug is JavaScript-rendered; if the default 404s, pass
@@ -32,7 +36,9 @@ resources:
           spark_python_task:
             python_file: ../src/build_icd9_procedures.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               - "--edition-year"
               - "2015"
