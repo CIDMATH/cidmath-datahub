@@ -254,6 +254,25 @@ resources:
               - "${var.analysts_group}"
           environment_key: geography_layered_env
 
+        # Augmenting table (ADR 0038): static RUCA code-definitions lookup (version-specific
+        # primary/secondary descriptions, v1.11 / v2.0 / v3.x). Generated from reference/ruca.py --
+        # no download, no vintage, no upstream dependency.
+        - task_key: us_ruca_code_definitions
+          spark_python_task:
+            python_file: ../src/build_ruca.py
+            parameters:
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
+              - "${var.model_catalog}"
+              - "--level"
+              - "definitions"
+              - "--data-engineers-group"
+              - "${var.data_engineers_group}"
+              - "--analysts-group"
+              - "${var.analysts_group}"
+          environment_key: geography_layered_env
+
       environments:
         - environment_key: geography_layered_env
           spec:

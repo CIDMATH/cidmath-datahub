@@ -5,9 +5,17 @@ table (``geography.us_ruca_tract``) and a ZIP-code table (``geography.us_ruca_zi
 is the USDA Economic Research Service's sub-county rural/urban classification -- a tract is
 assigned a **primary** code (whole number ``1``-``10``, plus ``99`` for water/zero-population
 tracts) encoding its urban-core class and largest commuting flow, and a **secondary** code
-(``1.0`` .. ``10.3``, plus ``99``) subdividing it by the second-largest flow. Both levels are
+(e.g. ``1.0`` .. ``10.6``, plus ``99``) subdividing it by the second-largest flow. Both levels are
 stored verbatim; combining them flexibly is the point of the scheme, so we derive no single
 rural/urban flag (ADR 0038).
+
+The RUCA coding scheme is **versioned**: the code values, the secondary set, and the descriptions
+differ by version, keyed to the vintage (1990 -> v1.11, 2000 -> v2.0, 2010/2020 -> v3.x current).
+The controlled vocabularies + descriptions are therefore version-keyed (see the ``*_BY_VERSION``
+registries and ``RUCA_VERSION_BY_VINTAGE``), and validation is version-aware -- a 1990 row is
+checked against v1.11, a 2020 row against v3.x. The version-specific descriptions are also
+surfaced as queryable data by the ``geography.us_ruca_code_definitions`` lookup (built from
+:func:`code_definitions`).
 
 This module is the single source of truth for RUCA code sets, identifier normalization, code
 validation, source-header resolution, and the pure DQ helpers. It holds **no Spark and no IO**
@@ -70,12 +78,54 @@ TRACT_GEOID_WIDTH = 11
 ZIP_CODE_WIDTH = 5
 
 # ---------------------------------------------------------------------------
-# Canonical RUCA code sets (single-sourced here; ADR 0006/0016) -- from the ERS
-# documentation "Primary RUCA codes, 2020" and "Secondary RUCA codes, 2020" tables.
+# Versioned RUCA code vocabularies (single-sourced here; ADR 0006/0016/0038).
+#
+# RUCA's coding scheme is **versioned**, and the code values, secondary sets, AND descriptions
+# differ by version -- this is not just wording (ADR 0038). Each decennial vintage is coded to a
+# specific RUCA version, so the controlled vocabulary + descriptions must be keyed to the version:
+#
+#   vintage 1990 -> v1_11  (UW WWAMI RHRC, https://depts.washington.edu/uwruca/ruca1/ruca-codes11.php)
+#   vintage 2000 -> v2_0   (UW WWAMI RHRC, https://depts.washington.edu/uwruca/ruca-codes.php)
+#   vintage 2010 -> v3_x   (USDA ERS "Primary/Secondary RUCA codes, 2010" tables -- current)
+#   vintage 2020 -> v3_x   (USDA ERS "Primary/Secondary RUCA codes, 2020" tables -- current)
+#
+# The primary codes are 1-10 (+ ``99``) in every version, but the *terminology* differs (v1.11's
+# "urban core / large town / small town" vs the modern "metropolitan / micropolitan"). The
+# **secondary** sets genuinely differ: v1.11 has a unique ``2.2`` and lacks ``4.2``/``5.2``/``6.1``/
+# ``10.6``; v2.0 carries the full ``x.2``/``6.1``/``10.6`` secondaries the modern ERS product drops.
+# So a 1990/2000 row must be validated + labelled against *its* version's vocabulary, not the modern
+# set. Descriptions live as version-keyed constants here and are surfaced as queryable data by the
+# ``geography.us_ruca_code_definitions`` lookup the build materializes from them.
+#
+# The ``99`` (zero-population / no-data) code is a modern (v3_x) convention. Whether the legacy
+# 1990/2000 ERS media ``.xls`` files use ``99`` or a different missing indicator is not yet
+# confirmed from the source files; ``99`` is accepted in every version's set so a zero-population
+# tract does not fail the blocking vocab DQ, and a genuinely different sentinel in the older files
+# would surface as an out-of-vocab row for a human to add. VERIFY against the 1990/2000 files in
+# dev (ADR 0038).
 # ---------------------------------------------------------------------------
 
-#: The 10 primary RUCA codes + ``99`` (water/zero-population), code -> description.
-PRIMARY_RUCA_DESCRIPTIONS: dict[int, str] = {
+#: Ordered RUCA code-scheme versions (oldest -> current).
+RUCA_VERSIONS: tuple[str, ...] = ("v1_11", "v2_0", "v3_x")
+
+#: The current (modern ERS 2010/2020) version -- the default when no vintage/version is given.
+DEFAULT_RUCA_VERSION = "v3_x"
+
+#: Decennial RUCA vintage -> code-scheme version (ADR 0038).
+RUCA_VERSION_BY_VINTAGE: dict[int, str] = {1990: "v1_11", 2000: "v2_0", 2010: "v3_x", 2020: "v3_x"}
+
+#: UW/ERS code-definition source page per version (recorded in the lookup's provenance). The
+#: 1990/2000 code semantics are UW WWAMI RHRC-authored (original RUCA authors); 2010/2020 are ERS.
+CODE_DEFINITION_SOURCE_URL_BY_VERSION: dict[str, str] = {
+    "v1_11": "https://depts.washington.edu/uwruca/ruca1/ruca-codes11.php",
+    "v2_0": "https://depts.washington.edu/uwruca/ruca-codes.php",
+    "v3_x": SOURCE_DOC_URL,
+}
+
+# --- v3_x (modern ERS, vintages 2010/2020) -- the current vocabulary, unchanged ---------------
+
+#: v3_x primary codes 1-10 + ``99``, code -> description (ERS "Primary RUCA codes" table).
+PRIMARY_RUCA_DESCRIPTIONS_V3_X: dict[int, str] = {
     1: "Metropolitan core: primary flow within an urban area of 50,000+ (metro UA)",
     2: "Metropolitan high commuting: primary flow 30%+ to a metro UA",
     3: "Metropolitan low commuting: primary flow 10%-30% to a metro UA",
@@ -89,11 +139,8 @@ PRIMARY_RUCA_DESCRIPTIONS: dict[int, str] = {
     99: "Not coded: water/zero-population tract (zero population and zero land area)",
 }
 
-#: Valid primary codes (controlled vocab; ADR 0016).
-PRIMARY_RUCA_CODES: frozenset[int] = frozenset(PRIMARY_RUCA_DESCRIPTIONS)
-
-#: The 21 published secondary codes + ``99``, code -> description (canonical dotted form).
-SECONDARY_RUCA_DESCRIPTIONS: dict[str, str] = {
+#: v3_x secondary codes (21 published + ``99``), code -> description (ERS "Secondary RUCA codes").
+SECONDARY_RUCA_DESCRIPTIONS_V3_X: dict[str, str] = {
     "1.0": "No additional code",
     "1.1": "Secondary flow 30%-50% to a larger UA",
     "2.0": "No additional code",
@@ -118,8 +165,219 @@ SECONDARY_RUCA_DESCRIPTIONS: dict[str, str] = {
     "99": "Not coded: water/zero-population tract",
 }
 
-#: Valid secondary codes (controlled vocab; ADR 0016).
-SECONDARY_RUCA_CODES: frozenset[str] = frozenset(SECONDARY_RUCA_DESCRIPTIONS)
+# --- v2_0 (vintage 2000; UW WWAMI RHRC "Code Definitions: Version 2.0") -------------------------
+# Modern-style terminology (Metropolitan area / Urban Cluster (UC) / small town / rural areas), but
+# a wider secondary set than v3_x: v2.0 keeps the ``x.2`` "10%-29%" secondaries and ``6.1``/``10.6``
+# that the modern ERS product dropped. UA=Urbanized Area, UC=Urban Cluster; "large UC" =
+# 10,000-49,999 ("micropolitan"), "small UC" = 2,500-9,999.
+
+#: v2_0 primary codes, code -> description (UW v2.0).
+PRIMARY_RUCA_DESCRIPTIONS_V2_0: dict[int, str] = {
+    1: "Metropolitan area core: primary flow within an Urbanized Area (UA)",
+    2: "Metropolitan area high commuting: primary flow 30% or more to a UA",
+    3: "Metropolitan area low commuting: primary flow 10% to 30% to a UA",
+    4: (
+        "Micropolitan area core: primary flow within an Urban Cluster (UC) of 10,000-49,999 "
+        "(large UC)"
+    ),
+    5: "Micropolitan high commuting: primary flow 30% or more to a large UC",
+    6: "Micropolitan low commuting: primary flow 10% to 30% to a large UC",
+    7: "Small town core: primary flow within an Urban Cluster of 2,500-9,999 (small UC)",
+    8: "Small town high commuting: primary flow 30% or more to a small UC",
+    9: "Small town low commuting: primary flow 10% through 29% to a small UC",
+    10: "Rural areas: primary flow to a tract outside a UA or UC (including self)",
+    99: "Not coded: zero-population/no-data tract (verify sentinel against the 2000 source file)",
+}
+
+#: v2_0 secondary codes, code -> description (UW v2.0).
+SECONDARY_RUCA_DESCRIPTIONS_V2_0: dict[str, str] = {
+    "1.0": "No additional code",
+    "1.1": "Secondary flow 30% through 49% to a larger UA",
+    "2.0": "No additional code",
+    "2.1": "Secondary flow 30% through 49% to a larger UA",
+    "3.0": "No additional code",
+    "4.0": "No additional code",
+    "4.1": "Secondary flow 30% through 49% to a UA",
+    "4.2": "Secondary flow 10% through 29% to a UA",
+    "5.0": "No additional code",
+    "5.1": "Secondary flow 30% through 49% to a UA",
+    "5.2": "Secondary flow 10% through 29% to a UA",
+    "6.0": "No additional code",
+    "6.1": "Secondary flow 10% through 29% to a UA",
+    "7.0": "No additional code",
+    "7.1": "Secondary flow 30% through 49% to a UA",
+    "7.2": "Secondary flow 30% through 49% to a large UC",
+    "7.3": "Secondary flow 10% through 29% to a UA",
+    "7.4": "Secondary flow 10% through 29% to a large UC",
+    "8.0": "No additional code",
+    "8.1": "Secondary flow 30% through 49% to a UA",
+    "8.2": "Secondary flow 30% through 49% to a large UC",
+    "8.3": "Secondary flow 10% through 29% to a UA",
+    "8.4": "Secondary flow 10% through 29% to a large UC",
+    "9.0": "No additional code",
+    "9.1": "Secondary flow 10% through 29% to a UA",
+    "9.2": "Secondary flow 10% through 29% to a large UC",
+    "10.0": "No additional code",
+    "10.1": "Secondary flow 30% through 49% to a UA",
+    "10.2": "Secondary flow 30% through 49% to a large UC",
+    "10.3": "Secondary flow 30% through 49% to a small UC",
+    "10.4": "Secondary flow 10% through 29% to a UA",
+    "10.5": "Secondary flow 10% through 29% to a large UC",
+    "10.6": "Secondary flow 10% through 29% to a small UC",
+    "99": "Not coded: zero-population/no-data tract (verify sentinel against the 2000 source file)",
+}
+
+# --- v1_11 (vintage 1990; UW WWAMI RHRC "RUCA Version 1.1 Code Definitions") --------------------
+# Older terminology: "urban core / large town / small town / isolated small rural" and "Urban Place"
+# rather than "Urban Cluster". Distinct secondary set: unique ``2.2`` (combined flows), and it
+# lacks ``4.2``/``5.2``/``6.1``/``10.6``. Thresholds are also stated differently (5-30% vs 10-29%).
+# ``x.0`` is UW's "otherwise" (no qualifying secondary flow); stored as "No additional code".
+
+#: v1_11 primary codes, code -> description (UW v1.11).
+PRIMARY_RUCA_DESCRIPTIONS_V1_11: dict[int, str] = {
+    1: (
+        "Urban core Census tract: primary flow within a Census Bureau Urbanized Area "
+        "(metro >= 50,000)"
+    ),
+    2: "Census tract strongly tied to urban core: primary flow to an Urbanized Area (>30%)",
+    3: "Census tract weakly tied to urban core: primary flow to an Urbanized Area but 5-30%",
+    4: "Large town Census tract: primary flow within a large Urban Place (10,000-49,999 & >30%)",
+    5: "Census tract strongly tied to large town: primary flow to a large Urban Place (>30%)",
+    6: "Census tract weakly tied to large town: primary flow to a large Urban Place (5-30%)",
+    7: (
+        "Small town Census tract: primary flow within a small Urban Place "
+        "(>= 2,500 & <10,000 & >30%)"
+    ),
+    8: "Census tract strongly tied to small town: primary flow to a small Urban Place (>30%)",
+    9: "Census tract weakly tied to small town: primary flow to a small Urban Place (5-30%)",
+    10: (
+        "Isolated small rural Census tract: no primary flow over 5% to any Urbanized Area or "
+        "Urban Place"
+    ),
+    99: "Not coded: zero-population/no-data tract (verify sentinel against the 1990 source file)",
+}
+
+#: v1_11 secondary codes, code -> description (UW v1.11).
+SECONDARY_RUCA_DESCRIPTIONS_V1_11: dict[str, str] = {
+    "1.0": "No additional code",
+    "1.1": "Secondary flow (30-50%) to a larger urbanized area",
+    "2.0": "No additional code",
+    "2.1": "Secondary flow (30-50%) to a larger urbanized area",
+    "2.2": "Combined flows to urbanized areas of >30% and greater than the primary flow",
+    "3.0": "No additional code",
+    "4.0": "No additional code",
+    "4.1": "Secondary flow (30-50%) to an urbanized area",
+    "5.0": "No additional code",
+    "5.1": "Secondary flow (30-50%) to an urbanized area",
+    "6.0": "No additional code",
+    "7.0": "No additional code",
+    "7.1": "Secondary flow (30-50%) to an urbanized area",
+    "7.2": "Secondary flow (30-50%) to a large urban place",
+    "7.3": "Secondary flow (5-30%) to an urbanized area",
+    "7.4": "Secondary flow (5-30%) to a large urban place",
+    "8.0": "No additional code",
+    "8.1": "Secondary flow (30-50%) to an urbanized area",
+    "8.2": "Secondary flow (30-50%) to a large urban place",
+    "8.3": "Secondary flow (5-30%) to an urbanized area",
+    "8.4": "Secondary flow (5-30%) to a large urban place",
+    "9.0": "No additional code",
+    "9.1": "Secondary flow (5-30%) to an urbanized area",
+    "9.2": "Secondary flow (5-30%) to a large urban place",
+    "10.0": "No additional code",
+    "10.1": "Secondary flow (30-50%) to an urbanized area",
+    "10.2": "Secondary flow (30-50%) to a large urban place",
+    "10.3": "Secondary flow (30-50%) to a small urban place",
+    "10.4": "Secondary flow (5-30%) to an urbanized area",
+    "10.5": "Secondary flow (5-30%) to a large urban place",
+    "99": "Not coded: zero-population/no-data tract (verify sentinel against the 1990 source file)",
+}
+
+# --- Version registries (the version-aware source of truth) ------------------------------------
+
+#: version -> {primary code -> description}.
+PRIMARY_RUCA_DESCRIPTIONS_BY_VERSION: dict[str, dict[int, str]] = {
+    "v1_11": PRIMARY_RUCA_DESCRIPTIONS_V1_11,
+    "v2_0": PRIMARY_RUCA_DESCRIPTIONS_V2_0,
+    "v3_x": PRIMARY_RUCA_DESCRIPTIONS_V3_X,
+}
+
+#: version -> {secondary code -> description}.
+SECONDARY_RUCA_DESCRIPTIONS_BY_VERSION: dict[str, dict[str, str]] = {
+    "v1_11": SECONDARY_RUCA_DESCRIPTIONS_V1_11,
+    "v2_0": SECONDARY_RUCA_DESCRIPTIONS_V2_0,
+    "v3_x": SECONDARY_RUCA_DESCRIPTIONS_V3_X,
+}
+
+#: version -> valid primary codes (controlled vocab; ADR 0016).
+PRIMARY_RUCA_CODES_BY_VERSION: dict[str, frozenset[int]] = {
+    v: frozenset(d) for v, d in PRIMARY_RUCA_DESCRIPTIONS_BY_VERSION.items()
+}
+
+#: version -> valid secondary codes (controlled vocab; ADR 0016).
+SECONDARY_RUCA_CODES_BY_VERSION: dict[str, frozenset[str]] = {
+    v: frozenset(d) for v, d in SECONDARY_RUCA_DESCRIPTIONS_BY_VERSION.items()
+}
+
+# Backward-compatible aliases: the **current** (v3_x) vocabulary. Version-aware callers should use
+# the ``*_BY_VERSION`` registries (or pass ``version=``); these name the default/modern set only.
+PRIMARY_RUCA_DESCRIPTIONS: dict[int, str] = PRIMARY_RUCA_DESCRIPTIONS_V3_X
+SECONDARY_RUCA_DESCRIPTIONS: dict[str, str] = SECONDARY_RUCA_DESCRIPTIONS_V3_X
+PRIMARY_RUCA_CODES: frozenset[int] = PRIMARY_RUCA_CODES_BY_VERSION[DEFAULT_RUCA_VERSION]
+SECONDARY_RUCA_CODES: frozenset[str] = SECONDARY_RUCA_CODES_BY_VERSION[DEFAULT_RUCA_VERSION]
+
+
+def version_for_vintage(vintage: int) -> str:
+    """Return the RUCA code-scheme version for a decennial ``vintage``.
+
+    Unknown vintages fall back to the current version (``v3_x``) so validators never crash on an
+    unexpected vintage; the real vintages (1990/2000/2010/2020) are all mapped explicitly.
+
+    Examples:
+        >>> version_for_vintage(1990)
+        'v1_11'
+        >>> version_for_vintage(2020)
+        'v3_x'
+    """
+    return RUCA_VERSION_BY_VINTAGE.get(vintage, DEFAULT_RUCA_VERSION)
+
+
+@dataclass(frozen=True)
+class RucaCodeDefinition:
+    """One ``geography.us_ruca_code_definitions`` row: a version-specific code label (ADR 0038).
+
+    Makes the version-specific primary/secondary descriptions live as queryable data (keyed by
+    ``(ruca_version, code_level, code)``) rather than only as in-code constants, so a consumer can
+    join a human-readable description per (vintage -> version, code). ``code`` is stored as a string
+    for both levels (``"1"``/``"10"``/``"99"`` for primary, ``"1.0"``/``"10.3"`` for secondary).
+
+    Attributes:
+        ruca_version: RUCA code-scheme version ("v1_11", "v2_0", "v3_x").
+        code_level: "primary" or "secondary".
+        code: The code as a string.
+        description: The version-specific published description.
+    """
+
+    ruca_version: str
+    code_level: str
+    code: str
+    description: str
+
+
+def code_definitions() -> list[RucaCodeDefinition]:
+    """All version-specific RUCA code definitions (primary + secondary, every version).
+
+    The single source for the ``geography.us_ruca_code_definitions`` lookup: a flat projection of
+    the ``*_BY_VERSION`` description registries. Returned in a stable order (version, then primary
+    before secondary, then insertion order of the code).
+    """
+    out: list[RucaCodeDefinition] = []
+    for version in RUCA_VERSIONS:
+        for primary_code, desc in PRIMARY_RUCA_DESCRIPTIONS_BY_VERSION[version].items():
+            out.append(RucaCodeDefinition(version, "primary", str(primary_code), desc))
+        for secondary_code, desc in SECONDARY_RUCA_DESCRIPTIONS_BY_VERSION[version].items():
+            out.append(RucaCodeDefinition(version, "secondary", secondary_code, desc))
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Identifier + code normalization
@@ -203,30 +461,42 @@ def normalize_secondary_code(value: str | int | float) -> str:
     return f"{int(s)}.0"
 
 
-def validate_primary_code(code: int) -> bool:
-    """Return True if ``code`` is one of the valid primary RUCA codes (1-10 or 99).
+def validate_primary_code(code: int, version: str = DEFAULT_RUCA_VERSION) -> bool:
+    """Return True if ``code`` is a valid primary RUCA code for ``version`` (1-10 or 99).
+
+    Primary codes are 1-10 (+ ``99``) in every version, but the parameter keeps the primary and
+    secondary validators symmetric and future-proofs a version whose primary set diverges. Use
+    :func:`version_for_vintage` to resolve the version from a vintage.
 
     Examples:
         >>> validate_primary_code(1)
         True
         >>> validate_primary_code(11)
         False
+        >>> validate_primary_code(2, "v1_11")
+        True
     """
-    return code in PRIMARY_RUCA_CODES
+    return code in PRIMARY_RUCA_CODES_BY_VERSION[version]
 
 
-def validate_secondary_code(code: str) -> bool:
-    """Return True if ``code`` is one of the published secondary RUCA codes.
+def validate_secondary_code(code: str, version: str = DEFAULT_RUCA_VERSION) -> bool:
+    """Return True if ``code`` is a published secondary RUCA code for ``version``.
 
-    Expects already-normalized input (see :func:`normalize_secondary_code`).
+    Secondary sets differ by version (e.g. ``2.2`` is valid only in v1.11; ``10.6`` only in v2.0).
+    Expects already-normalized input (see :func:`normalize_secondary_code`). Use
+    :func:`version_for_vintage` to resolve the version from a vintage.
 
     Examples:
         >>> validate_secondary_code("10.3")
         True
         >>> validate_secondary_code("10.9")
         False
+        >>> validate_secondary_code("2.2", "v1_11")
+        True
+        >>> validate_secondary_code("2.2", "v3_x")
+        False
     """
-    return code in SECONDARY_RUCA_CODES
+    return code in SECONDARY_RUCA_CODES_BY_VERSION[version]
 
 
 # ---------------------------------------------------------------------------
@@ -581,21 +851,26 @@ def find_bad_zip_codes(records: list[RucaZipRecord]) -> list[str]:
 def find_invalid_primary_codes(records: Iterable[Any]) -> list[tuple[str, int]]:
     """Return ``(id, primary_ruca)`` for records whose primary code is out of vocab (blocking).
 
-    Works for either record type: the id is the GEOID (tract) or ZIP code, whichever the record
-    carries.
+    Each record is validated against **its own vintage's** RUCA version (ADR 0038): a 1990 row is
+    checked against v1.11, a 2020 row against v3_x. Works for either record type: the id is the
+    GEOID (tract) or ZIP code, whichever the record carries.
     """
     out: list[tuple[str, int]] = []
     for r in records:
-        if not validate_primary_code(r.primary_ruca):
+        if not validate_primary_code(r.primary_ruca, version_for_vintage(r.vintage)):
             out.append((_record_id(r), r.primary_ruca))
     return out
 
 
 def find_invalid_secondary_codes(records: Iterable[Any]) -> list[tuple[str, str]]:
-    """Return ``(id, secondary_ruca)`` for records with an out-of-vocab secondary (blocking)."""
+    """Return ``(id, secondary_ruca)`` for records with an out-of-vocab secondary (blocking).
+
+    Each record is validated against **its own vintage's** RUCA version (ADR 0038), so v1.11's
+    ``2.2`` and v2.0's ``10.6`` pass for 1990/2000 rows but fail for a modern (v3_x) vintage.
+    """
     out: list[tuple[str, str]] = []
     for r in records:
-        if not validate_secondary_code(r.secondary_ruca):
+        if not validate_secondary_code(r.secondary_ruca, version_for_vintage(r.vintage)):
             out.append((_record_id(r), r.secondary_ruca))
     return out
 
@@ -606,7 +881,10 @@ def _record_id(record: Any) -> str:
 
 
 def primary_distribution(records: Iterable[Any]) -> dict[int, int]:
-    """``{primary_ruca: count}`` over records (backs the distribution WARN)."""
+    """``{primary_ruca: count}`` over records (backs the distribution WARN).
+
+    (Version-aware vocabulary added under ADR 0038; see the ``*_BY_VERSION`` registries above.)
+    """
     dist: dict[int, int] = {}
     for r in records:
         dist[r.primary_ruca] = dist.get(r.primary_ruca, 0) + 1
