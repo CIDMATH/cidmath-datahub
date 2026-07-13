@@ -139,8 +139,9 @@ _CORE_DESC = (
 )
 _MAP_DESC = (
     "LOINC deprecated->replacement map (MapTo.csv): when LOINC retires a term it publishes the "
-    "successor here, so retired codes can be remapped to current ones. PK (loinc_num, "
-    "loinc_version); FK loinc_num and map_to_loinc_num -> codes.loinc (same version)."
+    "successor here, so retired codes can be remapped to current ones. A deprecated code may map "
+    "to several replacements, so PK (loinc_num, map_to_loinc_num, loinc_version); FK loinc_num and "
+    "map_to_loinc_num -> codes.loinc (same version)."
 )
 _CORE_PHR = (
     "Canonical standard for lab/observation data; lets results feeds conform to shared, versioned "
@@ -447,10 +448,13 @@ def run(
         n = len(maps)
         failures: list[str] = []
 
+        # A deprecated LOINC can map to several replacements, so the PK is the (deprecated,
+        # replacement) pair per version -- (loinc_num, map_to_loinc_num, loinc_version), matching
+        # loinc.find_duplicate_map_keys -- not loinc_num alone.
         dq = make_staging_dq(ctx, staging_fqn, record_table=record_table, where=where)
-        if not dq.unique(keys=["loinc_num", "loinc_version"],
+        if not dq.unique(keys=["loinc_num", "map_to_loinc_num", "loinc_version"],
                          check_name="loinc_map_to_key_uniqueness", raise_on_fail=False):
-            failures.append("duplicate (loinc_num, loinc_version)")
+            failures.append("duplicate (loinc_num, map_to_loinc_num, loinc_version)")
 
         miss = loinc.find_missing_map_fields(maps)
         _record(ctx, record_table, "loinc_map_to_required_fields_not_null", DQCategory.NULLABILITY,
