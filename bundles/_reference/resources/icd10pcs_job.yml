@@ -3,12 +3,14 @@
 # Downloads the CMS ICD-10-PCS order file for the requested fiscal-year edition(s)
 # over public HTTPS (no credential -- U.S. Government work, public domain), overlays
 # the Apr-1 mid-year (New Technology) update where published (--midyear-update auto),
-# parses/validates via cidmath_datahub.reference.icd10pcs, and writes
-# ecdh_model_<env>.codes.icd10pcs keyed by (icd10pcs_code, edition_year) using
-# snapshot_replace (editions retained; ICD-10 per-version model, NOT ADR 0032).
-# Flat: code + short/long title + Section grouping; no axis decomposition / GEMs.
+# parses/validates via cidmath_datahub.reference.icd10pcs. Folded onto the shared
+# build_reference builder (ADR 0037): the order file lands verbatim in the source-catalog
+# Volume ecdh_<env>.codes_raw._landing (ADR 0039), parses into the 1:1 raw table
+# ecdh_<env>.codes_raw.icd10pcs, and the canonical ecdh_model_<env>.codes.icd10pcs is
+# promoted from raw, keyed by (icd10pcs_code, edition_year) with per-edition atomic
+# replaceWhere (vintage_snapshot; ADR 0034). Flat: code + short/long title + Section grouping.
 #
-# Thin entrypoint over the run_build seam (ADR 0027). Editions are re-pullable, so
+# Editions are re-pullable and immutable (PER_VINTAGE_IMMUTABLE landing, fetch-once), so
 # the table is vintage-reproducible (ADR 0024).
 #
 # Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**) but
@@ -35,7 +37,9 @@ resources:
           spark_python_task:
             python_file: ../src/build_icd10pcs.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               - "--edition-year"
               - "2026"

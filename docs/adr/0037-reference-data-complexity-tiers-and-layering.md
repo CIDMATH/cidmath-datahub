@@ -163,3 +163,19 @@ first — it builds the ADR 0036 builder — but note it is **not greenfield**: 
 **migration** of the existing levels (state → county → tract → block-group → block; decision 7 bound c
 + the cutover note above), since block-group/block enrich from their parents same-catalog. Then the
 ICD-10-CM relayer reuses the builder.
+
+## Applied — codes backport wave 1 (ICD-10-PCS + ICD-9 Procedures)
+The `codes` subject's model-only medical-code builds are being folded onto `build_reference` the same
+way RUCA was (ADR 0038 delta 6). **Wave 1 (this change):** the two flat, public, single-payload
+builds — `codes.icd10pcs` and `codes.icd9_procedures` — are done. Each now: lands its CMS zip verbatim
+in the source-catalog Volume `ecdh_<env>.codes_raw._landing` (ADR 0039, `PER_VINTAGE_IMMUTABLE`,
+fetch-once), parses into the 1:1 raw table `ecdh_<env>.codes_raw.<table>`, and promotes the canonical
+`ecdh_model_<env>.codes.<table>` from raw via the builder (per-edition atomic `replaceWhere`, `_ops`
+registration, grants — all builder-owned). These are the **first builds to use a non-default
+`vintage_column` (`edition_year`)**, exercising the builder's generic per-vintage write path. The
+hand-rolled `run_build` write/register/grant and the `_current` views are removed (ADR 0034: "current"
+= `MAX(edition_year)` / the live idiom, matching the RUCA fold). Canonical schemas + rows are
+unchanged — a build-mechanism fold-in with data parity; consumers unaffected. The pure parsers in
+`reference/icd10pcs.py` / `reference/icd9_procedures.py` are reused unchanged. **Deferred to later
+waves:** CVX/NDC (revise-in-place + Volume relocation), the authenticated sets (LOINC/RxNorm/SNOMED),
+and the multi-source hierarchical ICD-CM.
