@@ -7,8 +7,12 @@
 # /block from the tabular XML; --hierarchy build; ADR 0030). Parses/validates via
 # cidmath_datahub.reference.icd10cm and writes ecdh_model_<env>.codes.icd10cm keyed by
 # (icd10cm_code, edition_year).
-# Thin entrypoint over the run_build seam (ADR 0027); editions are re-pullable,
-# so the table is vintage-reproducible (full_refresh per edition; ADR 0007/0024).
+# Folded onto the shared build_reference builder (ADR 0037): per-edition payloads
+# (base order file + optional Apr-1 update + tabular XML) land verbatim in the
+# source-catalog Volume ecdh_<env>.codes_raw._landing (ADR 0039), combine into the
+# 1:1 raw table ecdh_<env>.codes_raw.icd10cm, and promote to the canonical
+# ecdh_model_<env>.codes.icd10cm with per-edition atomic replaceWhere (vintage_snapshot;
+# ADR 0034 -- the full_refresh->vintaged tidy-up). Editions are immutable + re-pullable.
 #
 # Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**)
 # but triggered from the UI -- only build_time_reference auto-runs. To load more
@@ -31,7 +35,9 @@ resources:
           spark_python_task:
             python_file: ../src/build_icd10cm.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               - "--edition-year"
               - "2026"
