@@ -8,6 +8,7 @@ two-phase build flow needs Spark and is exercised by the build jobs.
 from __future__ import annotations
 
 import os
+from datetime import date
 
 import pytest
 
@@ -334,3 +335,38 @@ class TestVolumeCompletion:
         (d / "partial.zip").write_text("x")
         rb._reset_volume_dir(str(d))
         assert d.is_dir() and not os.listdir(d)
+
+
+@pytest.mark.unit
+class TestVintageRendering:
+    """int / date / str vintage keys render correctly for the replaceWhere predicate + path."""
+
+    def test_int_vintage_is_bare(self):
+        assert rb._vintage_sql_literal(2020) == "2020"
+        assert rb._vintage_path_token(2020) == "2020"
+
+    def test_date_vintage_is_a_date_literal(self):
+        v = date(2026, 7, 13)
+        assert rb._vintage_sql_literal(v) == "DATE'2026-07-13'"
+        assert rb._vintage_path_token(v) == "2026-07-13"
+
+    def test_str_vintage_is_quoted(self):
+        assert rb._vintage_sql_literal("2024AB") == "'2024AB'"
+        assert rb._vintage_path_token("2024AB") == "2024AB"
+
+    def test_str_vintage_escapes_single_quotes(self):
+        # Defend the predicate against an embedded quote (SQL literal safety).
+        assert rb._vintage_sql_literal("a'b") == "'a''b'"
+
+    def test_path_token_sanitizes_unsafe_chars(self):
+        assert rb._vintage_path_token("2024/AB") == "2024_AB"
+
+    def test_date_checked_before_int(self):
+        # date is not an int subclass, but assert the intended branch order holds.
+        assert rb._vintage_sql_literal(date(2000, 1, 1)).startswith("DATE'")
+
+    def test_snapshot_date_spec_is_valid(self):
+        # A revise-in-place spec keys on a DATE column; the builder must accept a non-"vintage"
+        # vintage_column with no int assumption at construction time (CVX/NDC; ADR 0032).
+        s = _spec(vintage_column="snapshot_date", update_semantics="vintage_snapshot")
+        assert s.vintage_column == "snapshot_date"

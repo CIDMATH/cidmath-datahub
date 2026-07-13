@@ -1,14 +1,15 @@
 # Job that builds the canonical codes.cvx reference table (ADR 0014, ADR 0032).
 #
-# Fetches the CDC IIS CVX "Vaccine Administered" XML-new report, writes the raw
-# payload verbatim to an immutable date-stamped file on the codes.cvx_raw UC
-# Volume, and writes ecdh_model_<env>.codes.cvx keyed by (cvx_code, snapshot_date)
-# using snapshot_replace (every snapshot retained; ADR 0032). Parses/validates via
-# cidmath_datahub.reference.cvx. Also (re)creates the codes.cvx_current view.
+# Fetches the CDC IIS CVX "Vaccine Administered" XML-new report. Folded onto the
+# shared build_reference builder (ADR 0037): the XML lands verbatim in the source-
+# catalog Volume ecdh_<env>.codes_raw._landing (immutable, keyed by snapshot_date;
+# ADR 0039), parses into the 1:1 raw table ecdh_<env>.codes_raw.cvx, and the canonical
+# ecdh_model_<env>.codes.cvx is promoted from raw keyed by (cvx_code, snapshot_date)
+# with per-snapshot atomic replaceWhere (vintage_snapshot; ADR 0034). The old model-
+# catalog codes.cvx_raw Volume is relocated here; see the wave-2 relocation runbook.
 #
-# Thin entrypoint over the run_build seam (ADR 0027). CVX is revised in place, so
-# history is preserved by us: raw Volume snapshot + in-table snapshot_date tracking
-# (ADR 0032). snapshot_date defaults to the run date.
+# CVX is revised in place, so history is preserved: immutable raw Volume snapshot +
+# in-table snapshot_date tracking (ADR 0032). snapshot_date defaults to the run date.
 #
 # Scheduled annually (06:00 ET on Jan 15). Re-running the same day is idempotent:
 # the immutable Volume file is not overwritten and snapshot_replace replaces only
@@ -38,7 +39,9 @@ resources:
           spark_python_task:
             python_file: ../src/build_cvx.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               - "--data-engineers-group"
               - "${var.data_engineers_group}"

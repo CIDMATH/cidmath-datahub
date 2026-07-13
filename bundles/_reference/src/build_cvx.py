@@ -1,43 +1,39 @@
-"""Build the canonical ``codes.cvx`` reference table (ADR 0014, ADR 0032).
+"""Build the canonical ``codes.cvx`` reference table on the shared builder (ADR 0037/0039/0032).
 
-CVX is the CDC IIS "Vaccine Administered" code set -- the canonical vaccine codes
-that vaccine surveillance / clinical feeds conform to. This entrypoint is the thin
-IO + Spark layer over the pure logic in ``cidmath_datahub.reference.cvx`` (ADR
-0011). It is **flat** -- one row per CVX code, no classification hierarchy (unlike
-``codes.icd10cm`` / ``codes.icd9cm``).
+CVX is the CDC IIS "Vaccine Administered" code set -- the canonical vaccine codes that vaccine
+surveillance / clinical feeds conform to. This entrypoint is the thin IO + Spark layer over the
+pure logic in ``cidmath_datahub.reference.cvx`` (ADR 0011). It is **flat** -- one row per CVX code,
+no classification hierarchy.
 
-History model (ADR 0032). CVX is revised in place and CDC publishes only the
-*current* list, so we preserve history ourselves with two paired mechanisms:
+**Source-path fold-in (ADR 0037 backport, wave 2).** Previously model-only + hand-rolled on
+``run_build``, with the immutable raw XML snapshots on a Volume in the *model* catalog
+(``codes.cvx_raw``). Now folded onto the shared ``build_reference`` builder: the CVX XML-new lands
+verbatim in the *source*-catalog landing Volume ``ecdh_<env>.codes_raw._landing`` (ADR 0039), parses
+into the 1:1 raw table ``ecdh_<env>.codes_raw.cvx``, and the canonical ``ecdh_model_<env>.codes.cvx``
+is promoted from raw. Same schema, same rows -- a build-mechanism fold-in with data parity;
+consumers unaffected. The builder owns the per-snapshot atomic ``replaceWhere``, ``_ops``
+registration, and grants.
 
-  1. **Raw immutable Volume snapshot.** Each run writes the fetched XML-new
-     verbatim to a date-stamped file on a UC Volume
-     (``/Volumes/<catalog>/codes/<volume>/cvx_<YYYY-MM-DD>.xml``) and **never
-     overwrites** an existing date -- the full-fidelity record, since the source
-     cannot reproduce past states. A same-day re-run reads the existing file
-     instead of re-writing it, so the table always reflects the immutable file.
-  2. **In-table revision tracking via ``snapshot_replace``.** ``codes.cvx`` is
-     keyed by ``(cvx_code, snapshot_date)``; each run DELETEs only its own
-     ``snapshot_date`` rows and appends, leaving prior snapshots intact (the
-     geography per-vintage replace, ADR 0024, with ``snapshot_date`` as the
-     vintage key). "Current" is the latest ``snapshot_date``, optionally exposed
-     via the ``codes.cvx_current`` view.
+History model (ADR 0032) -- preserved. CVX is revised in place and CDC publishes only the *current*
+list, so we snapshot it: ``codes.cvx`` is keyed ``(cvx_code, snapshot_date)`` and each run replaces
+only its own ``snapshot_date`` (``vintage_column="snapshot_date"``), leaving prior snapshots intact.
+The raw payload is landed **``PER_VINTAGE_IMMUTABLE`` keyed by the snapshot_date** -- so the Volume
+dir (``.../cvx/vintage=<YYYY-MM-DD>``), the immutability ("never overwrite an existing date"), and
+the ``--snapshot-date`` reproduce-a-past-date behavior all fall out of the builder's per-vintage
+fetch-once/skip-if-present logic, with the dir key == the write predicate == the snapshot_date.
+("Current" is ``MAX(snapshot_date)`` -- the ADR 0034 live idiom; the ``codes.cvx_current`` view is
+dropped, matching the RUCA fold.)
 
-It then runs DQ and writes ``ecdh_model_<env>.codes.cvx`` (ADR 0006; ADR 0015:
-reference table, no Kimball suffix). Thin entrypoint over the ``run_build`` seam
-(ADR 0027): ``ensure -> [DQ: work] -> register -> grant``.
-
-Blocking DQ (FAIL, raises): ``(cvx_code, snapshot_date)`` uniqueness, non-null
-``cvx_code`` / ``short_description`` / ``full_vaccine_name`` / ``vaccine_status``
-/ ``snapshot_date``, and ``vaccine_status`` in the controlled vocabulary. WARN:
-cardinality, ``cvx_last_updated`` parses and is not in the future, nonvaccine
-share, and snapshot freshness.
+Blocking DQ (FAIL, raises): ``(cvx_code, snapshot_date)`` uniqueness, non-null required fields, and
+``vaccine_status`` in the controlled vocabulary. WARN/INFO: cardinality, ``cvx_last_updated``
+parses / not-future, and snapshot freshness.
 
 Usage:
-    build_cvx.py --catalog ecdh_model_dev \\
+    build_cvx.py --source-catalog ecdh_dev --model-catalog ecdh_model_dev \\
         --data-engineers-group ecdh-data-engineers --analysts-group ecdh-analysts
 
-    # backfill / reproduce a specific snapshot date from an already-saved Volume file:
-    build_cvx.py --catalog ecdh_model_dev --snapshot-date 2026-06-15
+    # reproduce a specific snapshot date from an already-landed Volume file:
+    build_cvx.py --source-catalog ecdh_dev --model-catalog ecdh_model_dev --snapshot-date 2026-06-15
 """
 
 from __future__ import annotations
@@ -52,27 +48,32 @@ from typing import Any
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
-from cidmath_datahub.common import grants, registration
+from cidmath_datahub.common import registration
 from cidmath_datahub.common.logging import get_logger
-from cidmath_datahub.common.pipeline import BuildContext, run_build
+from cidmath_datahub.common.pipeline import BuildContext
+from cidmath_datahub.common.reference_builder import (
+    CanonicalOutput,
+    LandingRetention,
+    RawLanding,
+    ReferenceBuildSpec,
+    build_reference,
+    make_staging_dq,
+)
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import cvx
 
 log = get_logger(__name__)
 
-SCHEMA = "codes"
+SUBJECT = "codes"
+RAW_SCHEMA = "codes_raw"
+MODEL_SCHEMA = "codes"
 TABLE = "cvx"
-CURRENT_VIEW = "cvx_current"
 PIPELINE_REF = "bundles/_reference/src/build_cvx.py"
 
-#: Default managed Volume (in the ``codes`` schema) for the raw XML-new snapshots
-#: (ADR 0032). One Volume per revise-in-place source; files are date-stamped and
-#: immutable.
-DEFAULT_VOLUME = "cvx_raw"
+# Verbatim landed payload name inside the per-snapshot Volume dir (dir is already date-scoped).
+_SNAPSHOT_XML = "cvx_xml_new.xml"
 
-# Flat code columns + the snapshot/audit columns the entrypoint stamps. PK is
-# (cvx_code, snapshot_date); cvx_last_updated is nullable (a blank source value
-# is allowed). ADR 0032.
+# Raw (codes_raw.cvx) == canonical (codes.cvx): flat, PK (cvx_code, snapshot_date). ADR 0032.
 CVX_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("cvx_code", T.StringType(), False),
@@ -86,14 +87,69 @@ CVX_SPARK_SCHEMA = T.StructType(
     ]
 )
 
+_DDL = (
+    "cvx_code STRING, snapshot_date DATE, short_description STRING, full_vaccine_name STRING, "
+    "vaccine_status STRING, cvx_last_updated DATE, source_file STRING, loaded_at TIMESTAMP"
+)
+
+_DESC = (
+    "CDC IIS CVX (Vaccine Administered) code set: canonical vaccine codes with short and full "
+    "vaccine names, a controlled vaccine_status (active / inactive / pending / non_us / "
+    "never_active), and the source 'Last Updated' date. Flat (no hierarchy). One row per code per "
+    "snapshot; PK (cvx_code, snapshot_date)."
+)
+_PHR = (
+    "Canonical vaccine-code standard for U.S. immunization data; lets vaccine surveillance / "
+    "clinical feeds conform administered-vaccine codes to a shared, revision-tracked reference."
+)
+_KNOWN_LIMITATIONS = (
+    "Flat CVX code set (no vaccine-group mapping -- that arrives via a separate CDSi job; no "
+    "MVX/CPT/NDC). Revision-tracked by snapshot: each run keeps a new snapshot_date, with the raw "
+    "XML-new preserved verbatim on the codes_raw._landing Volume; 'current' is the latest "
+    "snapshot_date. The XML-new payload has no vaccine/non-vaccine indicator, so no such flag is "
+    "synthesized: every code is loaded as published, including Non-US and Never-Active entries and "
+    "administrative codes (e.g. 998 'no vaccine administered'), distinguishable by cvx_code and "
+    "description."
+)
+
+_COMMON_META: dict[str, Any] = {
+    "spatial_resolution": "none",
+    "spatial_coverage": "United States",
+    "source_provider_code": "cdc",
+    "source_url": cvx.SOURCE_XML_NEW_URL,
+    "source_documentation_url": cvx.SOURCE_LANDING_URL,
+    "source_data_dictionary_url": cvx.SOURCE_DATA_DICTIONARY_URL,
+    "license": "public domain (U.S. Government work, 17 U.S.C. 105)",
+    "dua_required": False,
+    "dua_reference": "No DUA. CDC IIS CVX code set is public domain.",
+    "access_tier": "open",
+    "external_maintainer_name": "CDC Immunization Information Systems (IIS)",
+    "is_hosted": True,
+    "temporal_resolution": "annual",
+}
+
+
+def _base_entry(snapshot_date: date) -> registration.DatasetCatalogEntry:
+    return registration.DatasetCatalogEntry(
+        full_table_name="(set per layer by the builder)",
+        subject=SUBJECT,
+        layer="reference",
+        description=_DESC,
+        public_health_relevance=_PHR,
+        known_limitations=_KNOWN_LIMITATIONS,
+        temporal_coverage_start=snapshot_date,
+        temporal_coverage_end=snapshot_date,
+        derived_from=[cvx.SOURCE_XML_NEW_URL],
+        **_COMMON_META,
+    )
+
 
 # ---------------------------------------------------------------------------
-# IO: fetch the XML-new payload + the immutable Volume snapshot (kept out of the
-# pure module per ADR 0011; the URL/encoding knowledge lives in cvx.py).
+# IO: fetch the XML-new payload (kept out of the pure module per ADR 0011).
 # ---------------------------------------------------------------------------
 
 
-def _fetch_xml(url: str) -> bytes:
+def _download_xml(url: str) -> bytes:
     """Download the CVX XML-new payload and return the raw bytes (verbatim)."""
     parts = urllib.parse.urlsplit(url)
     safe_url = urllib.parse.urlunsplit(parts._replace(path=urllib.parse.quote(parts.path)))
@@ -103,366 +159,40 @@ def _fetch_xml(url: str) -> bytes:
     return raw
 
 
-def _volume_dir(catalog: str, volume: str) -> str:
-    """Return the UC Volume directory for the raw snapshots (ADR 0032)."""
-    return f"/Volumes/{catalog}/{SCHEMA}/{volume}"
-
-
-def _snapshot_path(catalog: str, volume: str, snapshot_date: date) -> str:
-    """Return the date-stamped raw-snapshot file path (``cvx_<YYYY-MM-DD>.xml``)."""
-    return f"{_volume_dir(catalog, volume)}/cvx_{snapshot_date.isoformat()}.xml"
-
-
-def _persist_snapshot(path: str, raw: bytes) -> tuple[bytes, bool]:
-    """Write the raw payload to ``path`` unless it already exists (immutability).
-
-    Returns ``(snapshot_bytes, wrote_new_file)``. When the date's file already
-    exists (a same-day re-run), it is **not** overwritten; its existing bytes are
-    returned so the table reflects the immutable snapshot of record. ADR 0032.
-    """
-    p = Path(path)
-    if p.exists():
-        log.warning("Raw snapshot already exists; not overwriting", extra={"path": path})
-        return p.read_bytes(), False
-    p.write_bytes(raw)
-    log.info("Wrote immutable raw snapshot", extra={"path": path, "bytes": len(raw)})
-    return raw, True
-
-
 # ---------------------------------------------------------------------------
-# DQ (ADR 0009): blocking uniqueness / non-null / status-vocab; WARN cardinality,
-# last-updated parse/freshness, nonvaccine share, snapshot freshness.
-# ---------------------------------------------------------------------------
-
-
-def _dq_checks(
-    ctx: BuildContext,
-    records: list[cvx.CvxRecord],
-    snapshot_date: date,
-    *,
-    wrote_new_file: bool,
-) -> None:
-    """Record DQ outcomes; raise on any blocking FAIL so a bad table never writes."""
-    table = f"{SCHEMA}.{TABLE}"
-    total = len(records)
-
-    dup_codes = cvx.find_duplicate_codes(records)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="cvx_code_snapshot_date_uniqueness",
-        category=DQCategory.UNIQUENESS,
-        severity=DQSeverity.FAIL,
-        passed=not dup_codes,
-        failing_row_count=len(dup_codes),
-        total_row_count=total,
-        details={"sample_duplicates": dup_codes[:10]} if dup_codes else None,
-    )
-
-    missing = cvx.find_missing_required(records)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="cvx_required_fields_not_null",
-        category=DQCategory.NULLABILITY,
-        severity=DQSeverity.FAIL,
-        passed=not missing,
-        failing_row_count=len(missing),
-        total_row_count=total,
-        details={"sample_missing": [list(m) for m in missing[:10]]} if missing else None,
-    )
-
-    bad_status = cvx.find_status_violations(records)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="cvx_vaccine_status_controlled_vocab",
-        category=DQCategory.BUSINESS_RULE,
-        severity=DQSeverity.FAIL,
-        passed=not bad_status,
-        failing_row_count=len(bad_status),
-        total_row_count=total,
-        details={
-            "allowed": sorted(cvx.VACCINE_STATUS_VALUES),
-            "sample_violations": [list(b) for b in bad_status[:10]],
-        }
-        if bad_status
-        else None,
-    )
-
-    # snapshot_date is stamped by this entrypoint, so it is non-null by construction;
-    # the check guards against a future refactor passing it through unset.
-    snapshot_ok = snapshot_date is not None
-    ctx.recorder.record(
-        table_name=table,
-        check_name="cvx_snapshot_date_not_null",
-        category=DQCategory.NULLABILITY,
-        severity=DQSeverity.FAIL,
-        passed=snapshot_ok,
-        failing_row_count=0 if snapshot_ok else total,
-        total_row_count=total,
-    )
-
-    # --- WARN checks ---
-    card_ok = cvx.CARDINALITY_MIN <= total <= cvx.CARDINALITY_MAX
-    ctx.recorder.record(
-        table_name=table,
-        check_name="cvx_cardinality",
-        category=DQCategory.CARDINALITY,
-        severity=DQSeverity.WARN,
-        passed=card_ok,
-        failing_row_count=0 if card_ok else total,
-        total_row_count=total,
-        details={"expected_range": [cvx.CARDINALITY_MIN, cvx.CARDINALITY_MAX], "actual": total},
-    )
-
-    unparseable = cvx.find_unparseable_last_updated(records)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="cvx_last_updated_parses",
-        category=DQCategory.BUSINESS_RULE,
-        severity=DQSeverity.WARN,
-        passed=not unparseable,
-        failing_row_count=len(unparseable),
-        total_row_count=total,
-        details={"sample": [list(u) for u in unparseable[:10]]} if unparseable else None,
-    )
-
-    future = cvx.find_future_last_updated(records, snapshot_date)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="cvx_last_updated_not_future",
-        category=DQCategory.BUSINESS_RULE,
-        severity=DQSeverity.WARN,
-        passed=not future,
-        failing_row_count=len(future),
-        total_row_count=total,
-        details={"as_of": snapshot_date.isoformat(), "sample": [[c, d.isoformat()] for c, d in future[:10]]}
-        if future
-        else None,
-    )
-
-    # Snapshot freshness: this run produced a Volume file (new or pre-existing) and
-    # a snapshot_date partition. INFO-level provenance + a freshness WARN.
-    ctx.recorder.record(
-        table_name=table,
-        check_name="cvx_snapshot_freshness",
-        category=DQCategory.FRESHNESS,
-        severity=DQSeverity.WARN,
-        passed=total > 0,
-        failing_row_count=0 if total > 0 else 1,
-        total_row_count=total,
-        details={"snapshot_date": snapshot_date.isoformat(), "wrote_new_volume_file": wrote_new_file},
-    )
-
-    failures: list[str] = []
-    if dup_codes:
-        failures.append(f"duplicate cvx_code in snapshot: {dup_codes[:5]}")
-    if missing:
-        failures.append(f"null required field: {missing[:5]}")
-    if bad_status:
-        failures.append(f"vaccine_status out of vocab: {bad_status[:5]}")
-    if not snapshot_ok:
-        failures.append("snapshot_date is null")
-    if failures:
-        raise ValueError("CVX blocking DQ failed -- " + "; ".join(failures))
-
-
-# ---------------------------------------------------------------------------
-# Write (snapshot_replace by snapshot_date; ADR 0032 / ADR 0024 vintage semantics)
-# ---------------------------------------------------------------------------
-
-
-def _table_has_column(spark: SparkSession, full: str, column: str) -> bool:
-    """True if ``full`` exists and carries ``column`` (drives first-build vs. replace)."""
-    if not spark.catalog.tableExists(full):
-        return False
-    return column in {f.name for f in spark.table(full).schema.fields}
-
-
-def _write_table(
-    spark: SparkSession, catalog: str, rows: list[dict[str, Any]], snapshot_date: date
-) -> None:
-    """snapshot_replace: replace only this run's ``snapshot_date`` rows; keep priors."""
-    full = f"{catalog}.{SCHEMA}.{TABLE}"
-    df = spark.createDataFrame(rows, schema=CVX_SPARK_SCHEMA).sort("cvx_code")
-    if _table_has_column(spark, full, "snapshot_date"):
-        spark.sql(f"DELETE FROM {full} WHERE snapshot_date = DATE'{snapshot_date.isoformat()}'")
-        df.write.option("mergeSchema", "true").mode("append").saveAsTable(full)
-    else:
-        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full)
-    log.info("Wrote codes.cvx", extra={"rows": len(rows), "snapshot_date": snapshot_date.isoformat()})
-
-
-def _comment_table(spark: SparkSession, catalog: str) -> None:
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TABLE} IS "
-        f"'CDC IIS CVX (Vaccine Administered) code set, flat (no hierarchy). One row per "
-        f"CVX code per snapshot; PK (cvx_code, snapshot_date). Revision-tracked via "
-        f"snapshot_replace with raw XML-new preserved on a UC Volume (ADR 0032). "
-        f"Current = latest snapshot_date (see codes.cvx_current). Reference table.'"
-    )
-
-
-def _create_current_view(spark: SparkSession, catalog: str) -> None:
-    """Create/refresh ``codes.cvx_current`` = rows at the latest ``snapshot_date``."""
-    full = f"{catalog}.{SCHEMA}.{TABLE}"
-    view = f"{catalog}.{SCHEMA}.{CURRENT_VIEW}"
-    spark.sql(
-        f"CREATE OR REPLACE VIEW {view} AS "
-        f"SELECT * FROM {full} WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM {full})"
-    )
-    spark.sql(
-        f"COMMENT ON VIEW {view} IS "
-        f"'codes.cvx restricted to the latest snapshot_date (the current CVX code set). "
-        f"ADR 0032.'"
-    )
-    log.info("Created/refreshed codes.cvx_current view")
-
-
-# ---------------------------------------------------------------------------
-# Register (_ops metadata, ADR 0008)
-# ---------------------------------------------------------------------------
-
-
-def _register(spark: SparkSession, catalog: str, snapshot_date: date, source_url: str, *, create_view: bool) -> None:
-    full = f"{catalog}.{SCHEMA}.{TABLE}"
-    known_limitations = (
-        "Flat CVX code set (no vaccine-group mapping -- that arrives via a separate CDSi "
-        "job; no MVX/CPT/NDC). Revision-tracked by snapshot: each annual run keeps a new "
-        "snapshot_date, with the raw XML-new preserved verbatim on the codes.cvx_raw "
-        "Volume; 'current' is the latest snapshot_date (codes.cvx_current). The XML-new "
-        "payload has no vaccine/non-vaccine indicator, so no such flag is synthesized: "
-        "every code is loaded as published, including Non-US and Never-Active entries and "
-        "administrative codes (e.g. 998 'no vaccine administered'), distinguishable by "
-        "cvx_code and description."
-    )
-    registration.register_dataset(
-        spark,
-        catalog,
-        registration.DatasetCatalogEntry(
-            full_table_name=full,
-            subject=SCHEMA,
-            layer="reference",
-            description=(
-                "CDC IIS CVX (Vaccine Administered) code set: canonical vaccine codes with "
-                "short and full vaccine names, a controlled vaccine_status (active / inactive "
-                "/ pending / non_us / never_active), and the source 'Last Updated' date. "
-                "Flat (no hierarchy). One row per code per snapshot; PK (cvx_code, "
-                "snapshot_date)."
-            ),
-            public_health_relevance=(
-                "Canonical vaccine-code standard for U.S. immunization data; lets vaccine "
-                "surveillance / clinical feeds conform administered-vaccine codes to a shared, "
-                "revision-tracked reference."
-            ),
-            spatial_resolution="none",
-            spatial_coverage="United States",
-            source_provider_code="cdc",
-            source_url=source_url,
-            source_documentation_url=cvx.SOURCE_LANDING_URL,
-            license="public domain (U.S. Government work, 17 U.S.C. 105)",
-            dua_required=False,
-            dua_reference="No DUA. CDC IIS CVX code set is public domain.",
-            access_tier="open",
-            external_maintainer_name="CDC Immunization Information Systems (IIS)",
-            is_hosted=True,
-            source_data_dictionary_url=cvx.SOURCE_DATA_DICTIONARY_URL,
-            temporal_coverage_start=snapshot_date,
-            temporal_coverage_end=snapshot_date,
-            temporal_resolution="annual",
-            known_limitations=known_limitations,
-            derived_from=[source_url],
-        ),
-        registration.DatasetEngineeringEntry(
-            full_table_name=full,
-            update_semantics="snapshot_replace",
-            materialization_type="table",
-            cluster_columns=["snapshot_date", "cvx_code"],
-            pipeline_reference=PIPELINE_REF,
-        ),
-    )
-
-    if create_view:
-        view_full = f"{catalog}.{SCHEMA}.{CURRENT_VIEW}"
-        registration.register_dataset(
-            spark,
-            catalog,
-            registration.DatasetCatalogEntry(
-                full_table_name=view_full,
-                subject=SCHEMA,
-                layer="reference",
-                description=(
-                    "codes.cvx restricted to the latest snapshot_date -- the current CVX code "
-                    "set for consumers who just want today's codes (ADR 0032)."
-                ),
-                public_health_relevance=(
-                    "Convenience surface for the current CVX codes without filtering on "
-                    "snapshot_date."
-                ),
-                spatial_resolution="none",
-                spatial_coverage="United States",
-                source_provider_code="cdc",
-                source_url=source_url,
-                source_documentation_url=cvx.SOURCE_LANDING_URL,
-                license="public domain (U.S. Government work, 17 U.S.C. 105)",
-                dua_required=False,
-                dua_reference="No DUA. CDC IIS CVX code set is public domain.",
-                access_tier="open",
-                external_maintainer_name="CDC Immunization Information Systems (IIS)",
-                is_hosted=False,  # view, not materialized
-                source_data_dictionary_url=cvx.SOURCE_DATA_DICTIONARY_URL,
-                known_limitations="Latest-snapshot view over codes.cvx; see that table for history.",
-                derived_from=[full],
-            ),
-            registration.DatasetEngineeringEntry(
-                full_table_name=view_full,
-                update_semantics="full_refresh",  # a view recomputes on every read
-                materialization_type="view",
-                cluster_columns=None,
-                pipeline_reference=PIPELINE_REF,
-            ),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Orchestration
+# Orchestration (fetch/read/promote/validate close over the run's snapshot + source url).
 # ---------------------------------------------------------------------------
 
 
 def run(
-    catalog: str,
+    source_catalog: str,
+    model_catalog: str,
     data_engineers_group: str,
     analysts_group: str,
     snapshot_date: date | None = None,
-    volume: str = DEFAULT_VOLUME,
     source_url: str = cvx.SOURCE_XML_NEW_URL,
-    create_view: bool = True,
 ) -> None:
     snap = snapshot_date or datetime.now(tz=UTC).date()
-    raw = _fetch_xml(source_url)
-    snapshot_path = _snapshot_path(catalog, volume, snap)
+    raw_fqn = f"{source_catalog}.{RAW_SCHEMA}.{TABLE}"
+    # Parsed records (with parse-time-only *_raw fields) stashed by read for validate to DQ, since
+    # those fields are not persisted to the table and so cannot be reconstructed from staging.
+    parsed: dict[date, list[cvx.CvxRecord]] = {}
 
-    def _ensure(spark: SparkSession) -> None:
-        spark.sql(
-            f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
-            f"COMMENT 'Canonical clinical/terminology code systems (ICD-10-CM, ICD-9-CM, CVX, ...). "
-            f"Owned by the _reference bundle. See ADR 0014.'"
-        )
-        spark.sql(
-            f"CREATE VOLUME IF NOT EXISTS {catalog}.{SCHEMA}.{volume} "
-            f"COMMENT 'Immutable date-stamped raw CVX XML-new snapshots (ADR 0032).'"
-        )
+    def _fetch(v: date, volume_dir: str) -> None:
+        # v is the snapshot_date; the dir is already vintage=<snapshot_date>-scoped, and the builder
+        # skips this fetch if the date's payload is already landed (immutability; ADR 0032).
+        (Path(volume_dir) / _SNAPSHOT_XML).write_bytes(_download_xml(source_url))
 
-    def _work(ctx: BuildContext) -> None:
-        # Persist the immutable raw snapshot, then parse the bytes of record (the
-        # existing file on a same-day re-run, else the freshly-fetched payload).
-        snapshot_bytes, wrote_new_file = _persist_snapshot(snapshot_path, raw)
-        records = cvx.parse_cvx_xml(snapshot_bytes.decode(cvx.SOURCE_ENCODING))
-        _dq_checks(ctx, records, snap, wrote_new_file=wrote_new_file)
-
+    def _read(ctx: BuildContext, v: date, volume_dir: str) -> Any:
+        snapshot_path = str(Path(volume_dir) / _SNAPSHOT_XML)
+        records = cvx.parse_cvx_xml(Path(snapshot_path).read_bytes().decode(cvx.SOURCE_ENCODING))
+        parsed[v] = records
+        log.info("Parsed CVX", extra={"snapshot_date": v.isoformat(), "rows": len(records)})
         now = datetime.now(tz=UTC)
         rows = [
             {
                 "cvx_code": r.cvx_code,
-                "snapshot_date": snap,
+                "snapshot_date": v,
                 "short_description": r.short_description,
                 "full_vaccine_name": r.full_vaccine_name,
                 "vaccine_status": r.vaccine_status,
@@ -472,69 +202,164 @@ def run(
             }
             for r in records
         ]
-        _write_table(ctx.spark, catalog, rows, snap)
-        _comment_table(ctx.spark, catalog)
-        if create_view:
-            _create_current_view(ctx.spark, catalog)
+        return ctx.spark.createDataFrame(rows, CVX_SPARK_SCHEMA).sort("cvx_code")
 
-    def _grant(spark: SparkSession) -> None:
-        # Reference data is canonical and pipeline-owned: both groups get reader-tier
-        # only (ADR 0018); verify the applied grants as a deploy-time access gate.
-        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
-        grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-        grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
-        # READ VOLUME is volume-scoped and not covered by the schema SELECT grant,
-        # so grant it explicitly on the raw-snapshot Volume so readers can open the
-        # archived XML payloads (ADR 0032).
-        grants.grant_volume_reader(spark, catalog, SCHEMA, volume, data_engineers_group)
-        grants.grant_volume_reader(spark, catalog, SCHEMA, volume, analysts_group)
+    def _ensure_staging(sp: SparkSession) -> None:
+        sp.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.{RAW_SCHEMA} "
+            f"COMMENT 'Raw, fetched-as-is source landings for the codes subject (clinical/"
+            f"terminology code systems). Engineer-owned; canonicals promote to model codes. ADR 0037.'"
+        )
+        sp.sql(f"CREATE TABLE IF NOT EXISTS {raw_fqn} ({_DDL}) USING DELTA")
 
-    run_build(
-        catalog=catalog,
+    def _ensure_canonical(sp: SparkSession) -> None:
+        sp.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {model_catalog}.{MODEL_SCHEMA} "
+            f"COMMENT 'Canonical clinical/terminology code systems (ICD-10-CM, ICD-9-CM, CVX, NDC, "
+            f"LOINC, SNOMED CT, RxNorm, ...). Owned by the _reference bundle. See ADR 0014.'"
+        )
+        sp.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{MODEL_SCHEMA}.{TABLE} ({_DDL}) USING DELTA"
+        )
+
+    def _promote(ctx: BuildContext, v: date) -> Any:
+        """Raw is already canonical-shaped (flat); select this snapshot's rows."""
+        return ctx.spark.sql(
+            f"SELECT * FROM {raw_fqn} WHERE snapshot_date = DATE'{v.isoformat()}'"
+        ).sort("cvx_code")
+
+    def _validate(ctx: BuildContext, staging_fqn: str) -> None:
+        # DQ this run's freshly-parsed records (they carry the parse-time-only *_raw fields the
+        # unparseable-date check needs). PK uniqueness via make_staging_dq scoped to this snapshot.
+        record_table = f"{MODEL_SCHEMA}.{TABLE}"
+        where = f"snapshot_date = DATE'{snap.isoformat()}'"
+        records = parsed[snap]
+        total = len(records)
+        failures: list[str] = []
+
+        dq = make_staging_dq(ctx, staging_fqn, record_table=record_table, where=where)
+        if not dq.unique(
+            keys=["cvx_code", "snapshot_date"],
+            check_name="cvx_code_snapshot_date_uniqueness",
+            raise_on_fail=False,
+        ):
+            failures.append("duplicate (cvx_code, snapshot_date)")
+
+        missing = cvx.find_missing_required(records)
+        _record(ctx, record_table, "cvx_required_fields_not_null", DQCategory.NULLABILITY,
+                not missing, len(missing), total,
+                {"sample_missing": [list(m) for m in missing[:10]]} if missing else None)
+        if missing:
+            failures.append(f"null required field: {missing[:5]}")
+
+        bad_status = cvx.find_status_violations(records)
+        _record(ctx, record_table, "cvx_vaccine_status_controlled_vocab", DQCategory.BUSINESS_RULE,
+                not bad_status, len(bad_status), total,
+                {"allowed": sorted(cvx.VACCINE_STATUS_VALUES),
+                 "sample_violations": [list(b) for b in bad_status[:10]]} if bad_status else None)
+        if bad_status:
+            failures.append(f"vaccine_status out of vocab: {bad_status[:5]}")
+
+        # --- WARN / INFO ---
+        card_ok = cvx.CARDINALITY_MIN <= total <= cvx.CARDINALITY_MAX
+        _record(ctx, record_table, "cvx_cardinality", DQCategory.CARDINALITY,
+                card_ok, 0 if card_ok else total, total,
+                {"expected_range": [cvx.CARDINALITY_MIN, cvx.CARDINALITY_MAX], "actual": total},
+                severity=DQSeverity.WARN)
+
+        unparseable = cvx.find_unparseable_last_updated(records)
+        _record(ctx, record_table, "cvx_last_updated_parses", DQCategory.BUSINESS_RULE,
+                not unparseable, len(unparseable), total,
+                {"sample": [list(u) for u in unparseable[:10]]} if unparseable else None,
+                severity=DQSeverity.WARN)
+
+        future = cvx.find_future_last_updated(records, snap)
+        _record(ctx, record_table, "cvx_last_updated_not_future", DQCategory.BUSINESS_RULE,
+                not future, len(future), total,
+                {"as_of": snap.isoformat(), "sample": [[c, d.isoformat()] for c, d in future[:10]]}
+                if future else None, severity=DQSeverity.WARN)
+
+        _record(ctx, record_table, "cvx_snapshot_freshness", DQCategory.FRESHNESS,
+                total > 0, 0 if total > 0 else 1, total,
+                {"snapshot_date": snap.isoformat()}, severity=DQSeverity.WARN)
+
+        if failures:
+            raise ValueError("CVX blocking DQ failed -- " + "; ".join(failures))
+
+    spec = ReferenceBuildSpec(
+        subject=SUBJECT,
+        source_catalog=source_catalog,
+        model_catalog=model_catalog,
         pipeline_reference=PIPELINE_REF,
-        ensure=_ensure,
-        work=_work,
-        register=lambda spark: _register(spark, catalog, snap, source_url, create_view=create_view),
-        grant=_grant,
+        reader_groups=(data_engineers_group, analysts_group),
+        engineer_group=data_engineers_group,
+        base_catalog_entry=_base_entry(snap),
+        vintage_column="snapshot_date",
+        raw_landings=[
+            RawLanding(
+                table=TABLE,
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch,
+                read_from_volume=_read,
+                description=(
+                    "Raw CDC IIS CVX XML-new, fetched-as-is per snapshot_date (immutable; never "
+                    "overwritten). Volume-landed verbatim, then parsed. Promoted to codes.cvx."
+                ),
+            ),
+        ],
+        outputs=[
+            CanonicalOutput(
+                canonical_table=TABLE,
+                reads=(TABLE,),
+                promote=_promote,
+                validate_staging=_validate,
+                description=_DESC,
+                public_health_relevance=_PHR,
+                canonical_cluster_columns=["snapshot_date", "cvx_code"],
+            ),
+        ],
+        ensure_staging=_ensure_staging,
+        ensure_canonical=_ensure_canonical,
+        update_semantics="vintage_snapshot",
+    )
+    build_reference(spec, vintages=(snap,))
+    log.info("CVX build complete", extra={"snapshot_date": snap.isoformat()})
+
+
+def _record(
+    ctx: BuildContext, table: str, check_name: str, category: DQCategory, passed: bool,
+    failing: int, total: int, details: dict[str, Any] | None, *,
+    severity: DQSeverity = DQSeverity.FAIL,
+) -> None:
+    """Thin wrapper over ``ctx.recorder.record`` to keep the check lists readable."""
+    ctx.recorder.record(
+        table_name=table, check_name=check_name, category=category, severity=severity,
+        passed=passed, failing_row_count=failing, total_row_count=total, details=details,
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
+    parser.add_argument("--source-catalog", required=True, help="Source catalog for raw (ecdh_<env>).")
+    parser.add_argument("--model-catalog", required=True,
+                        help="Model catalog for canonical (ecdh_model_<env>).")
     parser.add_argument(
-        "--snapshot-date",
-        type=date.fromisoformat,
-        default=None,
+        "--snapshot-date", type=date.fromisoformat, default=None,
         help="Snapshot date (YYYY-MM-DD) for this run. Default: today (UTC).",
     )
     parser.add_argument(
-        "--volume",
-        default=DEFAULT_VOLUME,
-        help=f"Managed Volume (in the codes schema) for raw snapshots. Default: {DEFAULT_VOLUME}.",
-    )
-    parser.add_argument(
-        "--source-url",
-        default=cvx.SOURCE_XML_NEW_URL,
-        help="Override the CVX XML-new download URL.",
-    )
-    parser.add_argument(
-        "--no-current-view",
-        action="store_true",
-        help="Skip creating/refreshing the codes.cvx_current view.",
+        "--source-url", default=cvx.SOURCE_XML_NEW_URL, help="Override the CVX XML-new download URL.",
     )
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
     parser.add_argument("--analysts-group", default="ecdh-analysts")
     args = parser.parse_args()
     run(
-        args.catalog,
+        args.source_catalog,
+        args.model_catalog,
         args.data_engineers_group,
         args.analysts_group,
         snapshot_date=args.snapshot_date,
-        volume=args.volume,
         source_url=args.source_url,
-        create_view=not args.no_current_view,
     )
 
 
