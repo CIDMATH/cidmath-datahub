@@ -232,3 +232,29 @@ generalization (`Vintage = int | date | str`) makes possible.
 
 With waves 1-3 done, the only remaining backport is the multi-source hierarchical **ICD-10-CM /
 ICD-9-CM** relayer (wave 4), which exercises the processed-stage path and is tracked separately.
+
+## Applied — codes backport wave 4 (ICD-10-CM + ICD-9-CM, multi-source hierarchical)
+The two hierarchical diagnosis code sets are folded onto `build_reference`, completing the codes
+backport: `codes.icd10cm` and `codes.icd9cm`. Each edition combines **multiple source payloads** —
+ICD-10-CM: the Oct-1 base order file + optional Apr-1 mid-year update (overlaid) + the tabular XML
+(+ optional update XML) for the hierarchy; ICD-9-CM: the DTAB tabular list + the Appendix-E RTF for
+chapter/block. All payloads land verbatim per edition in `ecdh_<env>.codes_raw._landing` (ADR 0039);
+`read` combines them (overlay + `build_hierarchy`) into the **denormalized** 1:1 raw table
+`codes_raw.<table>`, and the canonical `codes.<table>` promotes from raw. Per ADR 0030/0031 the
+hierarchy is denormalized onto the flat rows (`parent_*_code`, `ancestor_codes`, `node_level`,
+chapter/block), so there is still **no processed stage** — just one landing that assembles several
+files at read, the same shape wave 1's ICD-10-PCS used for its base+overlay.
+
+**The one real semantics change in the epic.** Both were registered `update_semantics="full_refresh"`
+but actually did a per-edition `DELETE`+append. The fold moves them to `vintage_snapshot` with the
+builder's per-edition atomic `replaceWhere(edition_year)`: net table behavior is unchanged
+(per-edition replace, other editions retained), but the registered semantics and the write mechanism
+are now correct and atomic (ADR 0034). Runbook: `docs/runbooks/relayer-icd-cm-source-path.sql`. These
+key on the **integer** `edition_year` (like wave 1), so they need no builder change. Pure parsers /
+hierarchy builders reused unchanged; canonical schemas + rows unchanged.
+
+**Epic complete.** All nine model-only medical-code builds (`icd10pcs`, `icd9_procedures`, `cvx`,
+`ndc_product`/`ndc_package`, `loinc`/`loinc_map_to`, `rxnorm`, `snomed`, `icd10cm`, `icd9cm`) now land
+raw in the source catalog and promote canonicals through `build_reference`, matching the RUCA + `time`
+folds. The builder's `Vintage = int | date | str` generalization (wave 2) covers every vintage key the
+epic needed.

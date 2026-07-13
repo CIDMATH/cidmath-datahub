@@ -4,9 +4,13 @@
 # zips for the requested fiscal-year edition(s), converts RTF -> text (striprtf),
 # parses/normalizes/validates and builds the classification hierarchy via
 # cidmath_datahub.reference.icd9cm, and writes ecdh_model_<env>.codes.icd9cm keyed by
-# (icd9cm_code, edition_year). Mirrors codes.icd10cm's shape (ADR 0031). Thin
-# entrypoint over the run_build seam (ADR 0027); full_refresh per edition
-# (ADR 0024). ICD-9-CM is frozen, so base annual editions only.
+# (icd9cm_code, edition_year). Mirrors codes.icd10cm's shape (ADR 0031). Folded onto
+# the shared build_reference builder (ADR 0037): the per-edition DTAB + Appendix-E zips
+# land verbatim in the source-catalog Volume ecdh_<env>.codes_raw._landing (ADR 0039),
+# de-RTF + parse + hierarchy-build into the 1:1 raw table ecdh_<env>.codes_raw.icd9cm,
+# and promote to ecdh_model_<env>.codes.icd9cm with per-edition atomic replaceWhere
+# (vintage_snapshot; ADR 0034 -- the full_refresh->vintaged tidy-up). ICD-9-CM is frozen,
+# so base annual editions only; editions are immutable + re-pullable.
 #
 # Deployed on merge by deploy-reference.yml (path filter bundles/_reference/**);
 # UI-triggered. Load multiple editions via --edition-year (e.g. "2014" "2013").
@@ -29,7 +33,9 @@ resources:
           spark_python_task:
             python_file: ../src/build_icd9cm.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               - "--edition-year"
               - "2012"

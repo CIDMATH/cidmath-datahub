@@ -1,65 +1,84 @@
-"""Build the canonical ``codes.icd9cm`` reference table (ADR 0014/0031).
+"""Build the canonical ``codes.icd9cm`` reference table on the shared builder (ADR 0037/0039/0031).
 
-ICD-9-CM diagnosis codes (NCHS Tabular List of Diseases, Volume 1, incl. the V
-and E supplementary classifications) for U.S. coding before the 2015-10-01
-ICD-10 transition. This entrypoint is the thin IO + Spark layer over the pure
-logic in ``cidmath_datahub.reference.icd9cm`` (ADR 0011). For each fiscal-year
-edition it:
+ICD-9-CM diagnosis codes (NCHS Tabular List of Diseases, Volume 1, incl. the V and E supplementary
+classifications) for U.S. coding before the 2015-10-01 ICD-10 transition. This entrypoint is the thin
+IO + Spark layer over the pure logic in ``cidmath_datahub.reference.icd9cm`` (ADR 0011). For each
+fiscal-year edition it downloads the ``DTAB`` (tabular list) and ``APPNDX`` (Appendix E) zips, converts
+the RTF members to text, parses them, assembles records (``is_billable`` = leaf-of-set) and builds the
+hierarchy (prefix-rule adjacency + Appendix-E chapter/block; ADR 0031) -- the same column shape and
+semantics as ``codes.icd10cm``.
 
-  1. downloads the ``DTAB`` (tabular list) and ``APPNDX`` (Appendix E) zips,
-     converts the RTF members to text, and parses them;
-  2. assembles records (``is_billable`` = leaf-of-set) and builds the hierarchy
-     (prefix-rule adjacency + Appendix-E chapter/block; ADR 0031) -- the same
-     column shape and semantics as ``codes.icd10cm``.
+**Source-path fold-in (ADR 0037 backport, wave 4).** Previously model-only + hand-rolled on
+``run_build`` with no raw layer, and *mislabeled* ``update_semantics="full_refresh"`` while actually
+doing a per-edition DELETE+append. Now folded onto the shared ``build_reference`` builder: the
+per-edition DTAB + Appendix-E zips land verbatim in the *source*-catalog landing Volume
+``ecdh_<env>.codes_raw._landing`` (ADR 0039); ``read`` de-RTFs, parses, and builds the hierarchy into
+the denormalized 1:1 raw table ``ecdh_<env>.codes_raw.icd9cm``, and the canonical
+``ecdh_model_<env>.codes.icd9cm`` is promoted from raw with per-edition atomic ``replaceWhere``
+(``vintage_snapshot`` -- the ``full_refresh`` -> vintaged tidy-up, ADR 0034). Same schema, same rows,
+same denormalized-hierarchy shape (no processed stage; ADR 0031) -- data parity; consumers unaffected.
 
-It then runs DQ and writes ``ecdh_model_<env>.codes.icd9cm`` keyed by
-``(icd9cm_code, edition_year)`` (ADR 0006; ADR 0015: reference table, no Kimball
-suffix). ICD-9-CM is frozen, so editions are pure annual base releases (no
-mid-year overlay). ``--hierarchy`` (``build`` / ``skip``) controls the Appendix-E
-download; adjacency is always computed from the code set.
+Keyed by ``(icd9cm_code, edition_year)``. ICD-9-CM is frozen (final FY2014, valid through 2015-09-30),
+so editions are pure annual base releases (no mid-year overlay). ``--hierarchy`` (build/skip) controls
+the Appendix-E download; adjacency is always computed from the code set. Editions are immutable +
+re-pullable (``PER_VINTAGE_IMMUTABLE`` landing). The NCHS FTP archive's latest full RTF release is
+FY2012 (directory ``2011``); available editions run roughly FY1997-FY2012.
 
-The NCHS FTP archive's latest full RTF release is FY2012 (directory ``2011``);
-FY2013/FY2014 were not redistributed there (the partial code freeze). Available
-editions run roughly FY1997-FY2012.
+Blocking DQ (FAIL, raises): ``(icd9cm_code, edition_year)`` uniqueness, non-null ``description``,
+ICD-9-CM code-format, and parent referential integrity. WARN: cardinality (~13k-17k), chapter/block
+resolution, orphans, V/E share.
 
 Usage:
-    build_icd9cm.py --catalog ecdh_model_dev --edition-year 2012 2011 2010 \\
+    build_icd9cm.py --source-catalog ecdh_dev --model-catalog ecdh_model_dev --edition-year 2012 \\
         --data-engineers-group ecdh-data-engineers --analysts-group ecdh-analysts
 """
 
 from __future__ import annotations
 
 import argparse
-import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from pyspark.sql import SparkSession
 from pyspark.sql import types as T
 
-from cidmath_datahub.common import grants, registration
+from cidmath_datahub.common import registration
 from cidmath_datahub.common.logging import get_logger
-from cidmath_datahub.common.pipeline import BuildContext, run_build
+from cidmath_datahub.common.pipeline import BuildContext
+from cidmath_datahub.common.reference_builder import (
+    CanonicalOutput,
+    LandingRetention,
+    RawLanding,
+    ReferenceBuildSpec,
+    build_reference,
+    make_staging_dq,
+)
 from cidmath_datahub.common.vocabularies import DQCategory, DQSeverity
 from cidmath_datahub.reference import icd9cm
 
 log = get_logger(__name__)
 
-SCHEMA = "codes"
+SUBJECT = "codes"
+RAW_SCHEMA = "codes_raw"
+MODEL_SCHEMA = "codes"
 TABLE = "icd9cm"
 PIPELINE_REF = "bundles/_reference/src/build_icd9cm.py"
 
-# ICD-9-CM diagnosis codes incl. V/E are ~13k-17k per edition. WARN outside a
-# generous band -- a real edition should never be this small.
+# Verbatim landed payload names inside the per-edition Volume dir (dir is already vintage-scoped).
+_DTAB_ZIP = "dtab.zip"
+_APPENDIX_ZIP = "appendix_e.zip"
+
+# ICD-9-CM diagnosis codes incl. V/E are ~13k-17k per edition. WARN outside a generous band.
 _CARDINALITY_MIN = 10_000
 _CARDINALITY_MAX = 22_000
 
-#: Mirrors codes.icd10cm's shape (ADR 0031 contract): flat columns + hierarchy.
+# Mirrors codes.icd10cm's shape (ADR 0031): flat columns + hierarchy; raw == canonical.
 ICD9_SPARK_SCHEMA = T.StructType(
     [
         T.StructField("icd9cm_code", T.StringType(), False),
@@ -78,338 +97,145 @@ ICD9_SPARK_SCHEMA = T.StructType(
     ]
 )
 
+_DDL = (
+    "icd9cm_code STRING, edition_year INT, description STRING, is_billable BOOLEAN, "
+    "parent_icd9cm_code STRING, node_level INT, ancestor_codes ARRAY<STRING>, chapter_code STRING, "
+    "chapter_name STRING, block_code STRING, block_name STRING, source_file STRING, "
+    "ingested_at TIMESTAMP"
+)
+
+_DESC = (
+    "ICD-9-CM (Clinical Modification) diagnosis code system from NCHS, with the classification "
+    "hierarchy (parent_icd9cm_code, ancestor_codes, node_level, chapter/block). One row per code per "
+    "fiscal-year edition; includes the V and E supplementary classifications. PK (icd9cm_code, "
+    "edition_year)."
+)
+_PHR = (
+    "Canonical diagnosis-code standard for U.S. surveillance/clinical data coded before the "
+    "2015-10-01 ICD-10 transition; mirrors codes.icd10cm's hierarchy so pre/post-2015 data can be "
+    "rolled up the same way (the GEM crosswalk bridges the two code sets in a separate table)."
+)
+_KNOWN_LIMITATIONS = (
+    "ICD-9-CM diagnosis codes only (no Volume 3 procedures, no GEM crosswalk). Frozen: final edition "
+    "FY2014, valid through 2015-09-30; no mid-year updates and no 7th-character concept. is_billable "
+    "is leaf-of-set (highest-specificity rule). Chapter/block come from Appendix E; V/E "
+    "classifications may be sourced separately if Appendix E does not enumerate them (ADR 0031)."
+)
+
+_COMMON_META: dict[str, Any] = {
+    "spatial_resolution": "none",
+    "spatial_coverage": "United States",
+    "source_provider_code": "cdc",
+    "source_url": icd9cm.SOURCE_LANDING_URL,
+    "source_documentation_url": icd9cm.SOURCE_LANDING_URL,
+    "license": "public domain (U.S. Government work, 17 U.S.C. 105)",
+    "dua_required": False,
+    "dua_reference": "No DUA. NCHS ICD-9-CM files are public domain.",
+    "access_tier": "open",
+    "external_maintainer_name": "National Center for Health Statistics (NCHS), CDC",
+    "is_hosted": True,
+    "temporal_resolution": "annual",
+}
+
+
+def _base_entry(editions: list[int]) -> registration.DatasetCatalogEntry:
+    cov_start = date(min(editions) - 1, 10, 1)
+    cov_end = date(max(editions), 9, 30)
+    return registration.DatasetCatalogEntry(
+        full_table_name="(set per layer by the builder)",
+        subject=SUBJECT,
+        layer="reference",
+        description=_DESC,
+        public_health_relevance=_PHR,
+        known_limitations=_KNOWN_LIMITATIONS,
+        source_data_dictionary_url=icd9cm.readme_url(max(editions)),
+        temporal_coverage_start=cov_start,
+        temporal_coverage_end=cov_end,
+        derived_from=(
+            [icd9cm.dtab_zip_url(y) for y in editions]
+            + [icd9cm.appendix_zip_url(y) for y in editions]
+        ),
+        **_COMMON_META,
+    )
+
 
 # ---------------------------------------------------------------------------
-# IO: download a zip member and convert the RTF to text (kept out of the pure
-# module per ADR 0011; striprtf is lazily imported so the module loads without it)
+# IO: download a CDC zip; de-RTF a member from landed zip bytes (ADR 0011 keeps member
+# knowledge in icd9cm.py; striprtf is lazily imported so the module loads without it).
 # ---------------------------------------------------------------------------
 
 
-def _fetch_rtf_text(url: str, selector: Callable[[list[str]], str]) -> tuple[str, str]:
-    """Download a zip, extract the selected RTF member, and return ``(text, member)``.
-
-    The NCHS files are RTF; ``striprtf`` converts to indented plain text that the
-    pure parsers consume. Decoded latin-1 (the RTF body is ASCII-ish).
-    """
-    from striprtf.striprtf import rtf_to_text
-
+def _download_zip(url: str) -> bytes:
     parts = urllib.parse.urlsplit(url)
     safe_url = urllib.parse.urlunsplit(parts._replace(path=urllib.parse.quote(parts.path)))
-    with tempfile.TemporaryDirectory(prefix="icd9_") as tmp:
-        zip_path = Path(tmp) / "icd9cm.zip"
-        with urllib.request.urlopen(safe_url) as resp:  # nosec B310 - trusted CDC NCHS host
-            zip_path.write_bytes(resp.read())
-        with zipfile.ZipFile(zip_path) as zf:
-            member = selector(zf.namelist())
-            raw = zf.read(member)
-    text = rtf_to_text(raw.decode("latin-1"))
-    log.info("Extracted + de-RTF'd member", extra={"url": url, "member": member, "bytes": len(raw)})
-    return text, member
+    with urllib.request.urlopen(safe_url) as resp:  # nosec B310 - trusted CDC NCHS host
+        return resp.read()
+
+
+def _rtf_member_text(zip_bytes: bytes, selector: Callable[[list[str]], str]) -> tuple[str, str]:
+    """Extract the selected RTF member from zip bytes and return ``(de_rtf_text, member)``."""
+    from striprtf.striprtf import rtf_to_text
+
+    with zipfile.ZipFile(BytesIO(zip_bytes)) as zf:
+        member = selector(zf.namelist())
+        raw = zf.read(member)
+    return rtf_to_text(raw.decode("latin-1")), member
 
 
 # ---------------------------------------------------------------------------
-# DQ (ADR 0009/0029): blocking uniqueness / non-null / format / parent-resolves;
-# WARN cardinality / chapter-block coverage / orphans / V-E share.
+# Orchestration (fetch/read/promote/validate close over the run's config + parsed stash).
 # ---------------------------------------------------------------------------
-
-
-def _dq_checks(
-    ctx: BuildContext,
-    records: list[icd9cm.Icd9Record],
-    nodes: list[icd9cm.Icd9Node],
-    edition_years: list[int],
-    stats: dict[int, dict[str, Any]],
-) -> None:
-    table = f"{SCHEMA}.{TABLE}"
-    total = len(records)
-
-    dup_keys = icd9cm.find_duplicate_keys(records)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="icd9cm_code_edition_year_uniqueness",
-        category=DQCategory.UNIQUENESS,
-        severity=DQSeverity.FAIL,
-        passed=not dup_keys,
-        failing_row_count=len(dup_keys),
-        total_row_count=total,
-        details={"sample": [list(k) for k in dup_keys[:10]]} if dup_keys else None,
-    )
-
-    missing_desc = icd9cm.find_missing_descriptions(records)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="icd9_description_not_null",
-        category=DQCategory.NULLABILITY,
-        severity=DQSeverity.FAIL,
-        passed=not missing_desc,
-        failing_row_count=len(missing_desc),
-        total_row_count=total,
-        details={"sample": [list(k) for k in missing_desc[:10]]} if missing_desc else None,
-    )
-
-    bad_format = icd9cm.find_format_violations(records)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="icd9cm_code_format",
-        category=DQCategory.BUSINESS_RULE,
-        severity=DQSeverity.FAIL,
-        passed=not bad_format,
-        failing_row_count=len(bad_format),
-        total_row_count=total,
-        details={"sample": bad_format[:10]} if bad_format else None,
-    )
-
-    dangling = icd9cm.find_dangling_parents(nodes)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="icd9_parent_referential_integrity",
-        category=DQCategory.REFERENTIAL,
-        severity=DQSeverity.FAIL,
-        passed=not dangling,
-        failing_row_count=len(dangling),
-        total_row_count=total,
-        details={"sample": dangling[:10]} if dangling else None,
-    )
-
-    for year in edition_years:
-        n = sum(1 for r in records if r.edition_year == year)
-        ok = _CARDINALITY_MIN <= n <= _CARDINALITY_MAX
-        ctx.recorder.record(
-            table_name=table,
-            check_name=f"icd9_cardinality_{year}",
-            category=DQCategory.CARDINALITY,
-            severity=DQSeverity.WARN,
-            passed=ok,
-            failing_row_count=0 if ok else 1,
-            total_row_count=n,
-            details={"expected_range": [_CARDINALITY_MIN, _CARDINALITY_MAX], "actual": n},
-        )
-
-    # Chapter comes from the static frozen map -> should always resolve; a non-empty
-    # result means a category fell outside every ICD-9 chapter range (anomaly).
-    unmapped_chapters = icd9cm.find_unmapped_categories(nodes)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="icd9_chapter_resolved",
-        category=DQCategory.REFERENTIAL,
-        severity=DQSeverity.WARN,
-        passed=not unmapped_chapters,
-        failing_row_count=len(unmapped_chapters),
-        total_row_count=total,
-        details={"unmapped_categories": unmapped_chapters[:30]} if unmapped_chapters else None,
-    )
-
-    # Block comes from Appendix E -> categories absent from DC_3D have a null block.
-    unmapped_blocks = icd9cm.find_unmapped_blocks(nodes)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="icd9_block_resolved",
-        category=DQCategory.REFERENTIAL,
-        severity=DQSeverity.WARN,
-        passed=not unmapped_blocks,
-        failing_row_count=len(unmapped_blocks),
-        total_row_count=total,
-        details={"unmapped_blocks": unmapped_blocks[:30]} if unmapped_blocks else None,
-    )
-
-    orphans = icd9cm.find_orphan_codes(nodes)
-    ctx.recorder.record(
-        table_name=table,
-        check_name="icd9_parent_resolved",
-        category=DQCategory.REFERENTIAL,
-        severity=DQSeverity.WARN,
-        passed=not orphans,
-        failing_row_count=len(orphans),
-        total_row_count=total,
-        details={"sample_orphans": orphans[:20]} if orphans else None,
-    )
-
-    # V/E share sanity (INFO): both supplementary classifications should be present.
-    v_count = sum(1 for r in records if icd9cm.code_class(r.icd9cm_code) == "V")
-    e_count = sum(1 for r in records if icd9cm.code_class(r.icd9cm_code) == "E")
-    ctx.recorder.record(
-        table_name=table,
-        check_name="icd9_ve_code_share",
-        category=DQCategory.CARDINALITY,
-        severity=DQSeverity.WARN,
-        passed=v_count > 0 and e_count > 0,
-        total_row_count=total,
-        details={"v_codes": v_count, "e_codes": e_count, "editions": stats},
-    )
-
-    failures: list[str] = []
-    if dup_keys:
-        failures.append(f"duplicate (icd9cm_code, edition_year): {dup_keys[:5]}")
-    if missing_desc:
-        failures.append(f"null description: {missing_desc[:5]}")
-    if bad_format:
-        failures.append(f"malformed icd9cm_code: {bad_format[:5]}")
-    if dangling:
-        failures.append(f"parent not in edition: {dangling[:5]}")
-    if failures:
-        raise ValueError("ICD-9-CM blocking DQ failed -- " + "; ".join(failures))
-
-
-# ---------------------------------------------------------------------------
-# Write (per-edition replace; full_refresh per edition, ADR 0024)
-# ---------------------------------------------------------------------------
-
-
-def _table_has_column(spark: SparkSession, full: str, column: str) -> bool:
-    if not spark.catalog.tableExists(full):
-        return False
-    return column in {f.name for f in spark.table(full).schema.fields}
-
-
-def _write_table(
-    spark: SparkSession, catalog: str, rows: list[dict[str, Any]], edition_years: list[int]
-) -> None:
-    full = f"{catalog}.{SCHEMA}.{TABLE}"
-    df = spark.createDataFrame(rows, schema=ICD9_SPARK_SCHEMA).sort("edition_year", "icd9cm_code")
-    if _table_has_column(spark, full, "edition_year"):
-        years_sql = ", ".join(str(y) for y in edition_years)
-        spark.sql(f"DELETE FROM {full} WHERE edition_year IN ({years_sql})")
-        df.write.option("mergeSchema", "true").mode("append").saveAsTable(full)
-    else:
-        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full)
-    log.info("Wrote codes.icd9cm", extra={"rows": len(rows), "editions": edition_years})
-
-
-def _comment_table(spark: SparkSession, catalog: str) -> None:
-    spark.sql(
-        f"COMMENT ON TABLE {catalog}.{SCHEMA}.{TABLE} IS "
-        f"'ICD-9-CM diagnosis code system (NCHS, frozen through 2015-09-30) with classification "
-        f"hierarchy (parent_icd9cm_code, ancestor_codes, chapter/block). One row per code per "
-        f"annual edition; PK (icd9cm_code, edition_year). Mirrors codes.icd10cm (ADR 0030/0031). "
-        f"Reference table; full_refresh per edition.'"
-    )
-
-
-def _register(spark: SparkSession, catalog: str, edition_years: list[int]) -> None:
-    full = f"{catalog}.{SCHEMA}.{TABLE}"
-    cov_start = date(min(edition_years) - 1, 10, 1)  # FY effective Oct 1 of the prior year
-    cov_end = date(max(edition_years), 9, 30)
-    derived_from = [icd9cm.dtab_zip_url(y) for y in edition_years] + [
-        icd9cm.appendix_zip_url(y) for y in edition_years
-    ]
-    registration.register_dataset(
-        spark,
-        catalog,
-        registration.DatasetCatalogEntry(
-            full_table_name=full,
-            subject=SCHEMA,
-            layer="reference",
-            description=(
-                "ICD-9-CM (Clinical Modification) diagnosis code system from NCHS, with the "
-                "classification hierarchy (parent_icd9cm_code, ancestor_codes, node_level, "
-                "chapter/block). One row per code per fiscal-year edition; includes the V and "
-                "E supplementary classifications. PK (icd9cm_code, edition_year)."
-            ),
-            public_health_relevance=(
-                "Canonical diagnosis-code standard for U.S. surveillance/clinical data coded "
-                "before the 2015-10-01 ICD-10 transition; mirrors codes.icd10cm's hierarchy so "
-                "pre/post-2015 data can be rolled up the same way (the GEM crosswalk bridges "
-                "the two code sets in a separate table)."
-            ),
-            spatial_resolution="none",
-            spatial_coverage="United States",
-            source_provider_code="cdc",
-            source_url=icd9cm.SOURCE_LANDING_URL,
-            source_documentation_url=icd9cm.SOURCE_LANDING_URL,
-            license="public domain (U.S. Government work, 17 U.S.C. 105)",
-            dua_required=False,
-            dua_reference="No DUA. NCHS ICD-9-CM files are public domain.",
-            access_tier="open",
-            external_maintainer_name="National Center for Health Statistics (NCHS), CDC",
-            is_hosted=True,
-            source_data_dictionary_url=icd9cm.readme_url(max(edition_years)),
-            temporal_coverage_start=cov_start,
-            temporal_coverage_end=cov_end,
-            temporal_resolution="annual",
-            known_limitations=(
-                "ICD-9-CM diagnosis codes only (no Volume 3 procedures, no GEM crosswalk). "
-                "Frozen: final edition FY2014, valid through 2015-09-30; no mid-year updates "
-                "and no 7th-character concept. is_billable is leaf-of-set (highest-specificity "
-                "rule). Chapter/block come from Appendix E; V/E classifications may be sourced "
-                "separately if Appendix E does not enumerate them (ADR 0031)."
-            ),
-            derived_from=derived_from,
-        ),
-        registration.DatasetEngineeringEntry(
-            full_table_name=full,
-            update_semantics="full_refresh",
-            materialization_type="table",
-            cluster_columns=["edition_year", "icd9cm_code"],
-            pipeline_reference=PIPELINE_REF,
-        ),
-    )
 
 
 def run(
-    catalog: str,
+    source_catalog: str,
+    model_catalog: str,
     edition_years: list[int],
     data_engineers_group: str,
     analysts_group: str,
     hierarchy: str = "build",
 ) -> None:
     editions = sorted(set(edition_years))
+    raw_fqn = f"{source_catalog}.{RAW_SCHEMA}.{TABLE}"
+    stash: dict[int, dict[str, Any]] = {}
 
-    records: list[icd9cm.Icd9Record] = []
-    nodes: list[icd9cm.Icd9Node] = []
-    source_by_key: dict[tuple[str, int], str] = {}
-    stats: dict[int, dict[str, Any]] = {}
-    for year in editions:
-        dtab_url = icd9cm.dtab_zip_url(year)
-        log.info("Downloading DTAB", extra={"edition_year": year, "url": dtab_url})
-        dtab_text, dtab_member = _fetch_rtf_text(dtab_url, icd9cm.select_dtab_member)
-        edition_records = icd9cm.assemble_records(icd9cm.parse_dtab(dtab_text), year)
+    def _fetch(v: int, volume_dir: str) -> None:
+        d = Path(volume_dir)
+        log.info("Fetching DTAB", extra={"edition_year": v})
+        (d / _DTAB_ZIP).write_bytes(_download_zip(icd9cm.dtab_zip_url(v)))
+        if hierarchy != "skip":
+            log.info("Fetching Appendix E", extra={"edition_year": v})
+            (d / _APPENDIX_ZIP).write_bytes(_download_zip(icd9cm.appendix_zip_url(v)))
+
+    def _read(ctx: BuildContext, v: int, volume_dir: str) -> Any:
+        d = Path(volume_dir)
+        dtab_text, dtab_member = _rtf_member_text(
+            (d / _DTAB_ZIP).read_bytes(), icd9cm.select_dtab_member
+        )
+        records = icd9cm.assemble_records(icd9cm.parse_dtab(dtab_text), v)
 
         category_map: dict[str, tuple[str, str]] = {}
         appendix_member: str | None = None
-        if hierarchy != "skip":
-            apx_url = icd9cm.appendix_zip_url(year)
-            log.info("Downloading Appendix E", extra={"edition_year": year, "url": apx_url})
-            apx_text, appendix_member = _fetch_rtf_text(apx_url, icd9cm.select_appendix_e_member)
-            category_map = icd9cm.parse_appendix_e(apx_text)
-            # Diagnostic: blocks come from Appendix E, whose real RTF->text shape we
-            # confirm here. Logs the first non-empty lines + parse yield so the block
-            # parser can be tuned to the actual layout (temporary; remove once stable).
-            apx_sample = [ln for ln in apx_text.splitlines() if ln.strip()][:30]
-            log.info(
-                "Appendix-E sample",
-                extra={
-                    "edition_year": year,
-                    "member": appendix_member,
-                    "categories_mapped": len(category_map),
-                    "first_lines": apx_sample,
-                },
+        if (d / _APPENDIX_ZIP).exists():
+            apx_text, appendix_member = _rtf_member_text(
+                (d / _APPENDIX_ZIP).read_bytes(), icd9cm.select_appendix_e_member
             )
+            category_map = icd9cm.parse_appendix_e(apx_text)
 
-        edition_nodes = icd9cm.build_hierarchy(edition_records, category_map)
+        nodes = icd9cm.build_hierarchy(records, category_map)
         src = dtab_member + (f" + {appendix_member}" if appendix_member else "")
-        for n in edition_nodes:
-            source_by_key[(n.icd9cm_code, year)] = src
-        records.extend(edition_records)
-        nodes.extend(edition_nodes)
-        stats[year] = {
-            "dtab_member": dtab_member,
-            "appendix_member": appendix_member,
-            "records": len(edition_records),
-            "billable": sum(1 for r in edition_records if r.is_billable),
-            "unmapped_categories": len(icd9cm.find_unmapped_categories(edition_nodes)),
-            "unmapped_blocks": len(icd9cm.find_unmapped_blocks(edition_nodes)),
+        stash[v] = {
+            "records": records, "nodes": nodes,
+            "stats": {
+                "dtab_member": dtab_member, "appendix_member": appendix_member,
+                "records": len(records),
+                "billable": sum(1 for r in records if r.is_billable),
+                "unmapped_categories": len(icd9cm.find_unmapped_categories(nodes)),
+                "unmapped_blocks": len(icd9cm.find_unmapped_blocks(nodes)),
+            },
         }
-        log.info("Built edition", extra={"edition_year": year, **stats[year]})
+        log.info("Built ICD-9-CM edition", extra={"edition_year": v, **stash[v]["stats"]})
 
-    def _ensure(spark: SparkSession) -> None:
-        spark.sql(
-            f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA} "
-            f"COMMENT 'Canonical clinical/terminology code systems (ICD-10-CM, ICD-9-CM, ...). "
-            f"Owned by the _reference bundle. See ADR 0014.'"
-        )
-
-    def _work(ctx: BuildContext) -> None:
-        _dq_checks(ctx, records, nodes, editions, stats)
         now = datetime.now(tz=UTC)
         rows = [
             {
@@ -424,51 +250,176 @@ def run(
                 "chapter_name": n.chapter_name,
                 "block_code": n.block_code,
                 "block_name": n.block_name,
-                "source_file": source_by_key[(n.icd9cm_code, n.edition_year)],
+                "source_file": src,
                 "ingested_at": now,
             }
             for n in nodes
         ]
-        _write_table(ctx.spark, catalog, rows, editions)
-        _comment_table(ctx.spark, catalog)
+        return ctx.spark.createDataFrame(rows, ICD9_SPARK_SCHEMA).sort("edition_year", "icd9cm_code")
 
-    def _grant(spark: SparkSession) -> None:
-        grants.grant_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-        grants.grant_schema_reader(spark, catalog, SCHEMA, analysts_group)
-        grants.verify_schema_reader(spark, catalog, SCHEMA, data_engineers_group)
-        grants.verify_schema_reader(spark, catalog, SCHEMA, analysts_group)
+    def _ensure_staging(sp: SparkSession) -> None:
+        sp.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {source_catalog}.{RAW_SCHEMA} "
+            f"COMMENT 'Raw, fetched-as-is source landings for the codes subject (clinical/"
+            f"terminology code systems). Engineer-owned; canonicals promote to model codes. ADR 0037.'"
+        )
+        sp.sql(f"CREATE TABLE IF NOT EXISTS {raw_fqn} ({_DDL}) USING DELTA")
 
-    run_build(
-        catalog=catalog,
+    def _ensure_canonical(sp: SparkSession) -> None:
+        sp.sql(
+            f"CREATE SCHEMA IF NOT EXISTS {model_catalog}.{MODEL_SCHEMA} "
+            f"COMMENT 'Canonical clinical/terminology code systems (ICD-10-CM, ICD-9-CM, CVX, NDC, "
+            f"LOINC, SNOMED CT, RxNorm, ...). Owned by the _reference bundle. See ADR 0014.'"
+        )
+        sp.sql(
+            f"CREATE TABLE IF NOT EXISTS {model_catalog}.{MODEL_SCHEMA}.{TABLE} ({_DDL}) USING DELTA"
+        )
+
+    def _promote(ctx: BuildContext, v: int) -> Any:
+        return ctx.spark.sql(
+            f"SELECT * FROM {raw_fqn} WHERE edition_year = {int(v)}"
+        ).sort("edition_year", "icd9cm_code")
+
+    def _validate(ctx: BuildContext, staging_fqn: str) -> None:
+        record_table = f"{MODEL_SCHEMA}.{TABLE}"
+        records = [r for e in stash.values() for r in e["records"]]
+        nodes = [n for e in stash.values() for n in e["nodes"]]
+        editions_present = sorted(stash)
+        stats = {y: stash[y]["stats"] for y in editions_present}
+        total = len(records)
+        failures: list[str] = []
+
+        dq = make_staging_dq(ctx, staging_fqn, record_table=record_table)
+        if not dq.unique(keys=["icd9cm_code", "edition_year"],
+                         check_name="icd9cm_code_edition_year_uniqueness", raise_on_fail=False):
+            failures.append("duplicate (icd9cm_code, edition_year)")
+
+        missing_desc = icd9cm.find_missing_descriptions(records)
+        _record(ctx, record_table, "icd9_description_not_null", DQCategory.NULLABILITY,
+                not missing_desc, len(missing_desc), total,
+                {"sample": [list(k) for k in missing_desc[:10]]} if missing_desc else None)
+        if missing_desc:
+            failures.append(f"null description: {missing_desc[:5]}")
+
+        bad_format = icd9cm.find_format_violations(records)
+        _record(ctx, record_table, "icd9cm_code_format", DQCategory.BUSINESS_RULE,
+                not bad_format, len(bad_format), total,
+                {"sample": bad_format[:10]} if bad_format else None)
+        if bad_format:
+            failures.append(f"malformed icd9cm_code: {bad_format[:5]}")
+
+        dangling = icd9cm.find_dangling_parents(nodes)
+        _record(ctx, record_table, "icd9_parent_referential_integrity", DQCategory.REFERENTIAL,
+                not dangling, len(dangling), total, {"sample": dangling[:10]} if dangling else None)
+        if dangling:
+            failures.append(f"parent not in edition: {dangling[:5]}")
+
+        # --- WARN / INFO ---
+        for year in editions_present:
+            n = sum(1 for r in records if r.edition_year == year)
+            ok = _CARDINALITY_MIN <= n <= _CARDINALITY_MAX
+            _record(ctx, record_table, f"icd9_cardinality_{year}", DQCategory.CARDINALITY,
+                    ok, 0 if ok else 1, n,
+                    {"expected_range": [_CARDINALITY_MIN, _CARDINALITY_MAX], "actual": n},
+                    severity=DQSeverity.WARN)
+
+        unmapped_chapters = icd9cm.find_unmapped_categories(nodes)
+        _record(ctx, record_table, "icd9_chapter_resolved", DQCategory.REFERENTIAL,
+                not unmapped_chapters, len(unmapped_chapters), total,
+                {"unmapped_categories": unmapped_chapters[:30]} if unmapped_chapters else None,
+                severity=DQSeverity.WARN)
+        unmapped_blocks = icd9cm.find_unmapped_blocks(nodes)
+        _record(ctx, record_table, "icd9_block_resolved", DQCategory.REFERENTIAL,
+                not unmapped_blocks, len(unmapped_blocks), total,
+                {"unmapped_blocks": unmapped_blocks[:30]} if unmapped_blocks else None,
+                severity=DQSeverity.WARN)
+        orphans = icd9cm.find_orphan_codes(nodes)
+        _record(ctx, record_table, "icd9_parent_resolved", DQCategory.REFERENTIAL,
+                not orphans, len(orphans), total,
+                {"sample_orphans": orphans[:20]} if orphans else None, severity=DQSeverity.WARN)
+
+        v_count = sum(1 for r in records if icd9cm.code_class(r.icd9cm_code) == "V")
+        e_count = sum(1 for r in records if icd9cm.code_class(r.icd9cm_code) == "E")
+        _record(ctx, record_table, "icd9_ve_code_share", DQCategory.CARDINALITY,
+                v_count > 0 and e_count > 0, 0, total,
+                {"v_codes": v_count, "e_codes": e_count, "editions": stats},
+                severity=DQSeverity.WARN)
+
+        if failures:
+            raise ValueError("ICD-9-CM blocking DQ failed -- " + "; ".join(failures))
+
+    spec = ReferenceBuildSpec(
+        subject=SUBJECT,
+        source_catalog=source_catalog,
+        model_catalog=model_catalog,
         pipeline_reference=PIPELINE_REF,
-        ensure=_ensure,
-        work=_work,
-        register=lambda spark: _register(spark, catalog, editions),
-        grant=_grant,
+        reader_groups=(data_engineers_group, analysts_group),
+        engineer_group=data_engineers_group,
+        base_catalog_entry=_base_entry(editions),
+        vintage_column="edition_year",
+        raw_landings=[
+            RawLanding(
+                table=TABLE,
+                landing_retention=LandingRetention.PER_VINTAGE_IMMUTABLE,
+                fetch_to_volume=_fetch,
+                read_from_volume=_read,
+                description=(
+                    "Raw NCHS ICD-9-CM per-edition payloads (DTAB tabular list + Appendix-E RTF "
+                    "zips), fetched-as-is, edition-stamped. Volume-landed verbatim, then de-RTF'd, "
+                    "parsed, and hierarchy-built. Promoted to codes.icd9cm."
+                ),
+            ),
+        ],
+        outputs=[
+            CanonicalOutput(
+                canonical_table=TABLE,
+                reads=(TABLE,),
+                promote=_promote,
+                validate_staging=_validate,
+                description=_DESC,
+                public_health_relevance=_PHR,
+                canonical_cluster_columns=["edition_year", "icd9cm_code"],
+            ),
+        ],
+        ensure_staging=_ensure_staging,
+        ensure_canonical=_ensure_canonical,
+        update_semantics="vintage_snapshot",
+    )
+    build_reference(spec, vintages=tuple(editions))
+    log.info("ICD-9-CM build complete", extra={"editions": editions})
+
+
+def _record(
+    ctx: BuildContext, table: str, check_name: str, category: DQCategory, passed: bool,
+    failing: int, total: int, details: dict[str, Any] | None, *,
+    severity: DQSeverity = DQSeverity.FAIL,
+) -> None:
+    """Thin wrapper over ``ctx.recorder.record`` to keep the check lists readable."""
+    ctx.recorder.record(
+        table_name=table, check_name=check_name, category=category, severity=severity,
+        passed=passed, failing_row_count=failing, total_row_count=total, details=details,
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--catalog", required=True, help="Integrated catalog (ecdh_model_<env>).")
+    parser.add_argument("--source-catalog", required=True, help="Source catalog for raw (ecdh_<env>).")
+    parser.add_argument("--model-catalog", required=True,
+                        help="Model catalog for canonical (ecdh_model_<env>).")
     parser.add_argument(
-        "--edition-year",
-        type=int,
-        nargs="+",
-        default=[2012],
+        "--edition-year", type=int, nargs="+", default=[2012],
         help="ICD-9-CM fiscal-year edition(s). Default: 2012 (latest full RTF release; dir 2011).",
     )
     parser.add_argument(
-        "--hierarchy",
-        choices=["build", "skip"],
-        default="build",
+        "--hierarchy", choices=["build", "skip"], default="build",
         help="'build' (default) downloads Appendix E for chapter/block; 'skip' leaves them null.",
     )
     parser.add_argument("--data-engineers-group", default="ecdh-data-engineers")
     parser.add_argument("--analysts-group", default="ecdh-analysts")
     args = parser.parse_args()
     run(
-        args.catalog,
+        args.source_catalog,
+        args.model_catalog,
         args.edition_year,
         args.data_engineers_group,
         args.analysts_group,
