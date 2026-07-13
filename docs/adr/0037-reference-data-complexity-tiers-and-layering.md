@@ -164,6 +164,34 @@ first — it builds the ADR 0036 builder — but note it is **not greenfield**: 
 + the cutover note above), since block-group/block enrich from their parents same-catalog. Then the
 ICD-10-CM relayer reuses the builder.
 
+## Applied — codes backport wave 2 (CVX + NDC, revise-in-place)
+Following wave 1 (ICD-10-PCS + ICD-9 Procedures, a separate PR), the two ADR-0032 **revise-in-place**
+code sets are folded onto `build_reference`: `codes.cvx` and `codes.ndc_product` / `codes.ndc_package`.
+Each now lands its verbatim payload (CVX XML-new; the FDA `ndctext.zip`) in the source-catalog Volume
+`ecdh_<env>.codes_raw._landing`, parses into the 1:1 raw table(s) `codes_raw.*`, and promotes the
+canonical `codes.*` from raw. NDC's two tables share one `ndctext.zip` landing via a shared
+`volume_key` (fetched once, read twice). The old **model-catalog** raw Volumes (`codes.cvx_raw`,
+`codes.ndc_raw`) are relocated to the source-catalog landing Volume; runbook:
+`docs/runbooks/relocate-cvx-ndc-volumes.sql`. The `_current` views are dropped (ADR 0034).
+
+**Builder generalization (enabling change).** Revise-in-place keys on `snapshot_date` (a `date`), and
+the later authenticated waves key on string versions (`loinc_version`, `rxnorm_version`,
+`snomed_version`), but `build_reference` previously assumed an **integer** vintage (`int(vintage)` in
+the `replaceWhere` predicate and the landing path). The builder is generalized to
+`Vintage = int | date | str`: the per-vintage predicate literal is now rendered per type
+(`_vintage_sql_literal`: bare int, `DATE'…'`, or a quoted/escaped string) and the landing-dir token
+per type (`_vintage_path_token`). Fully backward-compatible — integer vintages render exactly as
+before (verified by the existing geography/ICD builds and new unit tests). This extends ADR 0036 and
+unblocks the rest of the epic.
+
+**ADR 0032 semantics preserved.** Revise-in-place maps to `vintage_column="snapshot_date"` with the
+raw landing `PER_VINTAGE_IMMUTABLE` **keyed by the snapshot_date** (one immutable dated payload per
+snapshot; same-day re-run skips the fetch; `--snapshot-date` reproduces a past dated payload). This is
+a deliberate refinement of the issue's `SNAPSHOT_PER_RUN` suggestion: keying the landing dir by the
+snapshot_date (rather than the run date) keeps the dir key == the write predicate == the snapshot_date
+and preserves reproduce-by-date, which run-date keying would lose. Per-snapshot atomic `replaceWhere`
+retains prior snapshots exactly as the old `snapshot_replace` did; canonical schemas + rows unchanged.
+
 ## Applied — codes backport wave 1 (ICD-10-PCS + ICD-9 Procedures)
 The `codes` subject's model-only medical-code builds are being folded onto `build_reference` the same
 way RUCA was (ADR 0038 delta 6). **Wave 1 (this change):** the two flat, public, single-payload

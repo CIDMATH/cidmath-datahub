@@ -2,16 +2,17 @@
 # (ADR 0014, ADR 0032).
 #
 # Fetches the FDA NDC Directory "Text Version" (ndctext.zip -> product.txt +
-# package.txt), writes the zip verbatim to an immutable date-stamped file on the
-# codes.ndc_raw UC Volume, and writes ecdh_model_<env>.codes.ndc_product and
-# codes.ndc_package keyed by snapshot_date using snapshot_replace (every snapshot
-# retained; ADR 0032). Parses/normalizes/validates via cidmath_datahub.reference.ndc
-# (10->11-digit NDC padding is the core logic). Also (re)creates the *_current views.
+# package.txt). Folded onto the shared build_reference builder (ADR 0037): the one
+# ndctext.zip lands verbatim in the source-catalog Volume ecdh_<env>.codes_raw._landing
+# (immutable, keyed by snapshot_date; ADR 0039) and backs both raw tables
+# (codes_raw.ndc_product + codes_raw.ndc_package) via a shared volume_key; the canonicals
+# ecdh_model_<env>.codes.ndc_{product,package} are promoted from raw keyed by snapshot_date
+# with per-snapshot atomic replaceWhere (vintage_snapshot; ADR 0034). The old model-catalog
+# codes.ndc_raw Volume is relocated here; see the wave-2 relocation runbook.
 #
-# Thin entrypoint over the run_build seam (ADR 0027). NDC is revised in place, so
-# history is preserved by us: raw Volume snapshot + in-table snapshot_date tracking.
-# The source's marketing dates already encode real-world validity, so quarterly
-# snapshots suffice (no SCD2). snapshot_date defaults to the run date.
+# NDC is revised in place, so history is preserved: immutable raw Volume snapshot +
+# in-table snapshot_date tracking. The source's marketing dates already encode real-world
+# validity, so quarterly snapshots suffice (no SCD2). snapshot_date defaults to the run date.
 #
 # Scheduled quarterly (06:00 ET on the 1st of Jan/Apr/Jul/Oct). Re-running the same
 # day is idempotent: the immutable Volume file is not overwritten and
@@ -41,7 +42,9 @@ resources:
           spark_python_task:
             python_file: ../src/build_ndc.py
             parameters:
-              - "--catalog"
+              - "--source-catalog"
+              - "${var.source_catalog}"
+              - "--model-catalog"
               - "${var.model_catalog}"
               - "--data-engineers-group"
               - "${var.data_engineers_group}"

@@ -46,10 +46,11 @@ Conventions baked in so adopters can't drift:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -66,12 +67,19 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# A vintage key. Integer for decennial/edition builds (``vintage``, ``edition_year``); a ``date``
+# for revise-in-place snapshot builds (``snapshot_date``, CVX/NDC; ADR 0032); a ``str`` for
+# release-versioned builds (``loinc_version``, ``rxnorm_version``, ``snomed_version``). The builder
+# treats it opaquely except when forming the ``replaceWhere`` predicate and the landing path, where
+# it is rendered type-appropriately (see ``_vintage_sql_literal`` / ``_vintage_path_token``).
+Vintage = int | date | str
+
 # Hook type aliases.
 EnsureFn = Callable[["SparkSession"], None]
-PerVintageFrameFn = Callable[[BuildContext, int], "DataFrame"]
+PerVintageFrameFn = Callable[[BuildContext, Vintage], "DataFrame"]
 ValidateFn = Callable[[BuildContext, str], None]
-FetchToVolumeFn = Callable[[int, str], None]  # (vintage, volume_dir) -> writes payload files
-ReadFromVolumeFn = Callable[[BuildContext, int, str], "DataFrame"]  # (ctx, vintage, volume_dir)
+FetchToVolumeFn = Callable[[Vintage, str], None]  # (vintage, volume_dir) -> writes payload files
+ReadFromVolumeFn = Callable[[BuildContext, Vintage, str], "DataFrame"]  # (ctx, vintage, volume_dir)
 
 
 class LandingRetention(StrEnum):
@@ -279,7 +287,7 @@ class ReferenceBuildSpec:
 def build_reference(
     spec: ReferenceBuildSpec,
     *,
-    vintages: Sequence[int] = (),
+    vintages: Sequence[Vintage] = (),
     spark: SparkSession | None = None,
 ) -> tuple[str, str]:
     """Run a reference build through the two-phase path; return ``(phase_a, phase_b)`` run ids.
@@ -512,8 +520,33 @@ def _landing_volume(spec: ReferenceBuildSpec) -> str:
     return f"{spec.source_catalog}.{spec.raw_schema}._landing"
 
 
+def _vintage_sql_literal(vintage: Vintage) -> str:
+    """Render a vintage as a SQL literal for the per-vintage ``replaceWhere`` predicate.
+
+    Integers are bare (``2020``); ``date`` becomes ``DATE'2026-07-13'``; strings are single-quoted
+    with embedded quotes doubled (``'2024AB'``). This keeps the atomic per-vintage swap correct for
+    int / date / str vintage columns — int editions (ADR 0034), snapshot_date (ADR 0032), and
+    release versions (LOINC/RxNorm/SNOMED). ``date`` is checked before ``int`` deliberately.
+    """
+    if isinstance(vintage, date):
+        return f"DATE'{vintage.isoformat()}'"
+    if isinstance(vintage, int):
+        return str(vintage)
+    return "'" + str(vintage).replace("'", "''") + "'"
+
+
+def _vintage_path_token(vintage: Vintage) -> str:
+    """Render a vintage as a filesystem-safe token for the landing-Volume dir.
+
+    ``2020`` -> ``2020``; ``date(2026,7,13)`` -> ``2026-07-13``; a string version is used as-is with
+    path-unsafe characters replaced by ``_``. Keeps one dir per vintage regardless of key type.
+    """
+    token = vintage.isoformat() if isinstance(vintage, date) else str(vintage)
+    return re.sub(r"[^A-Za-z0-9._-]", "_", token)
+
+
 def _landing_volume_dir(
-    spec: ReferenceBuildSpec, landing: RawLanding, vintage: int, run_date: str
+    spec: ReferenceBuildSpec, landing: RawLanding, vintage: Vintage, run_date: str
 ) -> str:
     """Filesystem path (under the landing Volume) for one landing's payload (ADR 0039).
 
@@ -522,11 +555,11 @@ def _landing_volume_dir(
     """
     root = f"/Volumes/{spec.source_catalog}/{spec.raw_schema}/_landing/{landing.payload_key}"
     if landing.landing_retention == LandingRetention.PER_VINTAGE_IMMUTABLE:
-        return f"{root}/vintage={int(vintage)}"
+        return f"{root}/vintage={_vintage_path_token(vintage)}"
     if landing.landing_retention == LandingRetention.SNAPSHOT_PER_RUN:
         return f"{root}/snapshot_date={run_date}"
     # PER_BATCH: use the vintage as the batch-window key for now (not yet exercised).
-    return f"{root}/batch={int(vintage)}"
+    return f"{root}/batch={_vintage_path_token(vintage)}"
 
 
 # Written as the LAST step of a successful fetch; its presence means the payload is
@@ -558,7 +591,7 @@ def _mark_fetch_complete(path: str) -> None:
 def _ensure_and_fetch_volume(
     spec: ReferenceBuildSpec,
     spark: SparkSession,
-    vintages: Sequence[int],
+    vintages: Sequence[Vintage],
     run_date: str,
 ) -> None:
     """Phase 0: create the landing Volume and fetch each payload into it (ADR 0039).
@@ -613,7 +646,7 @@ def _write_vintage(
     full_table_name: str,
     df: DataFrame,
     vintage_column: str,
-    vintage: int,
+    vintage: Vintage,
 ) -> None:
     """Atomically replace exactly the rows for ``vintage`` (ADR 0034 vintage_snapshot).
 
@@ -622,10 +655,11 @@ def _write_vintage(
     The target table is created on first write if absent, but callers should
     ``ensure`` it first so schema/clustering are explicit. Per-vintage writes are
     also the chunking boundary for large grains (block ~8M rows/vintage, ADR 0020) —
-    each vintage is one Spark job, nothing accumulates on the driver. ``vintage`` is
-    integer-valued; a composite/string vintage key would extend the predicate here.
+    each vintage is one Spark job, nothing accumulates on the driver. ``vintage`` may
+    be an int, a ``date`` (snapshot_date; ADR 0032), or a ``str`` release version; the
+    predicate literal is rendered per type by :func:`_vintage_sql_literal`.
     """
-    predicate = f"{vintage_column} = {int(vintage)}"
+    predicate = f"{vintage_column} = {_vintage_sql_literal(vintage)}"
     (
         df.write.format("delta")
         .mode("overwrite")
